@@ -1,0 +1,50 @@
+{
+  "name": "@drarzter/kafka-client",
+  "version": "0.1.0",
+  "description": "Type-safe Kafka client wrapper for NestJS with typed topic-message maps",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "kafka",
+    "kafkajs",
+    "nestjs",
+    "typescript",
+    "typed-kafka",
+    "kafka-client"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/drarzter/kafka-client"
+  },
+  "scripts": {
+    "build": "tsup",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "kafkajs": "^2.2.4"
+  },
+  "peerDependencies": {
+    "@nestjs/common": ">=10.0.0",
+    "reflect-metadata": ">=0.1.13",
+    "rxjs": ">=7.0.0"
+  },
+  "devDependencies": {
+    "@nestjs/common": "^11.1.6",
+    "reflect-metadata": "^0.2.0",
+    "rxjs": "^7.8.0",
+    "typescript": "^5.7.3",
+    "tsup": "^8.0.2"
+  }
+}
