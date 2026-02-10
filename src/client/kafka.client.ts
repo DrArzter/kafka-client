@@ -157,6 +157,7 @@ export class KafkaClient<
     this.producer = this.kafka.producer({
       createPartitioner: Partitioners.DefaultPartitioner,
       idempotent: true,
+      transactionalId: `${clientId}-tx`,
       maxInFlightRequests: 1,
     });
     this.consumer = this.kafka.consumer({ groupId });
