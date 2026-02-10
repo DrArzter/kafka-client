@@ -442,6 +442,24 @@ export class HealthService {
 }
 ```
 
+## Testing
+
+Unit tests (mocked kafkajs):
+
+```bash
+npm test
+```
+
+Integration tests with a real Kafka broker via [testcontainers](https://node.testcontainers.org/) (requires Docker):
+
+```bash
+npm run test:integration
+```
+
+The integration suite spins up a single-node KRaft Kafka container and tests sending, consuming, batching, transactions, retry + DLQ, interceptors, health checks, and `fromBeginning` — no mocks.
+
+Both suites run in CI on every push to `main`.
+
 ## Project structure
 
 ```

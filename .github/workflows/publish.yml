@@ -20,6 +20,8 @@ jobs:
 
       - run: npm run lint
 
+      - run: npm run test:integration
+
   publish:
     needs: test
     runs-on: ubuntu-latest

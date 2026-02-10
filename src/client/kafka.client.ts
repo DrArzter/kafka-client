@@ -359,10 +359,7 @@ export class KafkaClient<
   /** Gracefully disconnect producer, consumer, and admin. */
   public async disconnect(): Promise<void> {
     this.isConsumerRunning = false;
-    const tasks = [
-      this.producer.disconnect(),
-      this.consumer.disconnect(),
-    ];
+    const tasks = [this.producer.disconnect(), this.consumer.disconnect()];
     if (this.isAdminConnected) {
       tasks.push(this.admin.disconnect());
       this.isAdminConnected = false;
