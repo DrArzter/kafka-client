@@ -19,11 +19,15 @@ export interface KafkaModuleOptions {
   groupId: GroupId;
   /** List of Kafka broker addresses. */
   brokers: string[];
+  /** If true, makes KAFKA_CLIENT available globally without importing KafkaModule in every feature module. */
+  isGlobal?: boolean;
 }
 
 /** Async configuration for `KafkaModule.registerAsync()` with dependency injection. */
 export interface KafkaModuleAsyncOptions {
   name?: string;
+  /** If true, makes KAFKA_CLIENT available globally without importing KafkaModule in every feature module. */
+  isGlobal?: boolean;
   imports?: any[];
   useFactory: (
     ...args: any[]
@@ -65,6 +69,7 @@ export class KafkaModule {
     };
 
     return {
+      global: options.isGlobal ?? false,
       module: KafkaModule,
       imports: [DiscoveryModule],
       providers: [kafkaClientProvider, destroyProvider, KafkaExplorer],
@@ -102,6 +107,7 @@ export class KafkaModule {
     };
 
     return {
+      global: asyncOptions.isGlobal ?? false,
       module: KafkaModule,
       imports: [...(asyncOptions.imports || []), DiscoveryModule],
       providers: [kafkaClientProvider, destroyProvider, KafkaExplorer],

@@ -158,6 +158,37 @@ KafkaModule.registerAsync<OrdersTopicMap>({
 })
 ```
 
+#### Global module
+
+By default, `KafkaModule` is scoped — you need to import it in every module that uses `@InjectKafkaClient()`. Pass `isGlobal: true` to make the client available everywhere:
+
+```typescript
+// app.module.ts — register once
+KafkaModule.register<OrdersTopicMap>({
+  clientId: 'my-service',
+  groupId: 'my-consumer-group',
+  brokers: ['localhost:9092'],
+  isGlobal: true,
+})
+
+// any other module — no need to import KafkaModule
+@Injectable()
+export class SomeService {
+  constructor(@InjectKafkaClient() private readonly kafka: KafkaClient<OrdersTopicMap>) {}
+}
+```
+
+Works with `registerAsync()` too:
+
+```typescript
+KafkaModule.registerAsync<OrdersTopicMap>({
+  isGlobal: true,
+  imports: [ConfigModule],
+  inject: [ConfigService],
+  useFactory: (config: ConfigService) => ({ ... }),
+})
+```
+
 ### 3. Inject and use
 
 ```typescript

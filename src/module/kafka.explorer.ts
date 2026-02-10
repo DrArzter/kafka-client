@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit, Logger } from "@nestjs/common";
+import { Inject, Injectable, OnModuleInit, Logger } from "@nestjs/common";
 import { DiscoveryService, ModuleRef } from "@nestjs/core";
 import { KafkaClient } from "../client/kafka.client";
 import {
@@ -17,7 +17,9 @@ export class KafkaExplorer implements OnModuleInit {
   private readonly logger = new Logger(KafkaExplorer.name);
 
   constructor(
+    @Inject(DiscoveryService)
     private readonly discoveryService: DiscoveryService,
+    @Inject(ModuleRef)
     private readonly moduleRef: ModuleRef,
   ) {}
 
