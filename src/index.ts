@@ -1,5 +1,6 @@
-// packages/kafka-client/src/index.ts
-
-export * from './kafka.module';
-export * from './kafka.client';
-export * from './kafka.constants';
+export * from "./module/kafka.module";
+export * from "./client/kafka.client";
+export * from "./module/kafka.constants";
+export * from "./decorators/kafka.decorator";
+export * from "./module/kafka.explorer";
+export * from "./health/kafka.health";

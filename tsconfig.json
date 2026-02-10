@@ -10,9 +10,10 @@
     "moduleResolution": "node",
     "skipLibCheck": true,
     "strict": true,
-    "lib": ["ES2022"],
+    "lib": ["ES2023"],
+    "types": ["node"],
     "module": "commonjs",
-    "target": "ES2022",
+    "target": "ES2023",
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true
   },
