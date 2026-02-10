@@ -1,5 +1,5 @@
 import { Injectable } from "@nestjs/common";
-import { KafkaClient, TTopicMessageMap } from "../client/kafka.client";
+import { KafkaClient, TopicMapConstraint } from "../client/kafka.client";
 
 /** Result returned by `KafkaHealthIndicator.check()`. */
 export interface KafkaHealthResult {
@@ -12,7 +12,7 @@ export interface KafkaHealthResult {
 /** Health check service. Call `check(client)` to verify broker connectivity. */
 @Injectable()
 export class KafkaHealthIndicator {
-  async check<T extends TTopicMessageMap>(
+  async check<T extends TopicMapConstraint<T>>(
     client: KafkaClient<T>,
   ): Promise<KafkaHealthResult> {
     try {

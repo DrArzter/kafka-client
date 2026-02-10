@@ -41,9 +41,7 @@ Send and receive a message in 3 files:
 
 ```typescript
 // types.ts
-import { TTopicMessageMap } from '@drarzter/kafka-client';
-
-export interface MyTopics extends TTopicMessageMap {
+export interface MyTopics {
   'hello': { text: string };
 }
 ```
@@ -95,7 +93,10 @@ export class AppService {
 
 ### 1. Define your topic map
 
+Both `interface` and `type` work — pick whichever you prefer:
+
 ```typescript
+// Explicit: extends TTopicMessageMap — IDE hints that values must be Record<string, any>
 import { TTopicMessageMap } from '@drarzter/kafka-client';
 
 export interface OrdersTopicMap extends TTopicMessageMap {
@@ -109,6 +110,20 @@ export interface OrdersTopicMap extends TTopicMessageMap {
     completedAt: string;
   };
 }
+```
+
+```typescript
+// Minimal: plain interface or type — works just the same
+export interface OrdersTopicMap {
+  'order.created': { orderId: string; userId: string; amount: number };
+  'order.completed': { orderId: string; completedAt: string };
+}
+
+// or
+export type OrdersTopicMap = {
+  'order.created': { orderId: string; userId: string; amount: number };
+  'order.completed': { orderId: string; completedAt: string };
+};
 ```
 
 ### 2. Register the module

@@ -7,15 +7,27 @@ import { Logger } from "@nestjs/common";
  *
  * @example
  * ```ts
+ * // with explicit extends (IDE hints for values)
  * interface MyTopics extends TTopicMessageMap {
  *   "orders.created": { orderId: string; amount: number };
  *   "users.updated": { userId: string; name: string };
+ * }
+ *
+ * // or plain interface / type — works the same
+ * interface MyTopics {
+ *   "orders.created": { orderId: string; amount: number };
  * }
  * ```
  */
 export type TTopicMessageMap = {
   [topic: string]: Record<string, any>;
 };
+
+/**
+ * Generic constraint for topic-message maps.
+ * Works with both `type` aliases and `interface` declarations.
+ */
+export type TopicMapConstraint<T> = { [K in keyof T]: Record<string, any> };
 
 export type ClientId = string;
 export type GroupId = string;
@@ -32,7 +44,7 @@ export interface SendOptions {
 
 /** Options for configuring a Kafka consumer. */
 export interface ConsumerOptions<
-  T extends TTopicMessageMap = TTopicMessageMap,
+  T extends TopicMapConstraint<T> = TTopicMessageMap,
 > {
   /** Start reading from earliest offset. Default: `false`. */
   fromBeginning?: boolean;
@@ -59,7 +71,7 @@ export interface RetryOptions {
  * All methods are optional — implement only what you need.
  */
 export interface ConsumerInterceptor<
-  T extends TTopicMessageMap = TTopicMessageMap,
+  T extends TopicMapConstraint<T> = TTopicMessageMap,
 > {
   /** Called before the message handler. */
   before?(message: T[keyof T], topic: string): Promise<void> | void;
@@ -74,7 +86,7 @@ export interface ConsumerInterceptor<
 }
 
 /** Context passed to the `transaction()` callback with type-safe send methods. */
-export interface TransactionContext<T extends TTopicMessageMap> {
+export interface TransactionContext<T extends TopicMapConstraint<T>> {
   send<K extends keyof T>(
     topic: K,
     message: T[K],
@@ -87,7 +99,7 @@ export interface TransactionContext<T extends TTopicMessageMap> {
 }
 
 /** Interface describing all public methods of the Kafka client. */
-export interface IKafkaClient<T extends TTopicMessageMap> {
+export interface IKafkaClient<T extends TopicMapConstraint<T>> {
   checkStatus(): Promise<{ topics: string[] }>;
 
   startConsumer<K extends Array<keyof T>>(
@@ -123,7 +135,7 @@ export interface IKafkaClient<T extends TTopicMessageMap> {
  * @typeParam T - Topic-to-message type mapping for compile-time safety.
  */
 export class KafkaClient<
-  T extends TTopicMessageMap,
+  T extends TopicMapConstraint<T>,
 > implements IKafkaClient<T> {
   private readonly kafka: Kafka;
   private readonly producer: Producer;

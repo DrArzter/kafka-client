@@ -4,7 +4,7 @@ import {
   KafkaClient,
   ClientId,
   GroupId,
-  TTopicMessageMap,
+  TopicMapConstraint,
 } from "../client/kafka.client";
 import { getKafkaClientToken } from "./kafka.constants";
 import { KafkaExplorer } from "./kafka.explorer";
@@ -38,7 +38,7 @@ export interface KafkaModuleAsyncOptions {
 @Module({})
 export class KafkaModule {
   /** Register a Kafka client with static options. */
-  static register<T extends TTopicMessageMap>(
+  static register<T extends TopicMapConstraint<T>>(
     options: KafkaModuleOptions,
   ): DynamicModule {
     const token = getKafkaClientToken(options.name);
@@ -73,7 +73,7 @@ export class KafkaModule {
   }
 
   /** Register a Kafka client with async/factory-based options. */
-  static registerAsync<T extends TTopicMessageMap>(
+  static registerAsync<T extends TopicMapConstraint<T>>(
     asyncOptions: KafkaModuleAsyncOptions,
   ): DynamicModule {
     const token = getKafkaClientToken(asyncOptions.name);
