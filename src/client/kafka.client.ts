@@ -1,132 +1,21 @@
 import { Consumer, Kafka, Partitioners, Producer, Admin } from "kafkajs";
 import { Logger } from "@nestjs/common";
+import { TopicDescriptor } from "./topic";
+import { KafkaRetryExhaustedError } from "./errors";
+import type {
+  ClientId,
+  GroupId,
+  SendOptions,
+  MessageHeaders,
+  ConsumerOptions,
+  TransactionContext,
+  TopicMapConstraint,
+  IKafkaClient,
+  KafkaClientOptions,
+} from "./types";
 
-/**
- * Mapping of topic names to their message types.
- * Define this interface to get type-safe publish/subscribe across your app.
- *
- * @example
- * ```ts
- * // with explicit extends (IDE hints for values)
- * interface MyTopics extends TTopicMessageMap {
- *   "orders.created": { orderId: string; amount: number };
- *   "users.updated": { userId: string; name: string };
- * }
- *
- * // or plain interface / type — works the same
- * interface MyTopics {
- *   "orders.created": { orderId: string; amount: number };
- * }
- * ```
- */
-export type TTopicMessageMap = {
-  [topic: string]: Record<string, any>;
-};
-
-/**
- * Generic constraint for topic-message maps.
- * Works with both `type` aliases and `interface` declarations.
- */
-export type TopicMapConstraint<T> = { [K in keyof T]: Record<string, any> };
-
-export type ClientId = string;
-export type GroupId = string;
-
-export type MessageHeaders = Record<string, string>;
-
-/** Options for sending a single message. */
-export interface SendOptions {
-  /** Partition key for message routing. */
-  key?: string;
-  /** Custom headers attached to the message. */
-  headers?: MessageHeaders;
-}
-
-/** Options for configuring a Kafka consumer. */
-export interface ConsumerOptions<
-  T extends TopicMapConstraint<T> = TTopicMessageMap,
-> {
-  /** Start reading from earliest offset. Default: `false`. */
-  fromBeginning?: boolean;
-  /** Automatically commit offsets. Default: `true`. */
-  autoCommit?: boolean;
-  /** Retry policy for failed message processing. */
-  retry?: RetryOptions;
-  /** Send failed messages to a Dead Letter Queue (`<topic>.dlq`). */
-  dlq?: boolean;
-  /** Interceptors called before/after each message. */
-  interceptors?: ConsumerInterceptor<T>[];
-}
-
-/** Configuration for consumer retry behavior. */
-export interface RetryOptions {
-  /** Maximum number of retry attempts before giving up. */
-  maxRetries: number;
-  /** Base delay between retries in ms (multiplied by attempt number). Default: `1000`. */
-  backoffMs?: number;
-}
-
-/**
- * Interceptor hooks for consumer message processing.
- * All methods are optional — implement only what you need.
- */
-export interface ConsumerInterceptor<
-  T extends TopicMapConstraint<T> = TTopicMessageMap,
-> {
-  /** Called before the message handler. */
-  before?(message: T[keyof T], topic: string): Promise<void> | void;
-  /** Called after the message handler succeeds. */
-  after?(message: T[keyof T], topic: string): Promise<void> | void;
-  /** Called when the message handler throws. */
-  onError?(
-    message: T[keyof T],
-    topic: string,
-    error: Error,
-  ): Promise<void> | void;
-}
-
-/** Context passed to the `transaction()` callback with type-safe send methods. */
-export interface TransactionContext<T extends TopicMapConstraint<T>> {
-  send<K extends keyof T>(
-    topic: K,
-    message: T[K],
-    options?: SendOptions,
-  ): Promise<void>;
-  sendBatch<K extends keyof T>(
-    topic: K,
-    messages: Array<{ value: T[K]; key?: string; headers?: MessageHeaders }>,
-  ): Promise<void>;
-}
-
-/** Interface describing all public methods of the Kafka client. */
-export interface IKafkaClient<T extends TopicMapConstraint<T>> {
-  checkStatus(): Promise<{ topics: string[] }>;
-
-  startConsumer<K extends Array<keyof T>>(
-    topics: K,
-    handleMessage: (message: T[K[number]], topic: K[number]) => Promise<void>,
-    options?: ConsumerOptions<T>,
-  ): Promise<void>;
-
-  stopConsumer(): Promise<void>;
-
-  sendMessage<K extends keyof T>(
-    topic: K,
-    message: T[K],
-    options?: SendOptions,
-  ): Promise<void>;
-
-  sendBatch<K extends keyof T>(
-    topic: K,
-    messages: Array<{ value: T[K]; key?: string; headers?: MessageHeaders }>,
-  ): Promise<void>;
-
-  transaction(fn: (ctx: TransactionContext<T>) => Promise<void>): Promise<void>;
-
-  getClientId: () => ClientId;
-
-  disconnect(): Promise<void>;
-}
+// Re-export all types so existing `import { ... } from './kafka.client'` keeps working
+export * from "./types";
 
 /**
  * Type-safe Kafka client for NestJS.
@@ -134,21 +23,29 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
  *
  * @typeParam T - Topic-to-message type mapping for compile-time safety.
  */
-export class KafkaClient<
-  T extends TopicMapConstraint<T>,
-> implements IKafkaClient<T> {
+export class KafkaClient<T extends TopicMapConstraint<T>>
+  implements IKafkaClient<T>
+{
   private readonly kafka: Kafka;
   private readonly producer: Producer;
   private readonly consumer: Consumer;
   private readonly admin: Admin;
   private readonly logger: Logger;
-  private isConsumerRunning = false;
+  private readonly autoCreateTopicsEnabled: boolean;
+  private readonly ensuredTopics = new Set<string>();
+
   private isAdminConnected = false;
   public readonly clientId: ClientId;
 
-  constructor(clientId: ClientId, groupId: GroupId, brokers: string[]) {
+  constructor(
+    clientId: ClientId,
+    groupId: GroupId,
+    brokers: string[],
+    options?: KafkaClientOptions,
+  ) {
     this.clientId = clientId;
     this.logger = new Logger(`KafkaClient:${clientId}`);
+    this.autoCreateTopicsEnabled = options?.autoCreateTopics ?? false;
 
     this.kafka = new Kafka({
       clientId: this.clientId,
@@ -164,14 +61,48 @@ export class KafkaClient<
     this.admin = this.kafka.admin();
   }
 
-  /** Send a single typed message to a topic. */
+  private resolveTopicName(topicOrDescriptor: unknown): string {
+    if (typeof topicOrDescriptor === "string") return topicOrDescriptor;
+    if (
+      topicOrDescriptor &&
+      typeof topicOrDescriptor === "object" &&
+      "__topic" in topicOrDescriptor
+    ) {
+      return (topicOrDescriptor as TopicDescriptor).__topic;
+    }
+    return String(topicOrDescriptor);
+  }
+
+  private async ensureTopic(topic: string): Promise<void> {
+    if (!this.autoCreateTopicsEnabled || this.ensuredTopics.has(topic)) return;
+    if (!this.isAdminConnected) {
+      await this.admin.connect();
+      this.isAdminConnected = true;
+    }
+    await this.admin.createTopics({
+      topics: [{ topic, numPartitions: 1 }],
+    });
+    this.ensuredTopics.add(topic);
+  }
+
+  /** Send a single typed message. Accepts a topic key or a TopicDescriptor. */
+  public async sendMessage<
+    D extends TopicDescriptor<string & keyof T, T[string & keyof T]>,
+  >(descriptor: D, message: D["__type"], options?: SendOptions): Promise<void>;
   public async sendMessage<K extends keyof T>(
     topic: K,
     message: T[K],
+    options?: SendOptions,
+  ): Promise<void>;
+  public async sendMessage(
+    topicOrDesc: any,
+    message: any,
     options: SendOptions = {},
   ): Promise<void> {
+    const topic = this.resolveTopicName(topicOrDesc);
+    await this.ensureTopic(topic);
     await this.producer.send({
-      topic: topic as string,
+      topic,
       messages: [
         {
           value: JSON.stringify(message),
@@ -183,13 +114,29 @@ export class KafkaClient<
     });
   }
 
-  /** Send multiple typed messages to a topic in one call. */
+  /** Send multiple typed messages in one call. Accepts a topic key or a TopicDescriptor. */
+  public async sendBatch<
+    D extends TopicDescriptor<string & keyof T, T[string & keyof T]>,
+  >(
+    descriptor: D,
+    messages: Array<{
+      value: D["__type"];
+      key?: string;
+      headers?: MessageHeaders;
+    }>,
+  ): Promise<void>;
   public async sendBatch<K extends keyof T>(
     topic: K,
     messages: Array<{ value: T[K]; key?: string; headers?: MessageHeaders }>,
+  ): Promise<void>;
+  public async sendBatch(
+    topicOrDesc: any,
+    messages: Array<{ value: any; key?: string; headers?: MessageHeaders }>,
   ): Promise<void> {
+    const topic = this.resolveTopicName(topicOrDesc);
+    await this.ensureTopic(topic);
     await this.producer.send({
-      topic: topic as string,
+      topic,
       messages: messages.map((m) => ({
         value: JSON.stringify(m.value),
         key: m.key ?? null,
@@ -206,9 +153,15 @@ export class KafkaClient<
     const tx = await this.producer.transaction();
     try {
       const ctx: TransactionContext<T> = {
-        send: async (topic, message, options = {}) => {
+        send: async (
+          topicOrDesc: any,
+          message: any,
+          options: SendOptions = {},
+        ) => {
+          const topic = this.resolveTopicName(topicOrDesc);
+          await this.ensureTopic(topic);
           await tx.send({
-            topic: topic as string,
+            topic,
             messages: [
               {
                 value: JSON.stringify(message),
@@ -219,10 +172,12 @@ export class KafkaClient<
             acks: -1,
           });
         },
-        sendBatch: async (topic, messages) => {
+        sendBatch: async (topicOrDesc: any, messages: any[]) => {
+          const topic = this.resolveTopicName(topicOrDesc);
+          await this.ensureTopic(topic);
           await tx.send({
-            topic: topic as string,
-            messages: messages.map((m) => ({
+            topic,
+            messages: messages.map((m: any) => ({
               value: JSON.stringify(m.value),
               key: m.key ?? null,
               headers: m.headers,
@@ -252,7 +207,7 @@ export class KafkaClient<
 
   /** Subscribe to topics and start consuming messages with the given handler. */
   public async startConsumer<K extends Array<keyof T>>(
-    topics: K,
+    topics: K | TopicDescriptor[],
     handleMessage: (message: T[K[number]], topic: K[number]) => Promise<void>,
     options: ConsumerOptions<T> = {},
   ): Promise<void> {
@@ -264,15 +219,19 @@ export class KafkaClient<
       interceptors = [],
     } = options;
 
-    await this.consumer.connect();
-    await this.consumer.subscribe({
-      topics: topics as string[],
-      fromBeginning,
-    });
-    this.isConsumerRunning = true;
-    this.logger.log(
-      `Consumer subscribed to topics: ${(topics as string[]).join(", ")}`,
+    const topicNames = (topics as any[]).map((t: any) =>
+      this.resolveTopicName(t),
     );
+
+    await this.consumer.connect();
+
+    for (const t of topicNames) {
+      await this.ensureTopic(t);
+    }
+
+    await this.consumer.subscribe({ topics: topicNames, fromBeginning });
+
+    this.logger.log(`Consumer subscribed to topics: ${topicNames.join(", ")}`);
 
     await this.consumer.run({
       autoCommit,
@@ -295,49 +254,17 @@ export class KafkaClient<
           return;
         }
 
-        const maxAttempts = retry ? retry.maxRetries + 1 : 1;
-        const backoffMs = retry?.backoffMs ?? 1000;
-
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-          try {
-            for (const interceptor of interceptors) {
-              await interceptor.before?.(parsedMessage, topic);
-            }
-
-            await handleMessage(parsedMessage, topic as K[number]);
-
-            for (const interceptor of interceptors) {
-              await interceptor.after?.(parsedMessage, topic);
-            }
-            return;
-          } catch (error) {
-            const err =
-              error instanceof Error ? error : new Error(String(error));
-            for (const interceptor of interceptors) {
-              await interceptor.onError?.(parsedMessage, topic, err);
-            }
-
-            const isLastAttempt = attempt === maxAttempts;
-            this.logger.error(
-              `Error processing message from topic ${topic} (attempt ${attempt}/${maxAttempts}):`,
-              err.stack,
-            );
-
-            if (isLastAttempt) {
-              if (dlq) {
-                await this.sendToDlq(topic, raw);
-              }
-            } else {
-              await this.sleep(backoffMs * attempt);
-            }
-          }
-        }
+        await this.processMessage(parsedMessage, raw, topic, handleMessage, {
+          retry,
+          dlq,
+          interceptors,
+        });
       },
     });
   }
 
   public async stopConsumer(): Promise<void> {
-    this.isConsumerRunning = false;
+
     await this.consumer.disconnect();
     this.logger.log("Consumer disconnected");
   }
@@ -358,7 +285,7 @@ export class KafkaClient<
 
   /** Gracefully disconnect producer, consumer, and admin. */
   public async disconnect(): Promise<void> {
-    this.isConsumerRunning = false;
+
     const tasks = [this.producer.disconnect(), this.consumer.disconnect()];
     if (this.isAdminConnected) {
       tasks.push(this.admin.disconnect());
@@ -366,6 +293,66 @@ export class KafkaClient<
     }
     await Promise.allSettled(tasks);
     this.logger.log("All connections closed");
+  }
+
+  // --- Private helpers ---
+
+  private async processMessage<K extends Array<keyof T>>(
+    parsedMessage: T[K[number]],
+    raw: string,
+    topic: string,
+    handleMessage: (message: T[K[number]], topic: K[number]) => Promise<void>,
+    opts: Pick<ConsumerOptions<T>, "retry" | "dlq" | "interceptors">,
+  ): Promise<void> {
+    const { retry, dlq = false, interceptors = [] } = opts;
+    const maxAttempts = retry ? retry.maxRetries + 1 : 1;
+    const backoffMs = retry?.backoffMs ?? 1000;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        for (const interceptor of interceptors) {
+          await interceptor.before?.(parsedMessage, topic);
+        }
+
+        await handleMessage(parsedMessage, topic as K[number]);
+
+        for (const interceptor of interceptors) {
+          await interceptor.after?.(parsedMessage, topic);
+        }
+        return;
+      } catch (error) {
+        const err =
+          error instanceof Error ? error : new Error(String(error));
+        const isLastAttempt = attempt === maxAttempts;
+
+        if (isLastAttempt && maxAttempts > 1) {
+          const exhaustedError = new KafkaRetryExhaustedError(
+            topic,
+            parsedMessage,
+            maxAttempts,
+            { cause: err },
+          );
+          for (const interceptor of interceptors) {
+            await interceptor.onError?.(parsedMessage, topic, exhaustedError);
+          }
+        } else {
+          for (const interceptor of interceptors) {
+            await interceptor.onError?.(parsedMessage, topic, err);
+          }
+        }
+
+        this.logger.error(
+          `Error processing message from topic ${topic} (attempt ${attempt}/${maxAttempts}):`,
+          err.stack,
+        );
+
+        if (isLastAttempt) {
+          if (dlq) await this.sendToDlq(topic, raw);
+        } else {
+          await this.sleep(backoffMs * attempt);
+        }
+      }
+    }
   }
 
   private async sendToDlq(topic: string, rawMessage: string): Promise<void> {

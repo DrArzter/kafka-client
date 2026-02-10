@@ -1,0 +1,148 @@
+import { TopicDescriptor } from "./topic";
+
+/**
+ * Mapping of topic names to their message types.
+ * Define this interface to get type-safe publish/subscribe across your app.
+ *
+ * @example
+ * ```ts
+ * // with explicit extends (IDE hints for values)
+ * interface MyTopics extends TTopicMessageMap {
+ *   "orders.created": { orderId: string; amount: number };
+ *   "users.updated": { userId: string; name: string };
+ * }
+ *
+ * // or plain interface / type — works the same
+ * interface MyTopics {
+ *   "orders.created": { orderId: string; amount: number };
+ * }
+ * ```
+ */
+export type TTopicMessageMap = {
+  [topic: string]: Record<string, any>;
+};
+
+/**
+ * Generic constraint for topic-message maps.
+ * Works with both `type` aliases and `interface` declarations.
+ */
+export type TopicMapConstraint<T> = { [K in keyof T]: Record<string, any> };
+
+export type ClientId = string;
+export type GroupId = string;
+
+export type MessageHeaders = Record<string, string>;
+
+/** Options for sending a single message. */
+export interface SendOptions {
+  /** Partition key for message routing. */
+  key?: string;
+  /** Custom headers attached to the message. */
+  headers?: MessageHeaders;
+}
+
+/** Options for configuring a Kafka consumer. */
+export interface ConsumerOptions<
+  T extends TopicMapConstraint<T> = TTopicMessageMap,
+> {
+  /** Start reading from earliest offset. Default: `false`. */
+  fromBeginning?: boolean;
+  /** Automatically commit offsets. Default: `true`. */
+  autoCommit?: boolean;
+  /** Retry policy for failed message processing. */
+  retry?: RetryOptions;
+  /** Send failed messages to a Dead Letter Queue (`<topic>.dlq`). */
+  dlq?: boolean;
+  /** Interceptors called before/after each message. */
+  interceptors?: ConsumerInterceptor<T>[];
+}
+
+/** Configuration for consumer retry behavior. */
+export interface RetryOptions {
+  /** Maximum number of retry attempts before giving up. */
+  maxRetries: number;
+  /** Base delay between retries in ms (multiplied by attempt number). Default: `1000`. */
+  backoffMs?: number;
+}
+
+/**
+ * Interceptor hooks for consumer message processing.
+ * All methods are optional — implement only what you need.
+ */
+export interface ConsumerInterceptor<
+  T extends TopicMapConstraint<T> = TTopicMessageMap,
+> {
+  /** Called before the message handler. */
+  before?(message: T[keyof T], topic: string): Promise<void> | void;
+  /** Called after the message handler succeeds. */
+  after?(message: T[keyof T], topic: string): Promise<void> | void;
+  /** Called when the message handler throws. */
+  onError?(
+    message: T[keyof T],
+    topic: string,
+    error: Error,
+  ): Promise<void> | void;
+}
+
+/** Context passed to the `transaction()` callback with type-safe send methods. */
+export interface TransactionContext<T extends TopicMapConstraint<T>> {
+  send<K extends keyof T>(
+    topic: K,
+    message: T[K],
+    options?: SendOptions,
+  ): Promise<void>;
+  send<D extends TopicDescriptor<string & keyof T, T[string & keyof T]>>(
+    descriptor: D,
+    message: D["__type"],
+    options?: SendOptions,
+  ): Promise<void>;
+
+  sendBatch<K extends keyof T>(
+    topic: K,
+    messages: Array<{ value: T[K]; key?: string; headers?: MessageHeaders }>,
+  ): Promise<void>;
+  sendBatch<D extends TopicDescriptor<string & keyof T, T[string & keyof T]>>(
+    descriptor: D,
+    messages: Array<{
+      value: D["__type"];
+      key?: string;
+      headers?: MessageHeaders;
+    }>,
+  ): Promise<void>;
+}
+
+/** Interface describing all public methods of the Kafka client. */
+export interface IKafkaClient<T extends TopicMapConstraint<T>> {
+  checkStatus(): Promise<{ topics: string[] }>;
+
+  startConsumer<K extends Array<keyof T>>(
+    topics: K,
+    handleMessage: (message: T[K[number]], topic: K[number]) => Promise<void>,
+    options?: ConsumerOptions<T>,
+  ): Promise<void>;
+
+  stopConsumer(): Promise<void>;
+
+  sendMessage<K extends keyof T>(
+    topic: K,
+    message: T[K],
+    options?: SendOptions,
+  ): Promise<void>;
+
+  sendBatch<K extends keyof T>(
+    topic: K,
+    messages: Array<{ value: T[K]; key?: string; headers?: MessageHeaders }>,
+  ): Promise<void>;
+
+  transaction(fn: (ctx: TransactionContext<T>) => Promise<void>): Promise<void>;
+
+  getClientId: () => ClientId;
+
+  disconnect(): Promise<void>;
+}
+
+/** Options for `KafkaClient` constructor. */
+export interface KafkaClientOptions {
+  /** Auto-create topics via admin on first use (send/consume). Useful for development. */
+  autoCreateTopics?: boolean;
+}

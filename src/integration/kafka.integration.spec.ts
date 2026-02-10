@@ -3,6 +3,8 @@ import { KafkaContainer, StartedKafkaContainer } from "@testcontainers/kafka";
 import { Kafka } from "kafkajs";
 import { KafkaClient } from "../client/kafka.client";
 import { KafkaHealthIndicator } from "../health/kafka.health";
+import { topic } from "../client/topic";
+import { KafkaRetryExhaustedError } from "../client/errors";
 import type { ConsumerInterceptor } from "../client/kafka.client";
 
 type TestTopics = {
@@ -15,7 +17,17 @@ type TestTopics = {
   "test.retry.dlq": { value: string };
   "test.intercept": { data: string };
   "test.beginning": { msg: string };
+  "test.descriptor": { label: string; num: number };
+  "test.retry-error": { value: string };
+  "test.retry-error.dlq": { value: string };
+  "test.key-order": { seq: number };
+  "test.headers": { body: string };
 };
+
+const TestDescriptor = topic("test.descriptor")<{
+  label: string;
+  num: number;
+}>();
 
 const ALL_TOPICS = Object.keys({
   "test.basic": 0,
@@ -27,6 +39,11 @@ const ALL_TOPICS = Object.keys({
   "test.retry.dlq": 0,
   "test.intercept": 0,
   "test.beginning": 0,
+  "test.descriptor": 0,
+  "test.retry-error": 0,
+  "test.retry-error.dlq": 0,
+  "test.key-order": 0,
+  "test.headers": 0,
 } satisfies Record<keyof TestTopics, unknown>);
 
 let container: StartedKafkaContainer;
@@ -343,6 +360,163 @@ describe("KafkaClient Integration", () => {
     await new Promise((r) => setTimeout(r, 5000));
 
     expect(received).toContainEqual({ msg: "old-message" });
+
+    await client.disconnect();
+  });
+
+  it("should send and receive via TopicDescriptor", async () => {
+    const client = createClient("descriptor");
+    await client.connectProducer();
+
+    const { messages, promise } =
+      waitForMessages<TestTopics["test.descriptor"]>(2);
+
+    await client.startConsumer(
+      [TestDescriptor] as any,
+      async (msg) => {
+        messages.push(msg);
+      },
+      { fromBeginning: true },
+    );
+
+    await client.sendMessage(TestDescriptor, { label: "one", num: 1 });
+    await client.sendBatch(TestDescriptor, [
+      { value: { label: "two", num: 2 } },
+    ]);
+
+    const result = await promise;
+    expect(result).toHaveLength(2);
+    expect(result).toContainEqual({ label: "one", num: 1 });
+    expect(result).toContainEqual({ label: "two", num: 2 });
+
+    await client.disconnect();
+  });
+
+  it("should auto-create topics when autoCreateTopics is enabled", async () => {
+    const topicName = `test.autocreate-${Date.now()}`;
+    type AutoTopics = { [K: string]: { data: string } };
+
+    const client = new KafkaClient<AutoTopics>(
+      "integration-autocreate",
+      `group-autocreate-${Date.now()}`,
+      brokers,
+      { autoCreateTopics: true },
+    );
+    await client.connectProducer();
+
+    // Send to a topic that doesn't exist yet — autoCreateTopics should create it
+    await client.sendMessage(topicName, { data: "hello" });
+
+    // Verify the topic was created by listing topics
+    const status = await client.checkStatus();
+    expect(status.topics).toContain(topicName);
+
+    await client.disconnect();
+  });
+
+  it("should pass KafkaRetryExhaustedError to onError interceptor", async () => {
+    const client = createClient("retry-error");
+    await client.connectProducer();
+
+    let capturedError: unknown = null;
+    let attempts = 0;
+
+    const interceptor: ConsumerInterceptor<TestTopics> = {
+      onError: (_msg, _topic, error) => {
+        capturedError = error;
+      },
+    };
+
+    await client.startConsumer(
+      ["test.retry-error"],
+      async () => {
+        attempts++;
+        throw new Error("always fails");
+      },
+      {
+        fromBeginning: true,
+        retry: { maxRetries: 2, backoffMs: 100 },
+        dlq: true,
+        interceptors: [interceptor],
+      },
+    );
+
+    await client.sendMessage("test.retry-error", { value: "test" });
+
+    await new Promise((r) => setTimeout(r, 10000));
+
+    expect(attempts).toBe(3);
+    expect(capturedError).toBeInstanceOf(KafkaRetryExhaustedError);
+    expect((capturedError as KafkaRetryExhaustedError).attempts).toBe(3);
+    expect((capturedError as KafkaRetryExhaustedError).topic).toBe(
+      "test.retry-error",
+    );
+    expect((capturedError as KafkaRetryExhaustedError).cause).toBeInstanceOf(
+      Error,
+    );
+
+    await client.disconnect();
+  });
+
+  it("should preserve partition key ordering", async () => {
+    const client = createClient("key-order");
+    await client.connectProducer();
+
+    const received: TestTopics["test.key-order"][] = [];
+
+    await client.startConsumer(
+      ["test.key-order"],
+      async (msg) => {
+        received.push(msg);
+      },
+      { fromBeginning: true },
+    );
+
+    // Send messages with same key — should arrive in order
+    for (let i = 1; i <= 5; i++) {
+      await client.sendMessage(
+        "test.key-order",
+        { seq: i },
+        { key: "same-key" },
+      );
+    }
+
+    await new Promise((r) => setTimeout(r, 5000));
+
+    expect(received).toHaveLength(5);
+    // Same partition key → messages arrive in send order
+    expect(received.map((m) => m.seq)).toEqual([1, 2, 3, 4, 5]);
+
+    await client.disconnect();
+  });
+
+  it("should pass message headers through send and consume", async () => {
+    const client = createClient("headers");
+    await client.connectProducer();
+
+    const { messages, promise } =
+      waitForMessages<TestTopics["test.headers"]>(1);
+
+    await client.startConsumer(
+      ["test.headers"],
+      async (msg) => {
+        messages.push(msg);
+      },
+      { fromBeginning: true },
+    );
+
+    await client.sendMessage(
+      "test.headers",
+      { body: "with-headers" },
+      {
+        key: "h1",
+        headers: { "x-trace-id": "trace-123", "x-source": "test" },
+      },
+    );
+
+    const result = await promise;
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({ body: "with-headers" });
 
     await client.disconnect();
   });
