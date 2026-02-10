@@ -28,10 +28,13 @@ const mockConsumer = {
   run: mockRun,
 };
 
+const mockCreateTopics = jest.fn().mockResolvedValue(true);
+
 const mockAdmin = {
   connect: jest.fn().mockResolvedValue(undefined),
   disconnect: jest.fn().mockResolvedValue(undefined),
   listTopics: mockListTopics,
+  createTopics: mockCreateTopics,
 };
 
 const Kafka = jest.fn().mockImplementation(() => ({
@@ -56,6 +59,7 @@ export {
   mockSubscribe,
   mockRun,
   mockListTopics,
+  mockCreateTopics,
   mockTransaction,
   mockTxSend,
   mockTxCommit,

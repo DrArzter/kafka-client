@@ -13,6 +13,7 @@ An opinionated wrapper around kafkajs that integrates with NestJS as a DynamicMo
 ## Why?
 
 - **Typed topics** — you define a map of topic -> message shape, and the compiler won't let you send wrong data to wrong topic
+- **Topic descriptors** — `topic()` DX sugar lets you define topics as standalone typed objects instead of string keys
 - **NestJS-native** — `register()` / `registerAsync()`, DI injection, lifecycle hooks out of the box
 - **Idempotent producer** — `acks: -1`, `idempotent: true` by default
 - **Retry + DLQ** — configurable retries with backoff, dead letter queue for failed messages
@@ -21,6 +22,8 @@ An opinionated wrapper around kafkajs that integrates with NestJS as a DynamicMo
 - **Custom headers** — attach metadata headers to messages
 - **Transactions** — exactly-once semantics with `producer.transaction()`
 - **Consumer interceptors** — before/after/onError hooks for message processing
+- **Auto-create topics** — `autoCreateTopics: true` for dev mode — no need to pre-create topics
+- **Error classes** — `KafkaProcessingError` and `KafkaRetryExhaustedError` with topic, message, and attempt metadata
 - **Health check** — built-in health indicator for monitoring
 - **Multiple consumer groups** — named clients for different bounded contexts
 - **Declarative & imperative** — use `@SubscribeTo()` decorator or `startConsumer()` directly
@@ -126,6 +129,48 @@ export type OrdersTopicMap = {
 };
 ```
 
+#### Alternative: `topic()` descriptors
+
+Instead of a centralized topic map, define each topic as a standalone typed object:
+
+```typescript
+import { topic, TopicsFrom } from '@drarzter/kafka-client';
+
+export const OrderCreated = topic('order.created')<{
+  orderId: string;
+  userId: string;
+  amount: number;
+}>();
+
+export const OrderCompleted = topic('order.completed')<{
+  orderId: string;
+  completedAt: string;
+}>();
+
+// Combine into a topic map for KafkaModule generics
+export type OrdersTopicMap = TopicsFrom<typeof OrderCreated | typeof OrderCompleted>;
+```
+
+Topic descriptors work everywhere strings work — `sendMessage`, `sendBatch`, `transaction`, `startConsumer`, and `@SubscribeTo()`:
+
+```typescript
+// Sending
+await kafka.sendMessage(OrderCreated, { orderId: '123', userId: '456', amount: 100 });
+await kafka.sendBatch(OrderCreated, [{ value: { orderId: '1', userId: '10', amount: 50 } }]);
+
+// Transactions
+await kafka.transaction(async (tx) => {
+  await tx.send(OrderCreated, { orderId: '123', userId: '456', amount: 100 });
+});
+
+// Consuming (decorator)
+@SubscribeTo(OrderCreated)
+async handleOrder(message: OrdersTopicMap['order.created']) { ... }
+
+// Consuming (imperative)
+await kafka.startConsumer([OrderCreated], handler);
+```
+
 ### 2. Register the module
 
 ```typescript
@@ -138,11 +183,14 @@ import { OrdersTopicMap } from './orders.types';
       clientId: 'my-service',
       groupId: 'my-consumer-group',
       brokers: ['localhost:9092'],
+      autoCreateTopics: true, // auto-create topics on first use (dev mode)
     }),
   ],
 })
 export class OrdersModule {}
 ```
+
+`autoCreateTopics` calls `admin.createTopics()` (idempotent — no-op if topic already exists) before the first send/consume for each topic. Useful in development, not recommended for production.
 
 Or with `ConfigService`:
 
@@ -416,6 +464,50 @@ Multiple interceptors run in order. All hooks are optional.
 | `dlq` | `false` | Send to `{topic}.dlq` after all retries exhausted |
 | `interceptors` | `[]` | Array of before/after/onError hooks |
 
+### Module options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `clientId` | — | Kafka client identifier |
+| `groupId` | — | Consumer group ID |
+| `brokers` | — | Array of broker addresses |
+| `name` | — | Named client for multi-group setups |
+| `isGlobal` | `false` | Make the client available in all modules |
+| `autoCreateTopics` | `false` | Auto-create topics on first send/consume |
+
+## Error classes
+
+When a consumer message handler fails after all retries, the library throws typed error objects:
+
+```typescript
+import { KafkaProcessingError, KafkaRetryExhaustedError } from '@drarzter/kafka-client';
+```
+
+**`KafkaProcessingError`** — base class for processing failures. Has `topic`, `originalMessage`, and supports `cause`:
+
+```typescript
+const err = new KafkaProcessingError('handler failed', 'order.created', rawMessage, { cause: originalError });
+err.topic;            // 'order.created'
+err.originalMessage;  // the parsed message object
+err.cause;            // the original error
+```
+
+**`KafkaRetryExhaustedError`** — thrown after all retries are exhausted. Extends `KafkaProcessingError` and adds `attempts`:
+
+```typescript
+// In an onError interceptor:
+const interceptor: ConsumerInterceptor<MyTopics> = {
+  onError: (message, topic, error) => {
+    if (error instanceof KafkaRetryExhaustedError) {
+      console.log(`Failed after ${error.attempts} attempts on ${error.topic}`);
+      console.log('Last error:', error.cause);
+    }
+  },
+};
+```
+
+When `retry.maxRetries` is set and all attempts fail, `KafkaRetryExhaustedError` is passed to `onError` interceptors automatically.
+
 ## Health check
 
 Monitor Kafka connectivity with the built-in health indicator:
@@ -464,7 +556,7 @@ Both suites run in CI on every push to `main`.
 
 ```
 src/
-├── client/         # KafkaClient, types, interfaces
+├── client/         # KafkaClient, types, topic(), error classes
 ├── module/         # KafkaModule, KafkaExplorer, DI constants
 ├── decorators/     # @InjectKafkaClient(), @SubscribeTo()
 ├── health/         # KafkaHealthIndicator

@@ -1,6 +1,7 @@
 import "reflect-metadata";
 import { SubscribeTo, KAFKA_SUBSCRIBER_METADATA } from "./kafka.decorator";
 import { getKafkaClientToken, KAFKA_CLIENT } from "../module/kafka.constants";
+import { topic } from "../client/topic";
 
 describe("SubscribeTo", () => {
   it("should store metadata for a single topic", () => {
@@ -79,6 +80,37 @@ describe("SubscribeTo", () => {
       TestService,
     );
     expect(metadata).toHaveLength(2);
+  });
+
+  it("should accept a TopicDescriptor", () => {
+    const TestTopic = topic("test.topic")<{ id: string }>();
+
+    class TestService {
+      @SubscribeTo(TestTopic)
+      async handle() {}
+    }
+
+    const metadata = Reflect.getMetadata(
+      KAFKA_SUBSCRIBER_METADATA,
+      TestService,
+    );
+    expect(metadata[0].topics).toEqual(["test.topic"]);
+  });
+
+  it("should accept an array of TopicDescriptors", () => {
+    const TopicA = topic("topic.a")<{ id: string }>();
+    const TopicB = topic("topic.b")<{ name: string }>();
+
+    class TestService {
+      @SubscribeTo([TopicA, TopicB])
+      async handle() {}
+    }
+
+    const metadata = Reflect.getMetadata(
+      KAFKA_SUBSCRIBER_METADATA,
+      TestService,
+    );
+    expect(metadata[0].topics).toEqual(["topic.a", "topic.b"]);
   });
 });
 

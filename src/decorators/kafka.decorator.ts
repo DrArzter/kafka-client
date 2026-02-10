@@ -1,6 +1,7 @@
 import { Inject } from "@nestjs/common";
 import { getKafkaClientToken } from "../module/kafka.constants";
 import { ConsumerOptions } from "../client/kafka.client";
+import { TopicDescriptor } from "../client/topic";
 
 export const KAFKA_SUBSCRIBER_METADATA = "KAFKA_SUBSCRIBER_METADATA";
 
@@ -19,10 +20,18 @@ export const InjectKafkaClient = (name?: string): ParameterDecorator =>
  * The decorated method receives `(message, topic)` for each consumed message.
  */
 export const SubscribeTo = (
-  topics: string | string[],
+  topics:
+    | string
+    | string[]
+    | TopicDescriptor
+    | TopicDescriptor[]
+    | (string | TopicDescriptor)[],
   options?: ConsumerOptions & { clientName?: string },
 ): MethodDecorator => {
-  const topicsArray = Array.isArray(topics) ? topics : [topics];
+  const arr = Array.isArray(topics) ? topics : [topics];
+  const topicsArray = arr.map((t) =>
+    typeof t === "string" ? t : t.__topic,
+  );
   const { clientName, ...consumerOptions } = options || {};
 
   return (target, propertyKey, _descriptor) => {

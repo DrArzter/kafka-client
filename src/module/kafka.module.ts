@@ -21,6 +21,8 @@ export interface KafkaModuleOptions {
   brokers: string[];
   /** If true, makes KAFKA_CLIENT available globally without importing KafkaModule in every feature module. */
   isGlobal?: boolean;
+  /** Auto-create topics via admin on first use (send/consume). Useful for development. */
+  autoCreateTopics?: boolean;
 }
 
 /** Async configuration for `KafkaModule.registerAsync()` with dependency injection. */
@@ -28,6 +30,8 @@ export interface KafkaModuleAsyncOptions {
   name?: string;
   /** If true, makes KAFKA_CLIENT available globally without importing KafkaModule in every feature module. */
   isGlobal?: boolean;
+  /** Auto-create topics via admin on first use (send/consume). Useful for development. */
+  autoCreateTopics?: boolean;
   imports?: any[];
   useFactory: (
     ...args: any[]
@@ -54,6 +58,7 @@ export class KafkaModule {
           options.clientId,
           options.groupId,
           options.brokers,
+          { autoCreateTopics: options.autoCreateTopics },
         );
         await client.connectProducer();
         return client;
@@ -91,6 +96,7 @@ export class KafkaModule {
           options.clientId,
           options.groupId,
           options.brokers,
+          { autoCreateTopics: options.autoCreateTopics },
         );
         await client.connectProducer();
         return client;
