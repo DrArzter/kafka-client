@@ -143,6 +143,7 @@ export class KafkaClient<
   private readonly admin: Admin;
   private readonly logger: Logger;
   private isConsumerRunning = false;
+  private isAdminConnected = false;
   public readonly clientId: ClientId;
 
   constructor(clientId: ClientId, groupId: GroupId, brokers: string[]) {
@@ -342,9 +343,11 @@ export class KafkaClient<
 
   /** Check broker connectivity and return available topics. */
   public async checkStatus(): Promise<{ topics: string[] }> {
-    await this.admin.connect();
+    if (!this.isAdminConnected) {
+      await this.admin.connect();
+      this.isAdminConnected = true;
+    }
     const topics = await this.admin.listTopics();
-    await this.admin.disconnect();
     return { topics };
   }
 
@@ -352,13 +355,18 @@ export class KafkaClient<
     return this.clientId;
   }
 
-  /** Gracefully disconnect producer and consumer. */
+  /** Gracefully disconnect producer, consumer, and admin. */
   public async disconnect(): Promise<void> {
     this.isConsumerRunning = false;
-    await Promise.allSettled([
+    const tasks = [
       this.producer.disconnect(),
       this.consumer.disconnect(),
-    ]);
+    ];
+    if (this.isAdminConnected) {
+      tasks.push(this.admin.disconnect());
+      this.isAdminConnected = false;
+    }
+    await Promise.allSettled(tasks);
     this.logger.log("All connections closed");
   }
 

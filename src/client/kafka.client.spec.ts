@@ -281,7 +281,13 @@ describe("KafkaClient", () => {
       const result = await client.checkStatus();
       expect(mockAdmin.connect).toHaveBeenCalled();
       expect(result).toEqual({ topics: ["topic1", "topic2"] });
-      expect(mockAdmin.disconnect).toHaveBeenCalled();
+    });
+
+    it("should not reconnect admin on subsequent calls", async () => {
+      await client.checkStatus();
+      mockAdmin.connect.mockClear();
+      await client.checkStatus();
+      expect(mockAdmin.connect).not.toHaveBeenCalled();
     });
   });
 
@@ -290,6 +296,12 @@ describe("KafkaClient", () => {
       await client.disconnect();
       expect(mockProducer.disconnect).toHaveBeenCalled();
       expect(mockConsumer.disconnect).toHaveBeenCalled();
+    });
+
+    it("should disconnect admin if it was connected", async () => {
+      await client.checkStatus();
+      await client.disconnect();
+      expect(mockAdmin.disconnect).toHaveBeenCalled();
     });
   });
 
