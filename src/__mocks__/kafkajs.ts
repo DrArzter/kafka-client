@@ -1,0 +1,63 @@
+const mockSend = jest.fn().mockResolvedValue(undefined);
+const mockConnect = jest.fn().mockResolvedValue(undefined);
+const mockDisconnect = jest.fn().mockResolvedValue(undefined);
+const mockSubscribe = jest.fn().mockResolvedValue(undefined);
+const mockRun = jest.fn().mockResolvedValue(undefined);
+const mockListTopics = jest.fn().mockResolvedValue(["topic1", "topic2"]);
+
+const mockTxSend = jest.fn().mockResolvedValue(undefined);
+const mockTxCommit = jest.fn().mockResolvedValue(undefined);
+const mockTxAbort = jest.fn().mockResolvedValue(undefined);
+const mockTransaction = jest.fn().mockResolvedValue({
+  send: mockTxSend,
+  commit: mockTxCommit,
+  abort: mockTxAbort,
+});
+
+const mockProducer = {
+  connect: mockConnect,
+  disconnect: mockDisconnect,
+  send: mockSend,
+  transaction: mockTransaction,
+};
+
+const mockConsumer = {
+  connect: jest.fn().mockResolvedValue(undefined),
+  disconnect: jest.fn().mockResolvedValue(undefined),
+  subscribe: mockSubscribe,
+  run: mockRun,
+};
+
+const mockAdmin = {
+  connect: jest.fn().mockResolvedValue(undefined),
+  disconnect: jest.fn().mockResolvedValue(undefined),
+  listTopics: mockListTopics,
+};
+
+const Kafka = jest.fn().mockImplementation(() => ({
+  producer: jest.fn().mockReturnValue(mockProducer),
+  consumer: jest.fn().mockReturnValue(mockConsumer),
+  admin: jest.fn().mockReturnValue(mockAdmin),
+}));
+
+const Partitioners = {
+  DefaultPartitioner: jest.fn(),
+};
+
+export {
+  Kafka,
+  Partitioners,
+  mockProducer,
+  mockConsumer,
+  mockAdmin,
+  mockSend,
+  mockConnect,
+  mockDisconnect,
+  mockSubscribe,
+  mockRun,
+  mockListTopics,
+  mockTransaction,
+  mockTxSend,
+  mockTxCommit,
+  mockTxAbort,
+};
