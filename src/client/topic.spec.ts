@@ -1,4 +1,4 @@
-import { topic, TopicDescriptor, TopicsFrom } from "./topic";
+import { topic, TopicDescriptor, TopicsFrom, SchemaLike } from "./topic";
 
 describe("topic()", () => {
   it("should create a TopicDescriptor with __topic set", () => {
@@ -15,6 +15,34 @@ describe("topic()", () => {
     const A = topic("a")<{ x: number }>();
     const B = topic("b")<{ y: string }>();
     expect(A.__topic).not.toBe(B.__topic);
+  });
+});
+
+describe("topic().schema()", () => {
+  const mockSchema: SchemaLike<{ orderId: string; amount: number }> = {
+    parse: (data: unknown) => data as { orderId: string; amount: number },
+  };
+
+  it("should create a descriptor with __schema attached", () => {
+    const desc = topic("order.created").schema(mockSchema);
+    expect(desc.__topic).toBe("order.created");
+    expect(desc.__schema).toBe(mockSchema);
+  });
+
+  it("should have __type as undefined at runtime", () => {
+    const desc = topic("order.created").schema(mockSchema);
+    expect(desc.__type).toBeUndefined();
+  });
+
+  it("should work with TopicsFrom", () => {
+    const A = topic("a").schema(mockSchema);
+    const B = topic("b")<{ x: number }>();
+    type Map = TopicsFrom<typeof A | typeof B>;
+    const check: Map = {
+      a: { orderId: "1", amount: 100 },
+      b: { x: 42 },
+    };
+    expect(check).toBeDefined();
   });
 });
 

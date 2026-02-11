@@ -1,14 +1,17 @@
 import { Inject } from "@nestjs/common";
 import { getKafkaClientToken } from "../module/kafka.constants";
 import { ConsumerOptions } from "../client/kafka.client";
-import { TopicDescriptor } from "../client/topic";
+import { TopicDescriptor, SchemaLike } from "../client/topic";
 
 export const KAFKA_SUBSCRIBER_METADATA = "KAFKA_SUBSCRIBER_METADATA";
 
 export interface KafkaSubscriberMetadata {
   topics: string[];
+  schemas?: Map<string, SchemaLike>;
   options?: ConsumerOptions;
   clientName?: string;
+  batch?: boolean;
+  methodName?: string | symbol;
 }
 
 /** Inject a `KafkaClient` instance. Pass a name to target a specific named client. */
@@ -26,13 +29,20 @@ export const SubscribeTo = (
     | TopicDescriptor
     | TopicDescriptor[]
     | (string | TopicDescriptor)[],
-  options?: ConsumerOptions & { clientName?: string },
+  options?: ConsumerOptions & { clientName?: string; batch?: boolean },
 ): MethodDecorator => {
   const arr = Array.isArray(topics) ? topics : [topics];
-  const topicsArray = arr.map((t) =>
-    typeof t === "string" ? t : t.__topic,
-  );
-  const { clientName, ...consumerOptions } = options || {};
+  const topicsArray = arr.map((t) => (typeof t === "string" ? t : t.__topic));
+
+  // Extract schemas from descriptors that have them
+  const schemas = new Map<string, SchemaLike>();
+  for (const t of arr) {
+    if (typeof t !== "string" && t.__schema) {
+      schemas.set(t.__topic, t.__schema);
+    }
+  }
+
+  const { clientName, batch, ...consumerOptions } = options || {};
 
   return (target, propertyKey, _descriptor) => {
     const existing: KafkaSubscriberMetadata[] =
@@ -44,10 +54,12 @@ export const SubscribeTo = (
         ...existing,
         {
           topics: topicsArray,
+          schemas: schemas.size > 0 ? schemas : undefined,
           options: Object.keys(consumerOptions).length
             ? consumerOptions
             : undefined,
           clientName,
+          batch,
           methodName: propertyKey,
         },
       ],

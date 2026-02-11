@@ -97,6 +97,39 @@ describe("SubscribeTo", () => {
     expect(metadata[0].topics).toEqual(["test.topic"]);
   });
 
+  it("should extract schemas from descriptors with .schema()", () => {
+    const mockSchema = { parse: (d: unknown) => d };
+    const WithSchema = topic("test.topic").schema(mockSchema);
+
+    class TestService {
+      @SubscribeTo(WithSchema)
+      async handle() {}
+    }
+
+    const metadata = Reflect.getMetadata(
+      KAFKA_SUBSCRIBER_METADATA,
+      TestService,
+    );
+    expect(metadata[0].topics).toEqual(["test.topic"]);
+    expect(metadata[0].schemas).toBeInstanceOf(Map);
+    expect(metadata[0].schemas.get("test.topic")).toBe(mockSchema);
+  });
+
+  it("should not set schemas when descriptors have no schema", () => {
+    const NoSchema = topic("test.topic")<{ id: string }>();
+
+    class TestService {
+      @SubscribeTo(NoSchema)
+      async handle() {}
+    }
+
+    const metadata = Reflect.getMetadata(
+      KAFKA_SUBSCRIBER_METADATA,
+      TestService,
+    );
+    expect(metadata[0].schemas).toBeUndefined();
+  });
+
   it("should accept an array of TopicDescriptors", () => {
     const TopicA = topic("topic.a")<{ id: string }>();
     const TopicB = topic("topic.b")<{ name: string }>();
@@ -111,6 +144,45 @@ describe("SubscribeTo", () => {
       TestService,
     );
     expect(metadata[0].topics).toEqual(["topic.a", "topic.b"]);
+  });
+
+  it("should store batch flag", () => {
+    class TestService {
+      @SubscribeTo("test.topic", { batch: true })
+      async handle() {}
+    }
+
+    const metadata = Reflect.getMetadata(
+      KAFKA_SUBSCRIBER_METADATA,
+      TestService,
+    );
+    expect(metadata[0].batch).toBe(true);
+  });
+
+  it("should not set batch when not specified", () => {
+    class TestService {
+      @SubscribeTo("test.topic")
+      async handle() {}
+    }
+
+    const metadata = Reflect.getMetadata(
+      KAFKA_SUBSCRIBER_METADATA,
+      TestService,
+    );
+    expect(metadata[0].batch).toBeUndefined();
+  });
+
+  it("should pass groupId through consumer options", () => {
+    class TestService {
+      @SubscribeTo("test.topic", { groupId: "custom-group" })
+      async handle() {}
+    }
+
+    const metadata = Reflect.getMetadata(
+      KAFKA_SUBSCRIBER_METADATA,
+      TestService,
+    );
+    expect(metadata[0].options.groupId).toBe("custom-group");
   });
 });
 

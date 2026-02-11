@@ -1,4 +1,8 @@
-import { KafkaProcessingError, KafkaRetryExhaustedError } from "./errors";
+import {
+  KafkaProcessingError,
+  KafkaRetryExhaustedError,
+  KafkaValidationError,
+} from "./errors";
 
 describe("KafkaProcessingError", () => {
   it("should store topic and originalMessage", () => {
@@ -13,6 +17,27 @@ describe("KafkaProcessingError", () => {
     const cause = new Error("root cause");
     const err = new KafkaProcessingError("fail", "t", {}, { cause });
     expect(err.cause).toBe(cause);
+  });
+});
+
+describe("KafkaValidationError", () => {
+  it("should store topic and originalMessage", () => {
+    const err = new KafkaValidationError("my.topic", { bad: "data" });
+    expect(err.name).toBe("KafkaValidationError");
+    expect(err.topic).toBe("my.topic");
+    expect(err.originalMessage).toEqual({ bad: "data" });
+    expect(err.message).toContain("my.topic");
+  });
+
+  it("should support cause", () => {
+    const cause = new Error("zod error");
+    const err = new KafkaValidationError("t", {}, { cause });
+    expect(err.cause).toBe(cause);
+  });
+
+  it("should be instanceof Error", () => {
+    const err = new KafkaValidationError("t", {});
+    expect(err).toBeInstanceOf(Error);
   });
 });
 

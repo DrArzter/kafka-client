@@ -1,8 +1,8 @@
 jest.mock("kafkajs");
 
 import { KafkaClient, TTopicMessageMap } from "./kafka.client";
-import { topic } from "./topic";
-import { KafkaRetryExhaustedError } from "./errors";
+import { topic, SchemaLike } from "./topic";
+import { KafkaRetryExhaustedError, KafkaValidationError } from "./errors";
 import {
   mockSend,
   mockConnect,
@@ -273,9 +273,17 @@ describe("KafkaClient", () => {
   });
 
   describe("stopConsumer", () => {
-    it("should disconnect the consumer", async () => {
+    it("should disconnect all consumers", async () => {
+      await client.startConsumer(["test.topic"], jest.fn());
+      mockConsumer.disconnect.mockClear();
+
       await client.stopConsumer();
       expect(mockConsumer.disconnect).toHaveBeenCalled();
+    });
+
+    it("should handle empty consumer map gracefully", async () => {
+      await client.stopConsumer();
+      // No consumers to disconnect — should not throw
     });
   });
 
@@ -295,7 +303,10 @@ describe("KafkaClient", () => {
   });
 
   describe("disconnect", () => {
-    it("should disconnect producer and consumer", async () => {
+    it("should disconnect producer and all consumers", async () => {
+      await client.startConsumer(["test.topic"], jest.fn());
+      mockConsumer.disconnect.mockClear();
+
       await client.disconnect();
       expect(mockProducer.disconnect).toHaveBeenCalled();
       expect(mockConsumer.disconnect).toHaveBeenCalled();
@@ -590,7 +601,12 @@ describe("KafkaClient", () => {
 
       await client.startConsumer(["test.topic"], handler, {
         interceptors: [
-          { before: () => { throw new Error("before failed"); }, onError },
+          {
+            before: () => {
+              throw new Error("before failed");
+            },
+            onError,
+          },
         ],
       });
 
@@ -609,7 +625,12 @@ describe("KafkaClient", () => {
 
       await client.startConsumer(["test.topic"], handler, {
         interceptors: [
-          { after: () => { throw new Error("after failed"); }, onError },
+          {
+            after: () => {
+              throw new Error("after failed");
+            },
+            onError,
+          },
         ],
       });
 
@@ -629,7 +650,11 @@ describe("KafkaClient", () => {
       await expect(
         client.startConsumer(["test.topic"], handler, {
           interceptors: [
-            { onError: () => { throw new Error("onError failed"); } },
+            {
+              onError: () => {
+                throw new Error("onError failed");
+              },
+            },
           ],
         }),
       ).rejects.toThrow("onError failed");
@@ -642,7 +667,11 @@ describe("KafkaClient", () => {
 
       await client.startConsumer(["test.topic"], handler, {
         interceptors: [
-          { before: () => { throw new Error("stop"); } },
+          {
+            before: () => {
+              throw new Error("stop");
+            },
+          },
           { before: secondBefore },
         ],
       });
@@ -839,8 +868,16 @@ describe("KafkaClient", () => {
       expect(mockTxSend).toHaveBeenCalledWith({
         topic: "test.topic",
         messages: [
-          { value: JSON.stringify({ id: "1", value: 10 }), key: null, headers: undefined },
-          { value: JSON.stringify({ id: "2", value: 20 }), key: null, headers: undefined },
+          {
+            value: JSON.stringify({ id: "1", value: 10 }),
+            key: null,
+            headers: undefined,
+          },
+          {
+            value: JSON.stringify({ id: "2", value: 20 }),
+            key: null,
+            headers: undefined,
+          },
         ],
         acks: -1,
       });
@@ -852,9 +889,7 @@ describe("KafkaClient", () => {
 
       await expect(
         client.transaction(async (tx) => {
-          await tx.sendBatch("test.topic", [
-            { value: { id: "1", value: 1 } },
-          ]);
+          await tx.sendBatch("test.topic", [{ value: { id: "1", value: 1 } }]);
         }),
       ).rejects.toThrow("batch failed");
 
@@ -870,6 +905,8 @@ describe("KafkaClient", () => {
     });
 
     it("should handle partial disconnect failure gracefully", async () => {
+      await client.startConsumer(["test.topic"], jest.fn());
+      mockConsumer.disconnect.mockClear();
       mockProducer.disconnect.mockRejectedValueOnce(
         new Error("producer failed"),
       );
@@ -908,6 +945,522 @@ describe("KafkaClient", () => {
       expect((lastCall[2] as KafkaRetryExhaustedError).topic).toBe(
         "test.topic",
       );
+    });
+  });
+
+  describe("startBatchConsumer", () => {
+    beforeEach(() => {
+      mockRun.mockReset().mockResolvedValue(undefined);
+    });
+
+    it("should subscribe and run with eachBatch", async () => {
+      const handler = jest.fn().mockResolvedValue(undefined);
+      await client.startBatchConsumer(["test.topic"], handler);
+
+      expect(mockConsumer.connect).toHaveBeenCalled();
+      expect(mockSubscribe).toHaveBeenCalledWith({
+        topics: ["test.topic"],
+        fromBeginning: false,
+      });
+      expect(mockRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          autoCommit: true,
+          eachBatch: expect.any(Function),
+        }),
+      );
+    });
+
+    it("should parse batch messages and call handler with array", async () => {
+      const handler = jest.fn().mockResolvedValue(undefined);
+      const mockHeartbeat = jest.fn().mockResolvedValue(undefined);
+      const mockResolveOffset = jest.fn();
+      const mockCommitOffsets = jest.fn().mockResolvedValue(undefined);
+
+      mockRun.mockImplementation(async ({ eachBatch }) => {
+        await eachBatch({
+          batch: {
+            topic: "test.topic",
+            partition: 0,
+            highWatermark: "100",
+            messages: [
+              {
+                value: Buffer.from(JSON.stringify({ id: "1", value: 10 })),
+                offset: "0",
+              },
+              {
+                value: Buffer.from(JSON.stringify({ id: "2", value: 20 })),
+                offset: "1",
+              },
+            ],
+          },
+          heartbeat: mockHeartbeat,
+          resolveOffset: mockResolveOffset,
+          commitOffsetsIfNecessary: mockCommitOffsets,
+        });
+      });
+
+      await client.startBatchConsumer(["test.topic"], handler);
+
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(handler).toHaveBeenCalledWith(
+        [
+          { id: "1", value: 10 },
+          { id: "2", value: 20 },
+        ],
+        "test.topic",
+        expect.objectContaining({
+          partition: 0,
+          highWatermark: "100",
+          heartbeat: mockHeartbeat,
+          resolveOffset: mockResolveOffset,
+          commitOffsetsIfNecessary: mockCommitOffsets,
+        }),
+      );
+    });
+
+    it("should skip empty messages in batch", async () => {
+      const handler = jest.fn().mockResolvedValue(undefined);
+      mockRun.mockImplementation(async ({ eachBatch }) => {
+        await eachBatch({
+          batch: {
+            topic: "test.topic",
+            partition: 0,
+            highWatermark: "100",
+            messages: [
+              { value: null, offset: "0" },
+              {
+                value: Buffer.from(JSON.stringify({ id: "1", value: 10 })),
+                offset: "1",
+              },
+            ],
+          },
+          heartbeat: jest.fn(),
+          resolveOffset: jest.fn(),
+          commitOffsetsIfNecessary: jest.fn(),
+        });
+      });
+
+      await client.startBatchConsumer(["test.topic"], handler);
+
+      expect(handler).toHaveBeenCalledWith(
+        [{ id: "1", value: 10 }],
+        "test.topic",
+        expect.any(Object),
+      );
+    });
+
+    it("should not call handler when all messages are empty", async () => {
+      const handler = jest.fn();
+      mockRun.mockImplementation(async ({ eachBatch }) => {
+        await eachBatch({
+          batch: {
+            topic: "test.topic",
+            partition: 0,
+            highWatermark: "100",
+            messages: [{ value: null, offset: "0" }],
+          },
+          heartbeat: jest.fn(),
+          resolveOffset: jest.fn(),
+          commitOffsetsIfNecessary: jest.fn(),
+        });
+      });
+
+      await client.startBatchConsumer(["test.topic"], handler);
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it("should validate batch messages with schema and skip invalid ones", async () => {
+      const strictSchema: SchemaLike<{ id: string; value: number }> = {
+        parse(data: unknown) {
+          const d = data as any;
+          if (typeof d?.id !== "string") throw new Error("Validation failed");
+          return d;
+        },
+      };
+      const Desc = topic("test.topic").schema(strictSchema);
+      const handler = jest.fn().mockResolvedValue(undefined);
+
+      mockRun.mockImplementation(async ({ eachBatch }) => {
+        await eachBatch({
+          batch: {
+            topic: "test.topic",
+            partition: 0,
+            highWatermark: "100",
+            messages: [
+              {
+                value: Buffer.from(JSON.stringify({ id: "1", value: 10 })),
+                offset: "0",
+              },
+              {
+                value: Buffer.from(JSON.stringify({ id: 123, value: 20 })),
+                offset: "1",
+              },
+            ],
+          },
+          heartbeat: jest.fn(),
+          resolveOffset: jest.fn(),
+          commitOffsetsIfNecessary: jest.fn(),
+        });
+      });
+
+      await client.startBatchConsumer([Desc] as any, handler);
+
+      // Only the valid message should be passed
+      expect(handler).toHaveBeenCalledWith(
+        [{ id: "1", value: 10 }],
+        "test.topic",
+        expect.any(Object),
+      );
+    });
+
+    it("should retry batch on handler failure", async () => {
+      const handler = jest
+        .fn()
+        .mockRejectedValueOnce(new Error("batch fail"))
+        .mockResolvedValue(undefined);
+
+      mockRun.mockImplementation(async ({ eachBatch }) => {
+        await eachBatch({
+          batch: {
+            topic: "test.topic",
+            partition: 0,
+            highWatermark: "100",
+            messages: [
+              {
+                value: Buffer.from(JSON.stringify({ id: "1", value: 10 })),
+                offset: "0",
+              },
+            ],
+          },
+          heartbeat: jest.fn(),
+          resolveOffset: jest.fn(),
+          commitOffsetsIfNecessary: jest.fn(),
+        });
+      });
+
+      await client.startBatchConsumer(["test.topic"], handler, {
+        retry: { maxRetries: 1, backoffMs: 1 },
+      });
+
+      expect(handler).toHaveBeenCalledTimes(2);
+    });
+
+    it("should send to DLQ after batch retries exhausted", async () => {
+      const handler = jest.fn().mockRejectedValue(new Error("always fails"));
+
+      mockRun.mockImplementation(async ({ eachBatch }) => {
+        await eachBatch({
+          batch: {
+            topic: "test.topic",
+            partition: 0,
+            highWatermark: "100",
+            messages: [
+              {
+                value: Buffer.from(JSON.stringify({ id: "1", value: 10 })),
+                offset: "0",
+              },
+            ],
+          },
+          heartbeat: jest.fn(),
+          resolveOffset: jest.fn(),
+          commitOffsetsIfNecessary: jest.fn(),
+        });
+      });
+
+      await client.startBatchConsumer(["test.topic"], handler, {
+        retry: { maxRetries: 1, backoffMs: 1 },
+        dlq: true,
+      });
+
+      expect(handler).toHaveBeenCalledTimes(2);
+      expect(mockSend).toHaveBeenCalledWith(
+        expect.objectContaining({ topic: "test.topic.dlq" }),
+      );
+    });
+  });
+
+  describe("multiple consumer groups", () => {
+    beforeEach(() => {
+      mockRun.mockReset().mockResolvedValue(undefined);
+    });
+
+    it("should create separate consumers for different groupIds", async () => {
+      const handler = jest.fn();
+
+      await client.startConsumer(["test.topic"], handler, {
+        groupId: "group-a",
+      });
+      await client.startConsumer(["test.other"], handler, {
+        groupId: "group-b",
+      });
+
+      // The mock kafka.consumer() should be called twice (for two different groups)
+      const kafkaInstance = (require("kafkajs") as any).Kafka.mock.results[0]
+        .value;
+      expect(kafkaInstance.consumer).toHaveBeenCalledTimes(2);
+      expect(kafkaInstance.consumer).toHaveBeenCalledWith({
+        groupId: "group-a",
+      });
+      expect(kafkaInstance.consumer).toHaveBeenCalledWith({
+        groupId: "group-b",
+      });
+    });
+
+    it("should reuse consumer for same groupId", async () => {
+      const handler = jest.fn();
+
+      await client.startConsumer(["test.topic"], handler, {
+        groupId: "group-a",
+      });
+      await client.startConsumer(["test.other"], handler, {
+        groupId: "group-a",
+      });
+
+      const kafkaInstance = (require("kafkajs") as any).Kafka.mock.results[0]
+        .value;
+      // Should only create one consumer for group-a
+      expect(kafkaInstance.consumer).toHaveBeenCalledTimes(1);
+    });
+
+    it("should use default groupId when none specified", async () => {
+      const handler = jest.fn();
+
+      await client.startConsumer(["test.topic"], handler);
+
+      const kafkaInstance = (require("kafkajs") as any).Kafka.mock.results[0]
+        .value;
+      expect(kafkaInstance.consumer).toHaveBeenCalledWith({
+        groupId: "test-group",
+      });
+    });
+
+    it("should disconnect all consumers on disconnect", async () => {
+      const handler = jest.fn();
+
+      await client.startConsumer(["test.topic"], handler, {
+        groupId: "group-a",
+      });
+      await client.startConsumer(["test.other"], handler, {
+        groupId: "group-b",
+      });
+
+      mockConsumer.disconnect.mockClear();
+      await client.disconnect();
+
+      // Both consumers disconnected (mock returns same object, so called twice)
+      expect(mockConsumer.disconnect).toHaveBeenCalledTimes(2);
+    });
+
+    it("should work with startBatchConsumer and groupId", async () => {
+      const handler = jest.fn().mockResolvedValue(undefined);
+
+      await client.startBatchConsumer(["test.topic"], handler, {
+        groupId: "batch-group",
+      });
+
+      const kafkaInstance = (require("kafkajs") as any).Kafka.mock.results[0]
+        .value;
+      expect(kafkaInstance.consumer).toHaveBeenCalledWith({
+        groupId: "batch-group",
+      });
+    });
+  });
+
+  describe("Schema validation", () => {
+    const validMessage = { id: "1", value: 42 };
+    const invalidMessage = { id: 123, value: "not a number" };
+
+    const strictSchema: SchemaLike<{ id: string; value: number }> = {
+      parse(data: unknown) {
+        const d = data as any;
+        if (typeof d?.id !== "string" || typeof d?.value !== "number") {
+          throw new Error("Validation failed");
+        }
+        return d as { id: string; value: number };
+      },
+    };
+
+    const TestDescriptor = topic("test.topic").schema(strictSchema);
+
+    describe("sendMessage", () => {
+      it("should send valid message through schema", async () => {
+        await client.sendMessage(TestDescriptor as any, validMessage);
+        expect(mockSend).toHaveBeenCalledWith(
+          expect.objectContaining({
+            topic: "test.topic",
+            messages: [
+              expect.objectContaining({
+                value: JSON.stringify(validMessage),
+              }),
+            ],
+          }),
+        );
+      });
+
+      it("should throw on invalid message", async () => {
+        await expect(
+          client.sendMessage(TestDescriptor as any, invalidMessage),
+        ).rejects.toThrow("Validation failed");
+        expect(mockSend).not.toHaveBeenCalled();
+      });
+
+      it("should skip validation when descriptor has no schema", async () => {
+        const NoSchema = topic("test.topic")<{ id: string; value: number }>();
+        await client.sendMessage(NoSchema as any, invalidMessage as any);
+        expect(mockSend).toHaveBeenCalled();
+      });
+    });
+
+    describe("sendBatch", () => {
+      it("should validate each message in batch", async () => {
+        await expect(
+          client.sendBatch(TestDescriptor as any, [
+            { value: validMessage },
+            { value: invalidMessage as any },
+          ]),
+        ).rejects.toThrow("Validation failed");
+      });
+
+      it("should send valid batch through schema", async () => {
+        await client.sendBatch(TestDescriptor as any, [
+          { value: validMessage },
+          { value: { id: "2", value: 99 } },
+        ]);
+        expect(mockSend).toHaveBeenCalled();
+      });
+    });
+
+    describe("transaction", () => {
+      it("should validate messages in transaction send", async () => {
+        await expect(
+          client.transaction(async (ctx) => {
+            await ctx.send(TestDescriptor as any, invalidMessage);
+          }),
+        ).rejects.toThrow("Validation failed");
+        expect(mockTxAbort).toHaveBeenCalled();
+      });
+
+      it("should validate messages in transaction sendBatch", async () => {
+        await expect(
+          client.transaction(async (ctx) => {
+            await ctx.sendBatch(TestDescriptor as any, [
+              { value: invalidMessage as any },
+            ]);
+          }),
+        ).rejects.toThrow("Validation failed");
+        expect(mockTxAbort).toHaveBeenCalled();
+      });
+    });
+
+    describe("startConsumer", () => {
+      it("should deliver validated message to handler", async () => {
+        const handler = jest.fn();
+        mockRun.mockImplementation(async ({ eachMessage }) => {
+          await eachMessage({
+            topic: "test.topic",
+            partition: 0,
+            message: {
+              value: Buffer.from(JSON.stringify(validMessage)),
+            },
+          });
+        });
+
+        await client.startConsumer([TestDescriptor] as any, handler);
+        expect(handler).toHaveBeenCalledWith(validMessage, "test.topic");
+      });
+
+      it("should skip invalid message and log error", async () => {
+        const handler = jest.fn();
+        mockRun.mockImplementation(async ({ eachMessage }) => {
+          await eachMessage({
+            topic: "test.topic",
+            partition: 0,
+            message: {
+              value: Buffer.from(JSON.stringify(invalidMessage)),
+            },
+          });
+        });
+
+        await client.startConsumer([TestDescriptor] as any, handler);
+        expect(handler).not.toHaveBeenCalled();
+      });
+
+      it("should send invalid message to DLQ when dlq is enabled", async () => {
+        const handler = jest.fn();
+        mockRun.mockImplementation(async ({ eachMessage }) => {
+          await eachMessage({
+            topic: "test.topic",
+            partition: 0,
+            message: {
+              value: Buffer.from(JSON.stringify(invalidMessage)),
+            },
+          });
+        });
+
+        await client.startConsumer([TestDescriptor] as any, handler, {
+          dlq: true,
+        });
+        expect(handler).not.toHaveBeenCalled();
+        expect(mockSend).toHaveBeenCalledWith(
+          expect.objectContaining({ topic: "test.topic.dlq" }),
+        );
+      });
+
+      it("should call onError interceptor with KafkaValidationError", async () => {
+        const onError = jest.fn();
+        mockRun.mockImplementation(async ({ eachMessage }) => {
+          await eachMessage({
+            topic: "test.topic",
+            partition: 0,
+            message: {
+              value: Buffer.from(JSON.stringify(invalidMessage)),
+            },
+          });
+        });
+
+        await client.startConsumer([TestDescriptor] as any, jest.fn(), {
+          interceptors: [{ onError }],
+        });
+        expect(onError).toHaveBeenCalledTimes(1);
+        expect(onError.mock.calls[0][2]).toBeInstanceOf(KafkaValidationError);
+      });
+
+      it("should use schemas from options (decorator path)", async () => {
+        const handler = jest.fn();
+        const schemas = new Map([["test.topic", strictSchema]]);
+
+        mockRun.mockImplementation(async ({ eachMessage }) => {
+          await eachMessage({
+            topic: "test.topic",
+            partition: 0,
+            message: {
+              value: Buffer.from(JSON.stringify(invalidMessage)),
+            },
+          });
+        });
+
+        await client.startConsumer(["test.topic"] as any, handler, { schemas });
+        expect(handler).not.toHaveBeenCalled();
+      });
+
+      it("should pass through without schema (backward compat)", async () => {
+        const handler = jest.fn();
+        const NoSchema = topic("test.topic")<{ id: string; value: number }>();
+
+        mockRun.mockImplementation(async ({ eachMessage }) => {
+          await eachMessage({
+            topic: "test.topic",
+            partition: 0,
+            message: {
+              value: Buffer.from(JSON.stringify(invalidMessage)),
+            },
+          });
+        });
+
+        await client.startConsumer([NoSchema] as any, handler);
+        // No schema = no validation = handler receives whatever JSON.parse gives
+        expect(handler).toHaveBeenCalledWith(invalidMessage, "test.topic");
+      });
     });
   });
 });

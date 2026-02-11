@@ -3,8 +3,11 @@ import { KafkaContainer, StartedKafkaContainer } from "@testcontainers/kafka";
 import { Kafka } from "kafkajs";
 import { KafkaClient } from "../client/kafka.client";
 import { KafkaHealthIndicator } from "../health/kafka.health";
-import { topic } from "../client/topic";
-import { KafkaRetryExhaustedError } from "../client/errors";
+import { topic, SchemaLike } from "../client/topic";
+import {
+  KafkaRetryExhaustedError,
+  KafkaValidationError,
+} from "../client/errors";
 import type { ConsumerInterceptor } from "../client/kafka.client";
 
 type TestTopics = {
@@ -22,12 +25,31 @@ type TestTopics = {
   "test.retry-error.dlq": { value: string };
   "test.key-order": { seq: number };
   "test.headers": { body: string };
+  "test.schema-valid": { name: string; age: number };
+  "test.schema-invalid": { name: string; age: number };
+  "test.schema-invalid.dlq": { name: string; age: number };
+  "test.schema-send": { name: string; age: number };
+  "test.batch-consume": { id: number; text: string };
+  "test.multi-group": { seq: number };
 };
 
 const TestDescriptor = topic("test.descriptor")<{
   label: string;
   num: number;
 }>();
+
+const personSchema: SchemaLike<{ name: string; age: number }> = {
+  parse(data: unknown) {
+    const d = data as any;
+    if (typeof d?.name !== "string") throw new Error("name must be a string");
+    if (typeof d?.age !== "number") throw new Error("age must be a number");
+    return { name: d.name, age: d.age };
+  },
+};
+
+const SchemaValidTopic = topic("test.schema-valid").schema(personSchema);
+const SchemaInvalidTopic = topic("test.schema-invalid").schema(personSchema);
+const SchemaSendTopic = topic("test.schema-send").schema(personSchema);
 
 const ALL_TOPICS = Object.keys({
   "test.basic": 0,
@@ -44,6 +66,12 @@ const ALL_TOPICS = Object.keys({
   "test.retry-error.dlq": 0,
   "test.key-order": 0,
   "test.headers": 0,
+  "test.schema-valid": 0,
+  "test.schema-invalid": 0,
+  "test.schema-invalid.dlq": 0,
+  "test.schema-send": 0,
+  "test.batch-consume": 0,
+  "test.multi-group": 0,
 } satisfies Record<keyof TestTopics, unknown>);
 
 let container: StartedKafkaContainer;
@@ -517,6 +545,197 @@ describe("KafkaClient Integration", () => {
     const result = await promise;
     expect(result).toHaveLength(1);
     expect(result[0]).toEqual({ body: "with-headers" });
+
+    await client.disconnect();
+  });
+
+  it("should validate and deliver valid messages with schema descriptor", async () => {
+    const client = createClient("schema-valid");
+    await client.connectProducer();
+
+    const { messages, promise } =
+      waitForMessages<TestTopics["test.schema-valid"]>(1);
+
+    await client.startConsumer(
+      [SchemaValidTopic] as any,
+      async (msg) => {
+        messages.push(msg);
+      },
+      { fromBeginning: true },
+    );
+
+    await client.sendMessage(SchemaValidTopic as any, {
+      name: "Alice",
+      age: 30,
+    });
+
+    const result = await promise;
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({ name: "Alice", age: 30 });
+
+    await client.disconnect();
+  });
+
+  it("should reject invalid messages on consumer with schema and send to DLQ", async () => {
+    const client = createClient("schema-invalid");
+    await client.connectProducer();
+
+    const handlerCalls: any[] = [];
+    let capturedError: unknown = null;
+
+    const interceptor: ConsumerInterceptor<TestTopics> = {
+      onError: (_msg, _topic, error) => {
+        capturedError = error;
+      },
+    };
+
+    await client.startConsumer(
+      [SchemaInvalidTopic] as any,
+      async (msg) => {
+        handlerCalls.push(msg);
+      },
+      { fromBeginning: true, dlq: true, interceptors: [interceptor] },
+    );
+
+    // Send a raw invalid message (bypass schema on send by using string topic)
+    await client.sendMessage("test.schema-invalid", {
+      name: 123 as any,
+      age: "not-a-number" as any,
+    });
+
+    await new Promise((r) => setTimeout(r, 5000));
+
+    // Handler should NOT be called — message failed schema validation
+    expect(handlerCalls).toHaveLength(0);
+
+    // onError should have received KafkaValidationError
+    expect(capturedError).toBeInstanceOf(KafkaValidationError);
+
+    // DLQ should have the message
+    const dlqMessages: any[] = [];
+    const dlqClient = createClient("schema-invalid-dlq");
+    await dlqClient.connectProducer();
+
+    await dlqClient.startConsumer(
+      ["test.schema-invalid.dlq" as keyof TestTopics],
+      async (msg) => {
+        dlqMessages.push(msg);
+      },
+      { fromBeginning: true },
+    );
+
+    await new Promise((r) => setTimeout(r, 5000));
+    expect(dlqMessages.length).toBeGreaterThanOrEqual(1);
+
+    await client.disconnect();
+    await dlqClient.disconnect();
+  });
+
+  it("should reject invalid messages on send with schema descriptor", async () => {
+    const client = createClient("schema-send");
+    await client.connectProducer();
+
+    await expect(
+      client.sendMessage(SchemaSendTopic as any, {
+        name: 42 as any,
+        age: "bad" as any,
+      }),
+    ).rejects.toThrow();
+
+    await client.disconnect();
+  });
+
+  it("should consume messages in batch with startBatchConsumer", async () => {
+    const client = createClient("batch-consume");
+    await client.connectProducer();
+
+    const batches: Array<{ messages: any[]; topic: string }> = [];
+    const batchReady = new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 15_000);
+      const check = setInterval(() => {
+        if (batches.length >= 1) {
+          clearTimeout(timer);
+          clearInterval(check);
+          resolve();
+        }
+      }, 100);
+    });
+
+    await client.startBatchConsumer(
+      ["test.batch-consume"] as Array<keyof TestTopics>,
+      async (messages, topic) => {
+        batches.push({ messages: [...messages], topic });
+      },
+      { fromBeginning: true },
+    );
+
+    // Send 3 messages
+    for (let i = 0; i < 3; i++) {
+      await client.sendMessage("test.batch-consume", {
+        id: i,
+        text: `msg-${i}`,
+      });
+    }
+
+    await batchReady;
+
+    // Handler should have received messages as array(s)
+    const allMessages = batches.flatMap((b) => b.messages);
+    expect(allMessages.length).toBeGreaterThanOrEqual(3);
+    expect(allMessages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 0, text: "msg-0" }),
+        expect.objectContaining({ id: 1, text: "msg-1" }),
+        expect.objectContaining({ id: 2, text: "msg-2" }),
+      ]),
+    );
+
+    await client.disconnect();
+  });
+
+  it("should support multiple consumer groups on same topic", async () => {
+    const client = createClient("multi-group");
+    await client.connectProducer();
+
+    const groupAMessages: any[] = [];
+    const groupBMessages: any[] = [];
+
+    const waitBoth = new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 15_000);
+      const check = setInterval(() => {
+        if (groupAMessages.length >= 1 && groupBMessages.length >= 1) {
+          clearTimeout(timer);
+          clearInterval(check);
+          resolve();
+        }
+      }, 100);
+    });
+
+    await client.startConsumer(
+      ["test.multi-group"] as Array<keyof TestTopics>,
+      async (msg) => {
+        groupAMessages.push(msg);
+      },
+      { fromBeginning: true, groupId: `group-a-${Date.now()}` },
+    );
+
+    await client.startConsumer(
+      ["test.multi-group"] as Array<keyof TestTopics>,
+      async (msg) => {
+        groupBMessages.push(msg);
+      },
+      { fromBeginning: true, groupId: `group-b-${Date.now()}` },
+    );
+
+    await client.sendMessage("test.multi-group", { seq: 1 });
+
+    await waitBoth;
+
+    // Both groups should receive the same message
+    expect(groupAMessages).toHaveLength(1);
+    expect(groupBMessages).toHaveLength(1);
+    expect(groupAMessages[0]).toEqual({ seq: 1 });
+    expect(groupBMessages[0]).toEqual({ seq: 1 });
 
     await client.disconnect();
   });

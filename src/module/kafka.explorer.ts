@@ -52,16 +52,31 @@ export class KafkaExplorer implements OnModuleInit {
 
         const handler = (instance as any)[entry.methodName].bind(instance);
 
-        await client.startConsumer(
-          entry.topics as any,
-          async (message: any, topic: any) => {
-            await handler(message, topic);
-          },
-          entry.options,
-        );
+        const consumerOptions = { ...entry.options };
+        if (entry.schemas) {
+          consumerOptions.schemas = entry.schemas;
+        }
+
+        if (entry.batch) {
+          await client.startBatchConsumer(
+            entry.topics as any,
+            async (messages: any[], topic: any, meta: any) => {
+              await handler(messages, topic, meta);
+            },
+            consumerOptions,
+          );
+        } else {
+          await client.startConsumer(
+            entry.topics as any,
+            async (message: any, topic: any) => {
+              await handler(message, topic);
+            },
+            consumerOptions,
+          );
+        }
 
         this.logger.log(
-          `Registered @SubscribeTo(${entry.topics.join(", ")}) on ${instance.constructor.name}.${String(entry.methodName)}`,
+          `Registered @SubscribeTo(${entry.topics.join(", ")})${entry.batch ? " [batch]" : ""} on ${instance.constructor.name}.${String(entry.methodName)}`,
         );
       }
     }

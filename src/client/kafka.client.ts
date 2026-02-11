@@ -1,7 +1,7 @@
 import { Consumer, Kafka, Partitioners, Producer, Admin } from "kafkajs";
 import { Logger } from "@nestjs/common";
-import { TopicDescriptor } from "./topic";
-import { KafkaRetryExhaustedError } from "./errors";
+import { TopicDescriptor, SchemaLike } from "./topic";
+import { KafkaRetryExhaustedError, KafkaValidationError } from "./errors";
 import type {
   ClientId,
   GroupId,
@@ -12,6 +12,7 @@ import type {
   TopicMapConstraint,
   IKafkaClient,
   KafkaClientOptions,
+  BatchMeta,
 } from "./types";
 
 // Re-export all types so existing `import { ... } from './kafka.client'` keeps working
@@ -23,16 +24,17 @@ export * from "./types";
  *
  * @typeParam T - Topic-to-message type mapping for compile-time safety.
  */
-export class KafkaClient<T extends TopicMapConstraint<T>>
-  implements IKafkaClient<T>
-{
+export class KafkaClient<
+  T extends TopicMapConstraint<T>,
+> implements IKafkaClient<T> {
   private readonly kafka: Kafka;
   private readonly producer: Producer;
-  private readonly consumer: Consumer;
+  private readonly consumers = new Map<string, Consumer>();
   private readonly admin: Admin;
   private readonly logger: Logger;
   private readonly autoCreateTopicsEnabled: boolean;
   private readonly ensuredTopics = new Set<string>();
+  private readonly defaultGroupId: string;
 
   private isAdminConnected = false;
   public readonly clientId: ClientId;
@@ -44,6 +46,7 @@ export class KafkaClient<T extends TopicMapConstraint<T>>
     options?: KafkaClientOptions,
   ) {
     this.clientId = clientId;
+    this.defaultGroupId = groupId;
     this.logger = new Logger(`KafkaClient:${clientId}`);
     this.autoCreateTopicsEnabled = options?.autoCreateTopics ?? false;
 
@@ -57,8 +60,15 @@ export class KafkaClient<T extends TopicMapConstraint<T>>
       transactionalId: `${clientId}-tx`,
       maxInFlightRequests: 1,
     });
-    this.consumer = this.kafka.consumer({ groupId });
     this.admin = this.kafka.admin();
+  }
+
+  private getOrCreateConsumer(groupId?: string): Consumer {
+    const gid = groupId || this.defaultGroupId;
+    if (!this.consumers.has(gid)) {
+      this.consumers.set(gid, this.kafka.consumer({ groupId: gid }));
+    }
+    return this.consumers.get(gid)!;
   }
 
   private resolveTopicName(topicOrDescriptor: unknown): string {
@@ -85,6 +95,13 @@ export class KafkaClient<T extends TopicMapConstraint<T>>
     this.ensuredTopics.add(topic);
   }
 
+  private validateMessage(topicOrDesc: any, message: any): any {
+    if (topicOrDesc?.__schema) {
+      return topicOrDesc.__schema.parse(message);
+    }
+    return message;
+  }
+
   /** Send a single typed message. Accepts a topic key or a TopicDescriptor. */
   public async sendMessage<
     D extends TopicDescriptor<string & keyof T, T[string & keyof T]>,
@@ -99,13 +116,14 @@ export class KafkaClient<T extends TopicMapConstraint<T>>
     message: any,
     options: SendOptions = {},
   ): Promise<void> {
+    const validated = this.validateMessage(topicOrDesc, message);
     const topic = this.resolveTopicName(topicOrDesc);
     await this.ensureTopic(topic);
     await this.producer.send({
       topic,
       messages: [
         {
-          value: JSON.stringify(message),
+          value: JSON.stringify(validated),
           key: options.key ?? null,
           headers: options.headers,
         },
@@ -138,7 +156,7 @@ export class KafkaClient<T extends TopicMapConstraint<T>>
     await this.producer.send({
       topic,
       messages: messages.map((m) => ({
-        value: JSON.stringify(m.value),
+        value: JSON.stringify(this.validateMessage(topicOrDesc, m.value)),
         key: m.key ?? null,
         headers: m.headers,
       })),
@@ -158,13 +176,14 @@ export class KafkaClient<T extends TopicMapConstraint<T>>
           message: any,
           options: SendOptions = {},
         ) => {
+          const validated = this.validateMessage(topicOrDesc, message);
           const topic = this.resolveTopicName(topicOrDesc);
           await this.ensureTopic(topic);
           await tx.send({
             topic,
             messages: [
               {
-                value: JSON.stringify(message),
+                value: JSON.stringify(validated),
                 key: options.key ?? null,
                 headers: options.headers,
               },
@@ -178,7 +197,7 @@ export class KafkaClient<T extends TopicMapConstraint<T>>
           await tx.send({
             topic,
             messages: messages.map((m: any) => ({
-              value: JSON.stringify(m.value),
+              value: JSON.stringify(this.validateMessage(topicOrDesc, m.value)),
               key: m.key ?? null,
               headers: m.headers,
             })),
@@ -224,28 +243,35 @@ export class KafkaClient<T extends TopicMapConstraint<T>>
     options: ConsumerOptions<T> = {},
   ): Promise<void> {
     const {
+      groupId: optGroupId,
       fromBeginning = false,
       autoCommit = true,
       retry,
       dlq = false,
       interceptors = [],
+      schemas: optionSchemas,
     } = options;
+
+    const consumer = this.getOrCreateConsumer(optGroupId);
+
+    // Build schema map from descriptors and/or options.schemas
+    const schemaMap = this.buildSchemaMap(topics, optionSchemas);
 
     const topicNames = (topics as any[]).map((t: any) =>
       this.resolveTopicName(t),
     );
 
-    await this.consumer.connect();
+    await consumer.connect();
 
     for (const t of topicNames) {
       await this.ensureTopic(t);
     }
 
-    await this.consumer.subscribe({ topics: topicNames, fromBeginning });
+    await consumer.subscribe({ topics: topicNames, fromBeginning });
 
     this.logger.log(`Consumer subscribed to topics: ${topicNames.join(", ")}`);
 
-    await this.consumer.run({
+    await consumer.run({
       autoCommit,
       eachMessage: async ({ topic, message }) => {
         if (!message.value) {
@@ -266,6 +292,34 @@ export class KafkaClient<T extends TopicMapConstraint<T>>
           return;
         }
 
+        const schema = schemaMap.get(topic);
+        if (schema) {
+          try {
+            parsedMessage = schema.parse(parsedMessage);
+          } catch (error) {
+            const err =
+              error instanceof Error ? error : new Error(String(error));
+            const validationError = new KafkaValidationError(
+              topic,
+              parsedMessage,
+              { cause: err },
+            );
+            this.logger.error(
+              `Schema validation failed for topic ${topic}:`,
+              err.message,
+            );
+            if (dlq) await this.sendToDlq(topic, raw);
+            for (const interceptor of interceptors) {
+              await interceptor.onError?.(
+                parsedMessage,
+                topic,
+                validationError,
+              );
+            }
+            return;
+          }
+        }
+
         await this.processMessage(parsedMessage, raw, topic, handleMessage, {
           retry,
           dlq,
@@ -275,10 +329,215 @@ export class KafkaClient<T extends TopicMapConstraint<T>>
     });
   }
 
-  public async stopConsumer(): Promise<void> {
+  /** Subscribe to topics and consume messages in batches. */
+  public async startBatchConsumer<K extends Array<keyof T>>(
+    topics: K,
+    handleBatch: (
+      messages: T[K[number]][],
+      topic: K[number],
+      meta: BatchMeta,
+    ) => Promise<void>,
+    options?: ConsumerOptions<T>,
+  ): Promise<void>;
+  public async startBatchConsumer<
+    D extends TopicDescriptor<string & keyof T, T[string & keyof T]>,
+  >(
+    topics: D[],
+    handleBatch: (
+      messages: D["__type"][],
+      topic: D["__topic"],
+      meta: BatchMeta,
+    ) => Promise<void>,
+    options?: ConsumerOptions<T>,
+  ): Promise<void>;
+  public async startBatchConsumer(
+    topics: any[],
+    handleBatch: (
+      messages: any[],
+      topic: any,
+      meta: BatchMeta,
+    ) => Promise<void>,
+    options: ConsumerOptions<T> = {},
+  ): Promise<void> {
+    const {
+      groupId: optGroupId,
+      fromBeginning = false,
+      autoCommit = true,
+      retry,
+      dlq = false,
+      interceptors = [],
+      schemas: optionSchemas,
+    } = options;
 
-    await this.consumer.disconnect();
-    this.logger.log("Consumer disconnected");
+    const consumer = this.getOrCreateConsumer(optGroupId);
+    const schemaMap = this.buildSchemaMap(topics, optionSchemas);
+
+    const topicNames = (topics as any[]).map((t: any) =>
+      this.resolveTopicName(t),
+    );
+
+    await consumer.connect();
+
+    for (const t of topicNames) {
+      await this.ensureTopic(t);
+    }
+
+    await consumer.subscribe({ topics: topicNames, fromBeginning });
+
+    this.logger.log(
+      `Batch consumer subscribed to topics: ${topicNames.join(", ")}`,
+    );
+
+    await consumer.run({
+      autoCommit,
+      eachBatch: async ({
+        batch,
+        heartbeat,
+        resolveOffset,
+        commitOffsetsIfNecessary,
+      }) => {
+        const validMessages: any[] = [];
+
+        for (const message of batch.messages) {
+          if (!message.value) {
+            this.logger.warn(
+              `Received empty message from topic ${batch.topic}`,
+            );
+            continue;
+          }
+
+          const raw = message.value.toString();
+          let parsedMessage: any;
+
+          try {
+            parsedMessage = JSON.parse(raw);
+          } catch (error) {
+            this.logger.error(
+              `Failed to parse message from topic ${batch.topic}:`,
+              error instanceof Error ? error.stack : String(error),
+            );
+            continue;
+          }
+
+          const schema = schemaMap.get(batch.topic);
+          if (schema) {
+            try {
+              parsedMessage = schema.parse(parsedMessage);
+            } catch (error) {
+              const err =
+                error instanceof Error ? error : new Error(String(error));
+              const validationError = new KafkaValidationError(
+                batch.topic,
+                parsedMessage,
+                { cause: err },
+              );
+              this.logger.error(
+                `Schema validation failed for topic ${batch.topic}:`,
+                err.message,
+              );
+              if (dlq) await this.sendToDlq(batch.topic, raw);
+              for (const interceptor of interceptors) {
+                await interceptor.onError?.(
+                  parsedMessage,
+                  batch.topic,
+                  validationError,
+                );
+              }
+              continue;
+            }
+          }
+
+          validMessages.push(parsedMessage);
+        }
+
+        if (validMessages.length === 0) return;
+
+        const meta: BatchMeta = {
+          partition: batch.partition,
+          highWatermark: batch.highWatermark,
+          heartbeat,
+          resolveOffset,
+          commitOffsetsIfNecessary,
+        };
+
+        const maxAttempts = retry ? retry.maxRetries + 1 : 1;
+        const backoffMs = retry?.backoffMs ?? 1000;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          try {
+            for (const interceptor of interceptors) {
+              for (const msg of validMessages) {
+                await interceptor.before?.(msg, batch.topic);
+              }
+            }
+
+            await handleBatch(validMessages, batch.topic as any, meta);
+
+            for (const interceptor of interceptors) {
+              for (const msg of validMessages) {
+                await interceptor.after?.(msg, batch.topic);
+              }
+            }
+            return;
+          } catch (error) {
+            const err =
+              error instanceof Error ? error : new Error(String(error));
+            const isLastAttempt = attempt === maxAttempts;
+
+            if (isLastAttempt && maxAttempts > 1) {
+              const exhaustedError = new KafkaRetryExhaustedError(
+                batch.topic,
+                validMessages,
+                maxAttempts,
+                { cause: err },
+              );
+              for (const interceptor of interceptors) {
+                await interceptor.onError?.(
+                  validMessages as any,
+                  batch.topic,
+                  exhaustedError,
+                );
+              }
+            } else {
+              for (const interceptor of interceptors) {
+                await interceptor.onError?.(
+                  validMessages as any,
+                  batch.topic,
+                  err,
+                );
+              }
+            }
+
+            this.logger.error(
+              `Error processing batch from topic ${batch.topic} (attempt ${attempt}/${maxAttempts}):`,
+              err.stack,
+            );
+
+            if (isLastAttempt) {
+              if (dlq) {
+                for (const msg of batch.messages) {
+                  if (msg.value) {
+                    await this.sendToDlq(batch.topic, msg.value.toString());
+                  }
+                }
+              }
+            } else {
+              await this.sleep(backoffMs * attempt);
+            }
+          }
+        }
+      },
+    });
+  }
+
+  public async stopConsumer(): Promise<void> {
+    const tasks = [];
+    for (const consumer of this.consumers.values()) {
+      tasks.push(consumer.disconnect());
+    }
+    await Promise.allSettled(tasks);
+    this.consumers.clear();
+    this.logger.log("All consumers disconnected");
   }
 
   /** Check broker connectivity and return available topics. */
@@ -295,19 +554,40 @@ export class KafkaClient<T extends TopicMapConstraint<T>>
     return this.clientId;
   }
 
-  /** Gracefully disconnect producer, consumer, and admin. */
+  /** Gracefully disconnect producer, all consumers, and admin. */
   public async disconnect(): Promise<void> {
-
-    const tasks = [this.producer.disconnect(), this.consumer.disconnect()];
+    const tasks: Promise<void>[] = [this.producer.disconnect()];
+    for (const consumer of this.consumers.values()) {
+      tasks.push(consumer.disconnect());
+    }
     if (this.isAdminConnected) {
       tasks.push(this.admin.disconnect());
       this.isAdminConnected = false;
     }
     await Promise.allSettled(tasks);
+    this.consumers.clear();
     this.logger.log("All connections closed");
   }
 
   // --- Private helpers ---
+
+  private buildSchemaMap(
+    topics: any[],
+    optionSchemas?: Map<string, SchemaLike>,
+  ): Map<string, SchemaLike> {
+    const schemaMap = new Map<string, SchemaLike>();
+    for (const t of topics) {
+      if (t?.__schema) {
+        schemaMap.set(this.resolveTopicName(t), t.__schema);
+      }
+    }
+    if (optionSchemas) {
+      for (const [k, v] of optionSchemas) {
+        schemaMap.set(k, v);
+      }
+    }
+    return schemaMap;
+  }
 
   private async processMessage<K extends Array<keyof T>>(
     parsedMessage: T[K[number]],
@@ -333,8 +613,7 @@ export class KafkaClient<T extends TopicMapConstraint<T>>
         }
         return;
       } catch (error) {
-        const err =
-          error instanceof Error ? error : new Error(String(error));
+        const err = error instanceof Error ? error : new Error(String(error));
         const isLastAttempt = attempt === maxAttempts;
 
         if (isLastAttempt && maxAttempts > 1) {

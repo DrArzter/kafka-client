@@ -1,4 +1,4 @@
-import { TopicDescriptor } from "./topic";
+import { TopicDescriptor, SchemaLike } from "./topic";
 
 /**
  * Mapping of topic names to their message types.
@@ -41,10 +41,26 @@ export interface SendOptions {
   headers?: MessageHeaders;
 }
 
+/** Metadata exposed to batch consumer handlers. */
+export interface BatchMeta {
+  /** Partition number for this batch. */
+  partition: number;
+  /** Highest offset available on the broker for this partition. */
+  highWatermark: string;
+  /** Send a heartbeat to the broker to prevent session timeout. */
+  heartbeat(): Promise<void>;
+  /** Mark an offset as processed (for manual offset management). */
+  resolveOffset(offset: string): void;
+  /** Commit offsets if the auto-commit threshold has been reached. */
+  commitOffsetsIfNecessary(): Promise<void>;
+}
+
 /** Options for configuring a Kafka consumer. */
 export interface ConsumerOptions<
   T extends TopicMapConstraint<T> = TTopicMessageMap,
 > {
+  /** Override the default consumer group ID from the constructor. */
+  groupId?: string;
   /** Start reading from earliest offset. Default: `false`. */
   fromBeginning?: boolean;
   /** Automatically commit offsets. Default: `true`. */
@@ -55,6 +71,8 @@ export interface ConsumerOptions<
   dlq?: boolean;
   /** Interceptors called before/after each message. */
   interceptors?: ConsumerInterceptor<T>[];
+  /** @internal Schema map populated by @SubscribeTo when descriptors have schemas. */
+  schemas?: Map<string, SchemaLike>;
 }
 
 /** Configuration for consumer retry behavior. */
@@ -126,6 +144,28 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
   >(
     topics: D[],
     handleMessage: (message: D["__type"], topic: D["__topic"]) => Promise<void>,
+    options?: ConsumerOptions<T>,
+  ): Promise<void>;
+
+  startBatchConsumer<K extends Array<keyof T>>(
+    topics: K,
+    handleBatch: (
+      messages: T[K[number]][],
+      topic: K[number],
+      meta: BatchMeta,
+    ) => Promise<void>,
+    options?: ConsumerOptions<T>,
+  ): Promise<void>;
+
+  startBatchConsumer<
+    D extends TopicDescriptor<string & keyof T, T[string & keyof T]>,
+  >(
+    topics: D[],
+    handleBatch: (
+      messages: D["__type"][],
+      topic: D["__topic"],
+      meta: BatchMeta,
+    ) => Promise<void>,
     options?: ConsumerOptions<T>,
   ): Promise<void>;
 

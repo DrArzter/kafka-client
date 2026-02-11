@@ -18,6 +18,7 @@ An opinionated wrapper around kafkajs that integrates with NestJS as a DynamicMo
 - **Idempotent producer** — `acks: -1`, `idempotent: true` by default
 - **Retry + DLQ** — configurable retries with backoff, dead letter queue for failed messages
 - **Batch sending** — send multiple messages in a single request
+- **Batch consuming** — `startBatchConsumer()` for high-throughput `eachBatch` processing
 - **Partition key support** — route related messages to the same partition
 - **Custom headers** — attach metadata headers to messages
 - **Transactions** — exactly-once semantics with `producer.transaction()`
@@ -314,6 +315,24 @@ export class OrdersService implements OnModuleInit {
 
 ## Multiple consumer groups
 
+### Per-consumer groupId
+
+Override the default consumer group for specific consumers. Each unique `groupId` creates a separate kafkajs Consumer internally:
+
+```typescript
+// Default group from constructor
+await kafka.startConsumer(['orders'], handler);
+
+// Custom group — receives its own copy of messages
+await kafka.startConsumer(['orders'], auditHandler, { groupId: 'orders-audit' });
+
+// Works with @SubscribeTo too
+@SubscribeTo('orders', { groupId: 'orders-audit' })
+async auditOrders(message) { ... }
+```
+
+### Named clients
+
 Register multiple named clients for different bounded contexts:
 
 ```typescript
@@ -406,6 +425,38 @@ await this.kafka.sendBatch('order.created', [
 ]);
 ```
 
+## Batch consuming
+
+Process messages in batches for higher throughput. The handler receives an array of parsed messages and a `BatchMeta` object with offset management controls:
+
+```typescript
+await this.kafka.startBatchConsumer(
+  ['order.created'],
+  async (messages, topic, meta) => {
+    // messages: OrdersTopicMap['order.created'][]
+    for (const msg of messages) {
+      await processOrder(msg);
+      meta.resolveOffset(/* ... */);
+    }
+    await meta.commitOffsetsIfNecessary();
+  },
+  { retry: { maxRetries: 3 }, dlq: true },
+);
+```
+
+With `@SubscribeTo()`:
+
+```typescript
+@SubscribeTo('order.created', { batch: true })
+async handleOrders(messages: OrdersTopicMap['order.created'][], topic: string) {
+  // messages is an array
+}
+```
+
+Schema validation runs per-message — invalid messages are skipped (DLQ'd if enabled), valid ones are passed to the handler. Retry applies to the whole batch.
+
+`BatchMeta` exposes: `partition`, `highWatermark`, `heartbeat()`, `resolveOffset(offset)`, `commitOffsetsIfNecessary()`.
+
 ## Transactions
 
 Send multiple messages atomically with exactly-once semantics:
@@ -453,27 +504,83 @@ await this.kafka.startConsumer(['order.created'], handler, {
 
 Multiple interceptors run in order. All hooks are optional.
 
-## Consumer options
+## Options reference
+
+### Send options
+
+Options for `sendMessage()` — the third argument:
+
+| Option    | Default | Description                                      |
+|-----------|---------|--------------------------------------------------|
+| `key`     | —       | Partition key for message routing                 |
+| `headers` | —       | Custom metadata headers (`Record<string, string>`) |
+
+`sendBatch()` accepts `key` and `headers` per message inside the array items.
+
+### Consumer options
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `groupId` | constructor value | Override consumer group for this subscription |
 | `fromBeginning` | `false` | Read from the beginning of the topic |
 | `autoCommit` | `true` | Auto-commit offsets |
 | `retry.maxRetries` | — | Number of retry attempts |
 | `retry.backoffMs` | `1000` | Base delay between retries (multiplied by attempt number) |
 | `dlq` | `false` | Send to `{topic}.dlq` after all retries exhausted |
 | `interceptors` | `[]` | Array of before/after/onError hooks |
+| `batch` | `false` | (decorator only) Use `startBatchConsumer` instead of `startConsumer` |
 
 ### Module options
 
+Passed to `KafkaModule.register()` or returned from `registerAsync()` factory:
+
 | Option | Default | Description |
 |--------|---------|-------------|
-| `clientId` | — | Kafka client identifier |
-| `groupId` | — | Consumer group ID |
-| `brokers` | — | Array of broker addresses |
-| `name` | — | Named client for multi-group setups |
-| `isGlobal` | `false` | Make the client available in all modules |
-| `autoCreateTopics` | `false` | Auto-create topics on first send/consume |
+| `clientId` | — | Kafka client identifier (required) |
+| `groupId` | — | Default consumer group ID (required) |
+| `brokers` | — | Array of broker addresses (required) |
+| `name` | — | Named client identifier for multi-client setups |
+| `isGlobal` | `false` | Make the client available in all modules without re-importing |
+| `autoCreateTopics` | `false` | Auto-create topics on first send/consume (dev only) |
+
+**Module-scoped** (default) — import `KafkaModule` in each module that needs it:
+
+```typescript
+// orders.module.ts
+@Module({
+  imports: [
+    KafkaModule.register<OrdersTopicMap>({
+      clientId: 'orders',
+      groupId: 'orders-group',
+      brokers: ['localhost:9092'],
+    }),
+  ],
+})
+export class OrdersModule {}
+```
+
+**App-wide** — register once in `AppModule` with `isGlobal: true`, inject anywhere:
+
+```typescript
+// app.module.ts
+@Module({
+  imports: [
+    KafkaModule.register<MyTopics>({
+      clientId: 'my-app',
+      groupId: 'my-group',
+      brokers: ['localhost:9092'],
+      isGlobal: true,
+    }),
+  ],
+})
+export class AppModule {}
+
+// any module — no KafkaModule import needed
+@Injectable()
+export class PaymentService {
+  constructor(@InjectKafkaClient() private readonly kafka: KafkaClient<MyTopics>) {}
+}
+```
 
 ## Error classes
 
@@ -507,6 +614,85 @@ const interceptor: ConsumerInterceptor<MyTopics> = {
 ```
 
 When `retry.maxRetries` is set and all attempts fail, `KafkaRetryExhaustedError` is passed to `onError` interceptors automatically.
+
+**`KafkaValidationError`** — thrown when schema validation fails on the consumer side. Has `topic`, `originalMessage`, and `cause`:
+
+```typescript
+import { KafkaValidationError } from '@drarzter/kafka-client';
+
+const interceptor: ConsumerInterceptor<MyTopics> = {
+  onError: (message, topic, error) => {
+    if (error instanceof KafkaValidationError) {
+      console.log(`Bad message on ${error.topic}:`, error.cause?.message);
+    }
+  },
+};
+```
+
+## Schema validation
+
+Add runtime message validation using any library with a `.parse()` method — Zod, Valibot, ArkType, or a custom validator. No extra dependency required.
+
+### Defining topics with schemas
+
+```typescript
+import { topic, TopicsFrom } from '@drarzter/kafka-client';
+import { z } from 'zod';  // or valibot, arktype, etc.
+
+// Schema-validated — type inferred from schema, no generic needed
+export const OrderCreated = topic('order.created').schema(z.object({
+  orderId: z.string(),
+  userId: z.string(),
+  amount: z.number().positive(),
+}));
+
+// Without schema — explicit generic (still works)
+export const OrderAudit = topic('order.audit')<{ orderId: string; action: string }>();
+
+export type MyTopics = TopicsFrom<typeof OrderCreated | typeof OrderAudit>;
+```
+
+### How it works
+
+**On send** — `sendMessage`, `sendBatch`, and `transaction` call `schema.parse(message)` before serializing. Invalid messages throw immediately (the schema library's error, e.g. `ZodError`):
+
+```typescript
+// This throws ZodError — amount must be positive
+await kafka.sendMessage(OrderCreated, { orderId: '1', userId: '2', amount: -5 });
+```
+
+**On consume** — after `JSON.parse`, the consumer validates each message against the schema. Invalid messages are:
+
+1. Logged as errors
+2. Sent to DLQ if `dlq: true`
+3. Passed to `onError` interceptors as `KafkaValidationError`
+4. Skipped (handler is NOT called)
+
+```typescript
+@SubscribeTo(OrderCreated, { dlq: true })
+async handleOrder(message) {
+  // `message` is guaranteed to match the schema
+  console.log(message.orderId); // string — validated at runtime
+}
+```
+
+### Bring your own validator
+
+Any object with `parse(data: unknown): T` works:
+
+```typescript
+import { SchemaLike } from '@drarzter/kafka-client';
+
+const customValidator: SchemaLike<{ id: string }> = {
+  parse(data: unknown) {
+    const d = data as any;
+    if (typeof d?.id !== 'string') throw new Error('id must be a string');
+    return { id: d.id };
+  },
+};
+
+const MyTopic = topic('my.topic').schema(customValidator);
+```
 
 ## Health check
 
