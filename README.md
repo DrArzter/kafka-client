@@ -29,7 +29,11 @@ An opinionated wrapper around kafkajs that integrates with NestJS as a DynamicMo
 - **Multiple consumer groups** — named clients for different bounded contexts
 - **Declarative & imperative** — use `@SubscribeTo()` decorator or `startConsumer()` directly
 
+See the [Roadmap](./ROADMAP.md) for upcoming features and version history.
+
 ## Installation
+
+Any package manager of your choise:
 
 ```bash
 npm install @drarzter/kafka-client
