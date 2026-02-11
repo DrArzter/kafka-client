@@ -1,5 +1,7 @@
 /** Error thrown when a consumer message handler fails. */
 export class KafkaProcessingError extends Error {
+  declare readonly cause?: Error;
+
   constructor(
     message: string,
     public readonly topic: string,
@@ -8,6 +10,7 @@ export class KafkaProcessingError extends Error {
   ) {
     super(message, options);
     this.name = "KafkaProcessingError";
+    if (options?.cause) this.cause = options.cause;
   }
 }
 

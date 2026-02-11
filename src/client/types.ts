@@ -121,6 +121,14 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
     options?: ConsumerOptions<T>,
   ): Promise<void>;
 
+  startConsumer<
+    D extends TopicDescriptor<string & keyof T, T[string & keyof T]>,
+  >(
+    topics: D[],
+    handleMessage: (message: D["__type"], topic: D["__topic"]) => Promise<void>,
+    options?: ConsumerOptions<T>,
+  ): Promise<void>;
+
   stopConsumer(): Promise<void>;
 
   sendMessage<K extends keyof T>(
@@ -143,6 +151,6 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
 
 /** Options for `KafkaClient` constructor. */
 export interface KafkaClientOptions {
-  /** Auto-create topics via admin on first use (send/consume). Useful for development. */
+  /** Auto-create topics via admin before the first `sendMessage`, `sendBatch`, `transaction`, or `startConsumer` for each topic. Useful for development — not recommended in production. */
   autoCreateTopics?: boolean;
 }

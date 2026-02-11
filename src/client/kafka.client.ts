@@ -207,8 +207,20 @@ export class KafkaClient<T extends TopicMapConstraint<T>>
 
   /** Subscribe to topics and start consuming messages with the given handler. */
   public async startConsumer<K extends Array<keyof T>>(
-    topics: K | TopicDescriptor[],
+    topics: K,
     handleMessage: (message: T[K[number]], topic: K[number]) => Promise<void>,
+    options?: ConsumerOptions<T>,
+  ): Promise<void>;
+  public async startConsumer<
+    D extends TopicDescriptor<string & keyof T, T[string & keyof T]>,
+  >(
+    topics: D[],
+    handleMessage: (message: D["__type"], topic: D["__topic"]) => Promise<void>,
+    options?: ConsumerOptions<T>,
+  ): Promise<void>;
+  public async startConsumer(
+    topics: any[],
+    handleMessage: (message: any, topic: any) => Promise<void>,
     options: ConsumerOptions<T> = {},
   ): Promise<void> {
     const {
@@ -242,10 +254,10 @@ export class KafkaClient<T extends TopicMapConstraint<T>>
         }
 
         const raw = message.value.toString();
-        let parsedMessage: T[K[number]];
+        let parsedMessage: any;
 
         try {
-          parsedMessage = JSON.parse(raw) as T[K[number]];
+          parsedMessage = JSON.parse(raw);
         } catch (error) {
           this.logger.error(
             `Failed to parse message from topic ${topic}:`,
