@@ -13,6 +13,7 @@ import type {
   IKafkaClient,
   KafkaClientOptions,
   BatchMeta,
+  SubscribeRetryOptions,
 } from "./types";
 
 // Re-export all types so existing `import { ... } from './kafka.client'` keeps working
@@ -33,8 +34,11 @@ export class KafkaClient<
   private readonly admin: Admin;
   private readonly logger: Logger;
   private readonly autoCreateTopicsEnabled: boolean;
+  private readonly strictSchemasEnabled: boolean;
   private readonly ensuredTopics = new Set<string>();
   private readonly defaultGroupId: string;
+  private readonly schemaRegistry = new Map<string, SchemaLike>();
+  private readonly runningConsumers = new Map<string, "eachMessage" | "eachBatch">();
 
   private isAdminConnected = false;
   public readonly clientId: ClientId;
@@ -49,6 +53,7 @@ export class KafkaClient<
     this.defaultGroupId = groupId;
     this.logger = new Logger(`KafkaClient:${clientId}`);
     this.autoCreateTopicsEnabled = options?.autoCreateTopics ?? false;
+    this.strictSchemasEnabled = options?.strictSchemas ?? true;
 
     this.kafka = new Kafka({
       clientId: this.clientId,
@@ -97,7 +102,13 @@ export class KafkaClient<
 
   private validateMessage(topicOrDesc: any, message: any): any {
     if (topicOrDesc?.__schema) {
+      const topic = this.resolveTopicName(topicOrDesc);
+      this.schemaRegistry.set(topic, topicOrDesc.__schema);
       return topicOrDesc.__schema.parse(message);
+    }
+    if (this.strictSchemasEnabled && typeof topicOrDesc === "string") {
+      const schema = this.schemaRegistry.get(topicOrDesc);
+      if (schema) return schema.parse(message);
     }
     return message;
   }
@@ -252,6 +263,15 @@ export class KafkaClient<
       schemas: optionSchemas,
     } = options;
 
+    const gid = optGroupId || this.defaultGroupId;
+    const existingMode = this.runningConsumers.get(gid);
+    if (existingMode === "eachBatch") {
+      throw new Error(
+        `Cannot use eachMessage on consumer group "${gid}" — it is already running with eachBatch. ` +
+          `Use a different groupId for this consumer.`,
+      );
+    }
+
     const consumer = this.getOrCreateConsumer(optGroupId);
 
     // Build schema map from descriptors and/or options.schemas
@@ -262,12 +282,7 @@ export class KafkaClient<
     );
 
     await consumer.connect();
-
-    for (const t of topicNames) {
-      await this.ensureTopic(t);
-    }
-
-    await consumer.subscribe({ topics: topicNames, fromBeginning });
+    await this.subscribeWithRetry(consumer, topicNames, fromBeginning, options.subscribeRetry);
 
     this.logger.log(`Consumer subscribed to topics: ${topicNames.join(", ")}`);
 
@@ -327,6 +342,8 @@ export class KafkaClient<
         });
       },
     });
+
+    this.runningConsumers.set(gid, "eachMessage");
   }
 
   /** Subscribe to topics and consume messages in batches. */
@@ -369,6 +386,15 @@ export class KafkaClient<
       schemas: optionSchemas,
     } = options;
 
+    const gid = optGroupId || this.defaultGroupId;
+    const existingMode = this.runningConsumers.get(gid);
+    if (existingMode === "eachMessage") {
+      throw new Error(
+        `Cannot use eachBatch on consumer group "${gid}" — it is already running with eachMessage. ` +
+          `Use a different groupId for this consumer.`,
+      );
+    }
+
     const consumer = this.getOrCreateConsumer(optGroupId);
     const schemaMap = this.buildSchemaMap(topics, optionSchemas);
 
@@ -377,12 +403,7 @@ export class KafkaClient<
     );
 
     await consumer.connect();
-
-    for (const t of topicNames) {
-      await this.ensureTopic(t);
-    }
-
-    await consumer.subscribe({ topics: topicNames, fromBeginning });
+    await this.subscribeWithRetry(consumer, topicNames, fromBeginning, options.subscribeRetry);
 
     this.logger.log(
       `Batch consumer subscribed to topics: ${topicNames.join(", ")}`,
@@ -528,6 +549,8 @@ export class KafkaClient<
         }
       },
     });
+
+    this.runningConsumers.set(gid, "eachBatch");
   }
 
   public async stopConsumer(): Promise<void> {
@@ -537,6 +560,7 @@ export class KafkaClient<
     }
     await Promise.allSettled(tasks);
     this.consumers.clear();
+    this.runningConsumers.clear();
     this.logger.log("All consumers disconnected");
   }
 
@@ -566,6 +590,7 @@ export class KafkaClient<
     }
     await Promise.allSettled(tasks);
     this.consumers.clear();
+    this.runningConsumers.clear();
     this.logger.log("All connections closed");
   }
 
@@ -578,12 +603,15 @@ export class KafkaClient<
     const schemaMap = new Map<string, SchemaLike>();
     for (const t of topics) {
       if (t?.__schema) {
-        schemaMap.set(this.resolveTopicName(t), t.__schema);
+        const name = this.resolveTopicName(t);
+        schemaMap.set(name, t.__schema);
+        this.schemaRegistry.set(name, t.__schema);
       }
     }
     if (optionSchemas) {
       for (const [k, v] of optionSchemas) {
         schemaMap.set(k, v);
+        this.schemaRegistry.set(k, v);
       }
     }
     return schemaMap;
@@ -660,6 +688,30 @@ export class KafkaClient<
         `Failed to send message to DLQ ${dlqTopic}:`,
         error instanceof Error ? error.stack : String(error),
       );
+    }
+  }
+
+  private async subscribeWithRetry(
+    consumer: Consumer,
+    topics: string[],
+    fromBeginning: boolean,
+    retryOpts?: SubscribeRetryOptions,
+  ): Promise<void> {
+    const maxAttempts = retryOpts?.retries ?? 5;
+    const backoffMs = retryOpts?.backoffMs ?? 5000;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await consumer.subscribe({ topics, fromBeginning });
+        return;
+      } catch (error) {
+        if (attempt === maxAttempts) throw error;
+        const msg = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `Failed to subscribe to [${topics.join(", ")}] (attempt ${attempt}/${maxAttempts}): ${msg}. Retrying in ${backoffMs}ms...`,
+        );
+        await this.sleep(backoffMs);
+      }
     }
   }
 

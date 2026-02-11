@@ -331,6 +331,13 @@ await kafka.startConsumer(['orders'], auditHandler, { groupId: 'orders-audit' })
 async auditOrders(message) { ... }
 ```
 
+**Important:** You cannot mix `eachMessage` and `eachBatch` consumers on the same `groupId`. The library throws a clear error if you try:
+
+```text
+Cannot use eachBatch on consumer group "my-group" — it is already running with eachMessage.
+Use a different groupId for this consumer.
+```
+
 ### Named clients
 
 Register multiple named clients for different bounded contexts:
@@ -529,6 +536,8 @@ Options for `sendMessage()` — the third argument:
 | `dlq` | `false` | Send to `{topic}.dlq` after all retries exhausted |
 | `interceptors` | `[]` | Array of before/after/onError hooks |
 | `batch` | `false` | (decorator only) Use `startBatchConsumer` instead of `startConsumer` |
+| `subscribeRetry.retries` | `5` | Max attempts for `consumer.subscribe()` when topic doesn't exist yet |
+| `subscribeRetry.backoffMs` | `5000` | Delay between subscribe retry attempts (ms) |
 
 ### Module options
 
@@ -541,7 +550,8 @@ Passed to `KafkaModule.register()` or returned from `registerAsync()` factory:
 | `brokers` | — | Array of broker addresses (required) |
 | `name` | — | Named client identifier for multi-client setups |
 | `isGlobal` | `false` | Make the client available in all modules without re-importing |
-| `autoCreateTopics` | `false` | Auto-create topics on first send/consume (dev only) |
+| `autoCreateTopics` | `false` | Auto-create topics on first send (dev only) |
+| `strictSchemas` | `true` | Validate string topic keys against schemas registered via TopicDescriptor |
 
 **Module-scoped** (default) — import `KafkaModule` in each module that needs it:
 
@@ -675,6 +685,20 @@ async handleOrder(message) {
   console.log(message.orderId); // string — validated at runtime
 }
 ```
+
+### Strict schema mode
+
+By default (`strictSchemas: true`), once a schema is registered via a TopicDescriptor, string topic keys are also validated against it:
+
+```typescript
+// First call registers the schema in the internal registry
+await kafka.sendMessage(OrderCreated, { orderId: '1', userId: '2', amount: 100 });
+
+// Now this is ALSO validated — throws if data doesn't match OrderCreated's schema
+await kafka.sendMessage('order.created', { orderId: 123, userId: null, amount: -5 });
+```
+
+Disable with `strictSchemas: false` in `KafkaModule.register()` options if you want the old behavior (string topics bypass validation).
 
 ### Bring your own validator
 

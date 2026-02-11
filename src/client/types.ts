@@ -73,6 +73,8 @@ export interface ConsumerOptions<
   interceptors?: ConsumerInterceptor<T>[];
   /** @internal Schema map populated by @SubscribeTo when descriptors have schemas. */
   schemas?: Map<string, SchemaLike>;
+  /** Retry config for `consumer.subscribe()` when the topic doesn't exist yet. */
+  subscribeRetry?: SubscribeRetryOptions;
 }
 
 /** Configuration for consumer retry behavior. */
@@ -191,6 +193,16 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
 
 /** Options for `KafkaClient` constructor. */
 export interface KafkaClientOptions {
-  /** Auto-create topics via admin before the first `sendMessage`, `sendBatch`, `transaction`, or `startConsumer` for each topic. Useful for development — not recommended in production. */
+  /** Auto-create topics via admin before the first `sendMessage`, `sendBatch`, or `transaction` for each topic. Useful for development — not recommended in production. */
   autoCreateTopics?: boolean;
+  /** When `true`, string topic keys are validated against any schema previously registered via a TopicDescriptor. Default: `true`. */
+  strictSchemas?: boolean;
+}
+
+/** Options for consumer subscribe retry when topic doesn't exist yet. */
+export interface SubscribeRetryOptions {
+  /** Maximum number of subscribe attempts. Default: `5`. */
+  retries?: number;
+  /** Delay between retries in ms. Default: `5000`. */
+  backoffMs?: number;
 }

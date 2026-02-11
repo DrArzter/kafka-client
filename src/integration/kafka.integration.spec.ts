@@ -597,8 +597,16 @@ describe("KafkaClient Integration", () => {
       { fromBeginning: true, dlq: true, interceptors: [interceptor] },
     );
 
-    // Send a raw invalid message (bypass schema on send by using string topic)
-    await client.sendMessage("test.schema-invalid", {
+    // Send a raw invalid message via a separate client with strictSchemas disabled
+    // so it bypasses send-side validation and reaches the consumer
+    const sender = new KafkaClient<TestTopics>(
+      "integration-schema-invalid-sender",
+      "group-sender",
+      brokers,
+      { strictSchemas: false },
+    );
+    await sender.connectProducer();
+    await sender.sendMessage("test.schema-invalid", {
       name: 123 as any,
       age: "not-a-number" as any,
     });
@@ -628,6 +636,7 @@ describe("KafkaClient Integration", () => {
     expect(dlqMessages.length).toBeGreaterThanOrEqual(1);
 
     await client.disconnect();
+    await sender.disconnect();
     await dlqClient.disconnect();
   });
 
@@ -641,6 +650,27 @@ describe("KafkaClient Integration", () => {
         age: "bad" as any,
       }),
     ).rejects.toThrow();
+
+    await client.disconnect();
+  });
+
+  it("should reject string topic send via strictSchemas after descriptor registers schema", async () => {
+    const client = createClient("strict-schema");
+    await client.connectProducer();
+
+    // First send via descriptor — registers the schema in the internal registry
+    await client.sendMessage(SchemaSendTopic as any, {
+      name: "Alice",
+      age: 30,
+    });
+
+    // Now sending via string topic with invalid data should throw
+    await expect(
+      client.sendMessage("test.schema-send", {
+        name: 42 as any,
+        age: "bad" as any,
+      }),
+    ).rejects.toThrow("name must be a string");
 
     await client.disconnect();
   });

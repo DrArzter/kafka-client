@@ -827,12 +827,10 @@ describe("KafkaClient", () => {
       });
     });
 
-    it("should create topics on startConsumer", async () => {
+    it("should NOT create topics on startConsumer (consumers don't create topics)", async () => {
       await autoClient.startConsumer(["test.topic"], jest.fn());
 
-      expect(mockCreateTopics).toHaveBeenCalledWith({
-        topics: [{ topic: "test.topic", numPartitions: 1 }],
-      });
+      expect(mockCreateTopics).not.toHaveBeenCalled();
     });
 
     it("should reuse admin connection across ensureTopic calls", async () => {
@@ -1461,6 +1459,162 @@ describe("KafkaClient", () => {
         // No schema = no validation = handler receives whatever JSON.parse gives
         expect(handler).toHaveBeenCalledWith(invalidMessage, "test.topic");
       });
+    });
+  });
+
+  describe("strictSchemas", () => {
+    const strictSchema: SchemaLike<{ id: string; value: number }> = {
+      parse(data: unknown) {
+        const d = data as any;
+        if (typeof d?.id !== "string" || typeof d?.value !== "number") {
+          throw new Error("Validation failed");
+        }
+        return d as { id: string; value: number };
+      },
+    };
+
+    const Descriptor = topic("test.topic").schema(strictSchema);
+
+    it("should validate string topic against registry after descriptor was used (default strictSchemas=true)", async () => {
+      // First, register the schema by sending via descriptor
+      await client.sendMessage(Descriptor as any, { id: "1", value: 42 });
+
+      // Now, string topic should be validated against the same schema
+      await expect(
+        client.sendMessage("test.topic", { id: 123 as any, value: "bad" as any }),
+      ).rejects.toThrow("Validation failed");
+    });
+
+    it("should allow string topic bypass when strictSchemas is false", async () => {
+      const lenientClient = new KafkaClient<TestTopicMap>(
+        "lenient-client",
+        "lenient-group",
+        ["localhost:9092"],
+        { strictSchemas: false },
+      );
+
+      // Register schema via descriptor
+      await lenientClient.sendMessage(Descriptor as any, { id: "1", value: 42 });
+
+      // String topic should NOT be validated
+      await lenientClient.sendMessage("test.topic", {
+        id: 123 as any,
+        value: "bad" as any,
+      });
+      expect(mockSend).toHaveBeenCalledTimes(2);
+    });
+
+    it("should not validate string topic if schema was never registered", async () => {
+      // No descriptor was used, so registry is empty
+      await client.sendMessage("test.topic", {
+        id: 123 as any,
+        value: "bad" as any,
+      });
+      expect(mockSend).toHaveBeenCalled();
+    });
+  });
+
+  describe("mixed consumer mode detection", () => {
+    beforeEach(() => {
+      mockRun.mockReset().mockResolvedValue(undefined);
+    });
+
+    it("should throw when eachBatch is used after eachMessage on same groupId", async () => {
+      await client.startConsumer(["test.topic"], jest.fn(), {
+        groupId: "shared-group",
+      });
+
+      await expect(
+        client.startBatchConsumer(["test.other"], jest.fn(), {
+          groupId: "shared-group",
+        }),
+      ).rejects.toThrow(
+        'Cannot use eachBatch on consumer group "shared-group"',
+      );
+    });
+
+    it("should throw when eachMessage is used after eachBatch on same groupId", async () => {
+      await client.startBatchConsumer(["test.topic"], jest.fn(), {
+        groupId: "shared-group",
+      });
+
+      await expect(
+        client.startConsumer(["test.other"], jest.fn(), {
+          groupId: "shared-group",
+        }),
+      ).rejects.toThrow(
+        'Cannot use eachMessage on consumer group "shared-group"',
+      );
+    });
+
+    it("should allow different modes on different groupIds", async () => {
+      await client.startConsumer(["test.topic"], jest.fn(), {
+        groupId: "group-a",
+      });
+
+      await expect(
+        client.startBatchConsumer(["test.other"], jest.fn(), {
+          groupId: "group-b",
+        }),
+      ).resolves.not.toThrow();
+    });
+
+    it("should reset mode tracking on stopConsumer", async () => {
+      await client.startConsumer(["test.topic"], jest.fn(), {
+        groupId: "shared-group",
+      });
+      await client.stopConsumer();
+
+      // After stop, should allow batch on the same group
+      await expect(
+        client.startBatchConsumer(["test.topic"], jest.fn(), {
+          groupId: "shared-group",
+        }),
+      ).resolves.not.toThrow();
+    });
+  });
+
+  describe("subscribeWithRetry", () => {
+    beforeEach(() => {
+      mockRun.mockReset().mockResolvedValue(undefined);
+    });
+
+    it("should retry subscribe when it fails", async () => {
+      mockSubscribe
+        .mockRejectedValueOnce(new Error("UNKNOWN_TOPIC_OR_PARTITION"))
+        .mockResolvedValue(undefined);
+
+      await client.startConsumer(["test.topic"], jest.fn(), {
+        subscribeRetry: { retries: 3, backoffMs: 1 },
+      });
+
+      expect(mockSubscribe).toHaveBeenCalledTimes(2);
+    });
+
+    it("should throw after all retry attempts exhausted", async () => {
+      mockSubscribe.mockRejectedValue(
+        new Error("UNKNOWN_TOPIC_OR_PARTITION"),
+      );
+
+      await expect(
+        client.startConsumer(["test.topic"], jest.fn(), {
+          subscribeRetry: { retries: 2, backoffMs: 1 },
+        }),
+      ).rejects.toThrow("UNKNOWN_TOPIC_OR_PARTITION");
+
+      expect(mockSubscribe).toHaveBeenCalledTimes(2);
+    });
+
+    it("should work with startBatchConsumer too", async () => {
+      mockSubscribe
+        .mockRejectedValueOnce(new Error("UNKNOWN_TOPIC_OR_PARTITION"))
+        .mockResolvedValue(undefined);
+
+      await client.startBatchConsumer(["test.topic"], jest.fn(), {
+        subscribeRetry: { retries: 3, backoffMs: 1 },
+      });
+
+      expect(mockSubscribe).toHaveBeenCalledTimes(2);
     });
   });
 });
