@@ -840,6 +840,21 @@ describe("KafkaClient", () => {
       // admin.connect should only be called once
       expect(mockAdmin.connect).toHaveBeenCalledTimes(1);
     });
+
+    it("should use custom numPartitions when creating topics", async () => {
+      const customClient = new KafkaClient<TestTopicMap>(
+        "custom-client",
+        "custom-group",
+        ["localhost:9092"],
+        { autoCreateTopics: true, numPartitions: 3 },
+      );
+
+      await customClient.sendMessage("test.topic", { id: "1", value: 1 });
+
+      expect(mockCreateTopics).toHaveBeenCalledWith({
+        topics: [{ topic: "test.topic", numPartitions: 3 }],
+      });
+    });
   });
 
   describe("transaction edge cases", () => {
@@ -893,6 +908,19 @@ describe("KafkaClient", () => {
 
       expect(mockTxAbort).toHaveBeenCalled();
       expect(mockTxCommit).not.toHaveBeenCalled();
+    });
+
+    it("should throw original error when tx.abort() also fails", async () => {
+      mockTxSend.mockRejectedValueOnce(new Error("send failed"));
+      mockTxAbort.mockRejectedValueOnce(new Error("abort failed"));
+
+      await expect(
+        client.transaction(async (tx) => {
+          await tx.send("test.topic", { id: "1", value: 1 });
+        }),
+      ).rejects.toThrow("send failed");
+
+      expect(mockTxAbort).toHaveBeenCalled();
     });
   });
 

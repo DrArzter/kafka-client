@@ -1,5 +1,4 @@
 import { Consumer, Kafka, Partitioners, Producer, Admin } from "kafkajs";
-import { Logger } from "@nestjs/common";
 import { TopicDescriptor, SchemaLike } from "./topic";
 import { KafkaRetryExhaustedError, KafkaValidationError } from "./errors";
 import type {
@@ -14,6 +13,7 @@ import type {
   TopicMapConstraint,
   IKafkaClient,
   KafkaClientOptions,
+  KafkaLogger,
   BatchMeta,
   SubscribeRetryOptions,
 } from "./types";
@@ -32,7 +32,7 @@ function toError(error: unknown): Error {
 // ─────────────────────────────────────────────────────────────────────
 
 /**
- * Type-safe Kafka client for NestJS.
+ * Type-safe Kafka client.
  * Wraps kafkajs with JSON serialization, retries, DLQ, transactions, and interceptors.
  *
  * @typeParam T - Topic-to-message type mapping for compile-time safety.
@@ -44,9 +44,10 @@ export class KafkaClient<
   private readonly producer: Producer;
   private readonly consumers = new Map<string, Consumer>();
   private readonly admin: Admin;
-  private readonly logger: Logger;
+  private readonly logger: KafkaLogger;
   private readonly autoCreateTopicsEnabled: boolean;
   private readonly strictSchemasEnabled: boolean;
+  private readonly numPartitions: number;
   private readonly ensuredTopics = new Set<string>();
   private readonly defaultGroupId: string;
   private readonly schemaRegistry = new Map<string, SchemaLike>();
@@ -63,9 +64,14 @@ export class KafkaClient<
   ) {
     this.clientId = clientId;
     this.defaultGroupId = groupId;
-    this.logger = new Logger(`KafkaClient:${clientId}`);
+    this.logger = options?.logger ?? {
+      log: (msg) => console.log(`[KafkaClient:${clientId}] ${msg}`),
+      warn: (msg, ...args) => console.warn(`[KafkaClient:${clientId}] ${msg}`, ...args),
+      error: (msg, ...args) => console.error(`[KafkaClient:${clientId}] ${msg}`, ...args),
+    };
     this.autoCreateTopicsEnabled = options?.autoCreateTopics ?? false;
     this.strictSchemasEnabled = options?.strictSchemas ?? true;
+    this.numPartitions = options?.numPartitions ?? 1;
 
     this.kafka = new Kafka({
       clientId: this.clientId,
@@ -154,7 +160,14 @@ export class KafkaClient<
       await fn(ctx);
       await tx.commit();
     } catch (error) {
-      await tx.abort();
+      try {
+        await tx.abort();
+      } catch (abortError) {
+        this.logger.error(
+          "Failed to abort transaction:",
+          toError(abortError).message,
+        );
+      }
       throw error;
     }
   }
@@ -391,7 +404,7 @@ export class KafkaClient<
       this.isAdminConnected = true;
     }
     await this.admin.createTopics({
-      topics: [{ topic, numPartitions: 1 }],
+      topics: [{ topic, numPartitions: this.numPartitions }],
     });
     this.ensuredTopics.add(topic);
   }

@@ -4,17 +4,17 @@
 [![CI](https://github.com/drarzter/kafka-client/actions/workflows/publish.yml/badge.svg)](https://github.com/drarzter/kafka-client/actions/workflows/publish.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-Type-safe Kafka client wrapper for NestJS. Built on top of [kafkajs](https://kafka.js.org/).
+Type-safe Kafka client for Node.js. Framework-agnostic core with a first-class NestJS adapter. Built on top of [kafkajs](https://kafka.js.org/).
 
 ## What is this?
 
-An opinionated wrapper around kafkajs that integrates with NestJS as a DynamicModule. Not a full-featured framework — just a clean, typed abstraction for producing and consuming Kafka messages.
+An opinionated, type-safe abstraction over kafkajs. Works standalone (Express, Fastify, raw Node) or as a NestJS DynamicModule. Not a full-featured framework — just a clean, typed layer for producing and consuming Kafka messages.
 
 ## Why?
 
 - **Typed topics** — you define a map of topic -> message shape, and the compiler won't let you send wrong data to wrong topic
 - **Topic descriptors** — `topic()` DX sugar lets you define topics as standalone typed objects instead of string keys
-- **NestJS-native** — `register()` / `registerAsync()`, DI injection, lifecycle hooks out of the box
+- **Framework-agnostic** — use standalone or with NestJS (`register()` / `registerAsync()`, DI, lifecycle hooks)
 - **Idempotent producer** — `acks: -1`, `idempotent: true` by default
 - **Retry + DLQ** — configurable retries with backoff, dead letter queue for failed messages
 - **Batch sending** — send multiple messages in a single request
@@ -33,17 +33,39 @@ See the [Roadmap](./ROADMAP.md) for upcoming features and version history.
 
 ## Installation
 
-Any package manager of your choise:
-
 ```bash
 npm install @drarzter/kafka-client
-# or
-pnpm add @drarzter/kafka-client
 ```
 
-Peer dependencies: `@nestjs/common`, `@nestjs/core`, `reflect-metadata`, `rxjs`
+For NestJS projects, install peer dependencies: `@nestjs/common`, `@nestjs/core`, `reflect-metadata`, `rxjs`.
 
-## Quick start
+For standalone usage (Express, Fastify, raw Node), no extra dependencies needed — import from `@drarzter/kafka-client/core`.
+
+## Standalone usage (no NestJS)
+
+```typescript
+import { KafkaClient, topic } from '@drarzter/kafka-client/core';
+
+const OrderCreated = topic('order.created')<{ orderId: string; amount: number }>();
+
+const kafka = new KafkaClient('my-app', 'my-group', ['localhost:9092']);
+await kafka.connectProducer();
+
+// Send
+await kafka.sendMessage(OrderCreated, { orderId: '123', amount: 100 });
+
+// Consume
+await kafka.startConsumer([OrderCreated], async (message, topic) => {
+  console.log(`${topic}:`, message.orderId);
+});
+
+// Custom logger (winston, pino, etc.)
+const kafka2 = new KafkaClient('my-app', 'my-group', ['localhost:9092'], {
+  logger: myWinstonLogger,
+});
+```
+
+## Quick start (NestJS)
 
 Send and receive a message in 3 files:
 
@@ -555,6 +577,7 @@ Passed to `KafkaModule.register()` or returned from `registerAsync()` factory:
 | `name` | — | Named client identifier for multi-client setups |
 | `isGlobal` | `false` | Make the client available in all modules without re-importing |
 | `autoCreateTopics` | `false` | Auto-create topics on first send (dev only) |
+| `numPartitions` | `1` | Number of partitions for auto-created topics |
 | `strictSchemas` | `true` | Validate string topic keys against schemas registered via TopicDescriptor |
 
 **Module-scoped** (default) — import `KafkaModule` in each module that needs it:
@@ -770,11 +793,10 @@ Both suites run in CI on every push to `main`.
 
 ```
 src/
-├── client/         # KafkaClient, types, topic(), error classes
-├── module/         # KafkaModule, KafkaExplorer, DI constants
-├── decorators/     # @InjectKafkaClient(), @SubscribeTo()
-├── health/         # KafkaHealthIndicator
-└── index.ts        # Public API re-exports
+├── client/         # Core — KafkaClient, types, topic(), error classes (0 framework deps)
+├── nest/           # NestJS adapter — Module, Explorer, decorators, health
+├── core.ts         # Standalone entrypoint (@drarzter/kafka-client/core)
+└── index.ts        # Full entrypoint — core + NestJS adapter
 ```
 
 All exported types and methods have JSDoc comments — your IDE will show inline docs and autocomplete.

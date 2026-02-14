@@ -2,13 +2,11 @@
 
 > Living document — updated as priorities shift.
 
-## 0.3.0 — Stabilization & Framework-agnostic core
+## 0.3.1 — Testing utilities
 
-- [ ] **Logger abstraction** — `KafkaLogger` interface, default `console`, NestJS `Logger` in adapter
-- [ ] **Dual entrypoint** — `@drarzter/kafka-client/core` (zero framework deps) / `@drarzter/kafka-client` (NestJS adapter)
-- [ ] **NestJS as peer dependency** — move `@nestjs/*` to `peerDependencies`
-- [ ] **Transaction abort safety** — don't mask original error when `tx.abort()` throws
-- [ ] **Configurable partitions** — expose `numPartitions` in `KafkaClientOptions` (currently hardcoded to `1`)
+- [ ] **Testing utilities** (`@drarzter/kafka-client/testing` entrypoint)
+  - [ ] `createMockKafkaClient<T>()` — fully typed mock with `jest.fn()` on every `IKafkaClient` method
+  - [ ] `KafkaTestContainer` — testcontainers wrapper that starts Kafka and exposes `brokers`
 
 ## 0.4.0 — EventEnvelope & Observability
 
@@ -38,3 +36,12 @@
 - [x] `subscribeWithRetry` — configurable retry/backoff for `consumer.subscribe()`
 - [x] Remove `ensureTopic()` from consumer paths (producers only)
 - [x] Refactor — extract `toError`, `parseJsonMessage`, `validateWithSchema`, `executeWithRetry`, `buildSendPayload`, `setupConsumer`; eliminate duplication (721 → 681 lines)
+
+### 0.3.0
+
+- [x] **Framework-agnostic core** — `@drarzter/kafka-client/core` entrypoint with zero NestJS deps
+- [x] **Logger abstraction** — `KafkaLogger` interface, default `console`, NestJS `Logger` in adapter
+- [x] **NestJS as optional peer** — `peerDependenciesMeta` with `optional: true`
+- [x] **Adapter pattern** — NestJS code moved to `src/nest/`, core in `src/client/`
+- [x] **Transaction abort safety** — `tx.abort()` failure no longer masks the original error
+- [x] **Configurable partitions** — `numPartitions` option in `KafkaClientOptions`

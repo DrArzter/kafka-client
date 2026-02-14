@@ -4,7 +4,7 @@ import { KafkaClient } from "../client/kafka.client";
 import {
   KAFKA_SUBSCRIBER_METADATA,
   KafkaSubscriberMetadata,
-} from "../decorators/kafka.decorator";
+} from "./kafka.decorator";
 import { getKafkaClientToken } from "./kafka.constants";
 
 interface SubscriberEntry extends KafkaSubscriberMetadata {

@@ -1,4 +1,4 @@
-import { Module, DynamicModule, Provider } from "@nestjs/common";
+import { Module, DynamicModule, Provider, Logger } from "@nestjs/common";
 import { DiscoveryModule } from "@nestjs/core";
 import {
   KafkaClient,
@@ -58,7 +58,10 @@ export class KafkaModule {
           options.clientId,
           options.groupId,
           options.brokers,
-          { autoCreateTopics: options.autoCreateTopics },
+          {
+            autoCreateTopics: options.autoCreateTopics,
+            logger: new Logger(`KafkaClient:${options.clientId}`),
+          },
         );
         await client.connectProducer();
         return client;
@@ -96,7 +99,10 @@ export class KafkaModule {
           options.clientId,
           options.groupId,
           options.brokers,
-          { autoCreateTopics: options.autoCreateTopics },
+          {
+            autoCreateTopics: options.autoCreateTopics,
+            logger: new Logger(`KafkaClient:${options.clientId}`),
+          },
         );
         await client.connectProducer();
         return client;

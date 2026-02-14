@@ -1,5 +1,5 @@
 import { Inject } from "@nestjs/common";
-import { getKafkaClientToken } from "../module/kafka.constants";
+import { getKafkaClientToken } from "./kafka.constants";
 import { ConsumerOptions } from "../client/kafka.client";
 import { TopicDescriptor, SchemaLike } from "../client/topic";
 

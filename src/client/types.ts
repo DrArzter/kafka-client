@@ -191,12 +191,26 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
   disconnect(): Promise<void>;
 }
 
+/**
+ * Logger interface for KafkaClient.
+ * Compatible with NestJS Logger, console, winston, pino, or any custom logger.
+ */
+export interface KafkaLogger {
+  log(message: string): void;
+  warn(message: string, ...args: any[]): void;
+  error(message: string, ...args: any[]): void;
+}
+
 /** Options for `KafkaClient` constructor. */
 export interface KafkaClientOptions {
   /** Auto-create topics via admin before the first `sendMessage`, `sendBatch`, or `transaction` for each topic. Useful for development — not recommended in production. */
   autoCreateTopics?: boolean;
   /** When `true`, string topic keys are validated against any schema previously registered via a TopicDescriptor. Default: `true`. */
   strictSchemas?: boolean;
+  /** Custom logger. Defaults to console with `[KafkaClient:<clientId>]` prefix. */
+  logger?: KafkaLogger;
+  /** Number of partitions for auto-created topics. Default: `1`. */
+  numPartitions?: number;
 }
 
 /** Options for consumer subscribe retry when topic doesn't exist yet. */

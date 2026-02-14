@@ -2,7 +2,7 @@ import "reflect-metadata";
 import { KafkaContainer, StartedKafkaContainer } from "@testcontainers/kafka";
 import { Kafka } from "kafkajs";
 import { KafkaClient } from "../client/kafka.client";
-import { KafkaHealthIndicator } from "../health/kafka.health";
+import { KafkaHealthIndicator } from "../nest/kafka.health";
 import { topic, SchemaLike } from "../client/topic";
 import {
   KafkaRetryExhaustedError,
