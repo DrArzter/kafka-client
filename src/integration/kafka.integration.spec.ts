@@ -1,6 +1,6 @@
 import "reflect-metadata";
 import { KafkaContainer, StartedKafkaContainer } from "@testcontainers/kafka";
-import { Kafka } from "kafkajs";
+import { Kafka, logLevel as KafkaLogLevel } from "kafkajs";
 import { KafkaClient } from "../client/kafka.client";
 import { KafkaHealthIndicator } from "../nest/kafka.health";
 import { topic, SchemaLike } from "../client/topic";
@@ -91,7 +91,11 @@ beforeAll(async () => {
   const port = container.getMappedPort(9093);
   brokers = [`${host}:${port}`];
 
-  const kafka = new Kafka({ clientId: "setup", brokers });
+  const kafka = new Kafka({
+    clientId: "setup",
+    brokers,
+    logLevel: KafkaLogLevel.NOTHING,
+  });
 
   // Pre-create topics
   const admin = kafka.admin();
@@ -101,11 +105,12 @@ beforeAll(async () => {
   });
   await admin.disconnect();
 
-  // Wait for transaction coordinator to be ready (retries on the Kafka
-  // client level, not producer — findGroupCoordinator is a cluster op)
+  // Warmup: trigger transaction coordinator initialization.
+  // Without this, the first transactional producer hangs waiting for the coordinator.
   const warmupKafka = new Kafka({
     clientId: "warmup",
     brokers,
+    logLevel: KafkaLogLevel.NOTHING,
     retry: { retries: 30, initialRetryTime: 500, maxRetryTime: 30000 },
   });
   const txProducer = warmupKafka.producer({

@@ -1,4 +1,4 @@
-import { Consumer, Kafka, Partitioners, Producer, Admin } from "kafkajs";
+import { Consumer, Kafka, Partitioners, Producer, Admin, logLevel as KafkaLogLevel } from "kafkajs";
 import { TopicDescriptor, SchemaLike } from "./topic";
 import { KafkaRetryExhaustedError, KafkaValidationError } from "./errors";
 import type {
@@ -76,6 +76,27 @@ export class KafkaClient<
     this.kafka = new Kafka({
       clientId: this.clientId,
       brokers,
+      logLevel: KafkaLogLevel.WARN,
+      logCreator: () => ({ level, log }) => {
+        const msg = `[kafkajs] ${log.message}`;
+        if (level === KafkaLogLevel.ERROR) {
+          // kafkajs logs retriable broker errors at ERROR level even though
+          // it retries them internally. Downgrade known-harmless ones to warn.
+          const text = log.message ?? "";
+          const isRetriable =
+            text.includes("TOPIC_ALREADY_EXISTS") ||
+            text.includes("GROUP_COORDINATOR_NOT_AVAILABLE") ||
+            text.includes("NOT_COORDINATOR") ||
+            text.includes("Response GroupCoordinator") ||
+            text.includes("Response CreateTopics");
+          if (isRetriable) this.logger.warn(msg);
+          else this.logger.error(msg);
+        } else if (level === KafkaLogLevel.WARN) {
+          this.logger.warn(msg);
+        } else {
+          this.logger.log(msg);
+        }
+      },
     });
     this.producer = this.kafka.producer({
       createPartitioner: Partitioners.DefaultPartitioner,

@@ -2,12 +2,6 @@
 
 > Living document — updated as priorities shift.
 
-## 0.3.1 — Testing utilities
-
-- [ ] **Testing utilities** (`@drarzter/kafka-client/testing` entrypoint)
-  - [ ] `createMockKafkaClient<T>()` — fully typed mock with `jest.fn()` on every `IKafkaClient` method
-  - [ ] `KafkaTestContainer` — testcontainers wrapper that starts Kafka and exposes `brokers`
-
 ## 0.4.0 — EventEnvelope & Observability
 
 - [ ] **EventEnvelope\<T\>** in core — standardized wrapper with `eventId`, `correlationId`, `schemaVersion`, `timestamp`, `traceparent`
@@ -24,6 +18,7 @@
 ## Done
 
 ### 0.2.0
+
 - [x] Schema validation (`SchemaLike<T>` — works with Zod, Valibot, ArkType, or any `.parse()`)
 - [x] Batch consumer (`startBatchConsumer` with `eachBatch`)
 - [x] Multiple consumer groups (per-call `groupId` override)
@@ -31,11 +26,20 @@
 - [x] `@SubscribeTo` decorator with batch & groupId support
 
 ### 0.2.1
+
 - [x] `strictSchemas` mode (default `true`) — validates string topics against schemas registered via TopicDescriptor
 - [x] Mixed eachMessage/eachBatch detection — clear error instead of kafkajs crash
 - [x] `subscribeWithRetry` — configurable retry/backoff for `consumer.subscribe()`
 - [x] Remove `ensureTopic()` from consumer paths (producers only)
 - [x] Refactor — extract `toError`, `parseJsonMessage`, `validateWithSchema`, `executeWithRetry`, `buildSendPayload`, `setupConsumer`; eliminate duplication (721 → 681 lines)
+
+### 0.3.1
+
+- [x] **Testing utilities** (`@drarzter/kafka-client/testing` entrypoint)
+  - [x] `createMockKafkaClient<T>()` — fully typed mock with `jest.fn()` / `vi.fn()` on every `IKafkaClient` method
+  - [x] `KafkaTestContainer` — testcontainers wrapper that starts Kafka and exposes `brokers`
+- [x] **Quieter kafkajs logs** — retriable broker errors (`TOPIC_ALREADY_EXISTS`, `GROUP_COORDINATOR_NOT_AVAILABLE`) downgraded from `error` to `warn`
+- [x] **`typesVersions` fallback** — subpath imports (`/core`, `/testing`) work with `moduleResolution: "node"`
 
 ### 0.3.0
 

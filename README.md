@@ -773,6 +773,70 @@ export class HealthService {
 
 ## Testing
 
+### Testing utilities
+
+Import from `@drarzter/kafka-client/testing` — zero runtime deps, only `jest` and `@testcontainers/kafka` as peer dependencies.
+
+#### `createMockKafkaClient<T>()`
+
+Fully typed mock with `jest.fn()` on every `IKafkaClient` method. All methods resolve to sensible defaults:
+
+```typescript
+import { createMockKafkaClient } from '@drarzter/kafka-client/testing';
+
+const kafka = createMockKafkaClient<MyTopics>();
+
+const service = new OrdersService(kafka);
+await service.createOrder();
+
+expect(kafka.sendMessage).toHaveBeenCalledWith(
+  'order.created',
+  expect.objectContaining({ orderId: '123' }),
+);
+
+// Override return values
+kafka.checkStatus.mockResolvedValueOnce({ topics: ['order.created'] });
+
+// Mock rejections
+kafka.sendMessage.mockRejectedValueOnce(new Error('broker down'));
+```
+
+#### `KafkaTestContainer`
+
+Thin wrapper around `@testcontainers/kafka` that handles common setup pain points — transaction coordinator warmup, topic pre-creation:
+
+```typescript
+import { KafkaTestContainer } from '@drarzter/kafka-client/testing';
+import { KafkaClient } from '@drarzter/kafka-client/core';
+
+let container: KafkaTestContainer;
+let brokers: string[];
+
+beforeAll(async () => {
+  container = new KafkaTestContainer({
+    topics: ['orders', { topic: 'payments', numPartitions: 3 }],
+  });
+  brokers = await container.start();
+}, 120_000);
+
+afterAll(() => container.stop());
+
+it('sends and receives', async () => {
+  const kafka = new KafkaClient('test', 'test-group', brokers);
+  // ...
+});
+```
+
+Options:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `image` | `"confluentinc/cp-kafka:7.7.0"` | Docker image |
+| `transactionWarmup` | `true` | Warm up transaction coordinator on start |
+| `topics` | `[]` | Topics to pre-create (string or `{ topic, numPartitions }`) |
+
+### Running tests
+
 Unit tests (mocked kafkajs):
 
 ```bash
@@ -795,7 +859,9 @@ Both suites run in CI on every push to `main`.
 src/
 ├── client/         # Core — KafkaClient, types, topic(), error classes (0 framework deps)
 ├── nest/           # NestJS adapter — Module, Explorer, decorators, health
+├── testing/        # Testing utilities — mock client, testcontainer wrapper
 ├── core.ts         # Standalone entrypoint (@drarzter/kafka-client/core)
+├── testing.ts      # Testing entrypoint (@drarzter/kafka-client/testing)
 └── index.ts        # Full entrypoint — core + NestJS adapter
 ```
 

@@ -47,9 +47,18 @@ const Partitioners = {
   DefaultPartitioner: jest.fn(),
 };
 
+const logLevel = {
+  NOTHING: 0,
+  ERROR: 1,
+  WARN: 2,
+  INFO: 4,
+  DEBUG: 5,
+};
+
 export {
   Kafka,
   Partitioners,
+  logLevel,
   mockProducer,
   mockConsumer,
   mockAdmin,
