@@ -13,18 +13,18 @@ export type MockKafkaClient<T extends TopicMapConstraint<T>> = {
 export type MockFactory = () => (...args: any[]) => any;
 
 function detectMockFactory(): MockFactory {
-  /* eslint-disable no-eval */
+   
   // Jest and Vitest inject globals into the test environment scope,
   // which may not be on `globalThis`. Use eval to check the actual scope.
   try {
     const jestFn = eval("typeof jest !== 'undefined' && jest.fn");
-    if (typeof jestFn === "function") return () => (eval("jest.fn") as Function)();
+    if (typeof jestFn === "function") return () => (eval("jest.fn") as () => (...args: any[]) => any)();
   } catch { /* not available */ }
   try {
     const viFn = eval("typeof vi !== 'undefined' && vi.fn");
-    if (typeof viFn === "function") return () => (eval("vi.fn") as Function)();
+    if (typeof viFn === "function") return () => (eval("vi.fn") as () => (...args: any[]) => any)();
   } catch { /* not available */ }
-  /* eslint-enable no-eval */
+   
 
   throw new Error(
     "createMockKafkaClient: no mock framework detected (jest/vitest). " +
@@ -72,7 +72,7 @@ export function createMockKafkaClient<T extends TopicMapConstraint<T>>(
     getClientId: returning("mock-client"),
     sendMessage: resolved(undefined),
     sendBatch: resolved(undefined),
-    transaction: mock().mockImplementation(async (cb: Function) => {
+    transaction: mock().mockImplementation(async (cb: (ctx: Record<string, unknown>) => Promise<void>) => {
       const ctx = {
         send: resolved(undefined),
         sendBatch: resolved(undefined),
