@@ -1,4 +1,4 @@
-import { KafkaHealthIndicator } from "./kafka.health";
+import { KafkaHealthIndicator } from "../kafka.health";
 
 describe("KafkaHealthIndicator", () => {
   let health: KafkaHealthIndicator;

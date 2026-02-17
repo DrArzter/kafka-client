@@ -1,7 +1,7 @@
 import "reflect-metadata";
-import { SubscribeTo, KAFKA_SUBSCRIBER_METADATA } from "./kafka.decorator";
-import { getKafkaClientToken, KAFKA_CLIENT } from "./kafka.constants";
-import { topic } from "../client/topic";
+import { SubscribeTo, KAFKA_SUBSCRIBER_METADATA } from "../kafka.decorator";
+import { getKafkaClientToken, KAFKA_CLIENT } from "../kafka.constants";
+import { topic } from "../../client/topic";
 
 describe("SubscribeTo", () => {
   it("should store metadata for a single topic", () => {

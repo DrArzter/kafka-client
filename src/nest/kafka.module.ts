@@ -5,6 +5,7 @@ import {
   ClientId,
   GroupId,
   TopicMapConstraint,
+  KafkaInstrumentation,
 } from "../client/kafka.client";
 import { getKafkaClientToken } from "./kafka.constants";
 import { KafkaExplorer } from "./kafka.explorer";
@@ -23,6 +24,12 @@ export interface KafkaModuleOptions {
   isGlobal?: boolean;
   /** Auto-create topics via admin on first use (send/consume). Useful for development. */
   autoCreateTopics?: boolean;
+  /** When `true`, string topic keys are validated against any schema previously registered via a TopicDescriptor. Default: `true`. */
+  strictSchemas?: boolean;
+  /** Number of partitions for auto-created topics. Default: `1`. */
+  numPartitions?: number;
+  /** Client-wide instrumentation hooks (e.g. OTel). Applied to both send and consume paths. */
+  instrumentation?: KafkaInstrumentation[];
 }
 
 /** Async configuration for `KafkaModule.registerAsync()` with dependency injection. */
@@ -60,6 +67,9 @@ export class KafkaModule {
           options.brokers,
           {
             autoCreateTopics: options.autoCreateTopics,
+            strictSchemas: options.strictSchemas,
+            numPartitions: options.numPartitions,
+            instrumentation: options.instrumentation,
             logger: new Logger(`KafkaClient:${options.clientId}`),
           },
         );
@@ -101,6 +111,9 @@ export class KafkaModule {
           options.brokers,
           {
             autoCreateTopics: options.autoCreateTopics,
+            strictSchemas: options.strictSchemas,
+            numPartitions: options.numPartitions,
+            instrumentation: options.instrumentation,
             logger: new Logger(`KafkaClient:${options.clientId}`),
           },
         );

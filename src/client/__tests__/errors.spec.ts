@@ -2,7 +2,7 @@ import {
   KafkaProcessingError,
   KafkaRetryExhaustedError,
   KafkaValidationError,
-} from "./errors";
+} from "../errors";
 
 describe("KafkaProcessingError", () => {
   it("should store topic and originalMessage", () => {

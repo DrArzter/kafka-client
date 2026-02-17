@@ -1,4 +1,4 @@
-import { createMockKafkaClient, MockKafkaClient } from "./mock-client";
+import { createMockKafkaClient, MockKafkaClient } from "../mock-client";
 
 interface TestTopics {
   "orders.created": { orderId: string; amount: number };

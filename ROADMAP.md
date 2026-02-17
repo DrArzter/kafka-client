@@ -2,13 +2,6 @@
 
 > Living document — updated as priorities shift.
 
-## 0.4.0 — EventEnvelope & Observability
-
-- [ ] **EventEnvelope\<T\>** in core — standardized wrapper with `eventId`, `correlationId`, `schemaVersion`, `timestamp`, `traceparent`
-- [ ] **Auto-wrap/unwrap** — opt-in via `envelope: true` in send/consume options
-- [ ] **OpenTelemetry interceptor** — auto-inject `traceparent` header on send, extract & propagate on consume
-- [ ] **correlationId propagation** — auto-forward through message headers
-
 ## 0.5.0 — Confluent client migration
 
 - [ ] **Replace kafkajs** with `@confluentinc/kafka-javascript` — kafkajs is unmaintained, Confluent's client wraps librdkafka with a KafkaJS-compatible API
@@ -16,6 +9,18 @@
 - [ ] **Migration guide** — document any breaking changes for consumers of the library
 
 ## Done
+
+### 0.4.0
+
+- [x] **EventEnvelope\<T\>** — consumer handlers receive `EventEnvelope<T>` with `payload`, `eventId`, `correlationId`, `timestamp`, `schemaVersion`, `traceparent`, and Kafka metadata (`topic`, `partition`, `offset`)
+- [x] **Auto envelope headers** — `x-event-id`, `x-correlation-id`, `x-timestamp`, `x-schema-version` generated on send, extracted on consume
+- [x] **correlationId propagation** — auto-forward via `AsyncLocalStorage`; nested sends inherit the parent correlation ID
+- [x] **KafkaInstrumentation** — client-wide hooks (`beforeSend`, `afterSend`, `beforeConsume`, `onConsumeError`) for cross-cutting concerns
+- [x] **OpenTelemetry support** — `@drarzter/kafka-client/otel` entrypoint with `otelInstrumentation()` for W3C Trace Context propagation
+- [x] **Breaking: consumer handler signature** — `(message, topic)` → `(envelope)` for `startConsumer`; `(messages, topic, meta)` → `(envelopes, meta)` for `startBatchConsumer`
+- [x] **Breaking: interceptor signature** — `before(msg, topic)` / `onError(msg, topic, err)` → `before(envelope)` / `onError(envelope, err)`
+- [x] **Send options** — `correlationId`, `schemaVersion`, `eventId` fields added to `SendOptions` and `BatchMessageItem`
+- [x] **Refactor** — extracted `envelope.ts`, `consumer-pipeline.ts`, `subscribe-retry.ts` from `kafka.client.ts`; unit tests split into per-feature files under `__tests__/`
 
 ### 0.2.0
 

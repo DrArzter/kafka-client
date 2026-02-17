@@ -22,7 +22,11 @@ An opinionated, type-safe abstraction over kafkajs. Works standalone (Express, F
 - **Partition key support** — route related messages to the same partition
 - **Custom headers** — attach metadata headers to messages
 - **Transactions** — exactly-once semantics with `producer.transaction()`
-- **Consumer interceptors** — before/after/onError hooks for message processing
+- **EventEnvelope** — every consumed message is wrapped in `EventEnvelope<T>` with `eventId`, `correlationId`, `timestamp`, `schemaVersion`, `traceparent`, and Kafka metadata
+- **Correlation ID propagation** — auto-generated on send, auto-propagated through `AsyncLocalStorage` so nested sends inherit the same correlation ID
+- **OpenTelemetry support** — `@drarzter/kafka-client/otel` entrypoint with `otelInstrumentation()` for W3C Trace Context propagation
+- **Consumer interceptors** — before/after/onError hooks with `EventEnvelope` access
+- **Client-wide instrumentation** — `KafkaInstrumentation` hooks for cross-cutting concerns (tracing, metrics)
 - **Auto-create topics** — `autoCreateTopics: true` for dev mode — no need to pre-create topics
 - **Error classes** — `KafkaProcessingError` and `KafkaRetryExhaustedError` with topic, message, and attempt metadata
 - **Health check** — built-in health indicator for monitoring
@@ -54,9 +58,9 @@ await kafka.connectProducer();
 // Send
 await kafka.sendMessage(OrderCreated, { orderId: '123', amount: 100 });
 
-// Consume
-await kafka.startConsumer([OrderCreated], async (message, topic) => {
-  console.log(`${topic}:`, message.orderId);
+// Consume — handler receives an EventEnvelope
+await kafka.startConsumer([OrderCreated], async (envelope) => {
+  console.log(`${envelope.topic}:`, envelope.payload.orderId);
 });
 
 // Custom logger (winston, pino, etc.)
@@ -99,7 +103,7 @@ export class AppModule {}
 ```typescript
 // app.service.ts
 import { Injectable } from '@nestjs/common';
-import { InjectKafkaClient, KafkaClient, SubscribeTo } from '@drarzter/kafka-client';
+import { InjectKafkaClient, KafkaClient, SubscribeTo, EventEnvelope } from '@drarzter/kafka-client';
 import { MyTopics } from './types';
 
 @Injectable()
@@ -113,8 +117,8 @@ export class AppService {
   }
 
   @SubscribeTo('hello')
-  async onHello(message: MyTopics['hello']) {
-    console.log('Received:', message.text);
+  async onHello(envelope: EventEnvelope<MyTopics['hello']>) {
+    console.log('Received:', envelope.payload.text);
   }
 }
 ```
@@ -192,7 +196,7 @@ await kafka.transaction(async (tx) => {
 
 // Consuming (decorator)
 @SubscribeTo(OrderCreated)
-async handleOrder(message: OrdersTopicMap['order.created']) { ... }
+async handleOrder(envelope: EventEnvelope<OrdersTopicMap['order.created']>) { ... }
 
 // Consuming (imperative)
 await kafka.startConsumer([OrderCreated], handler);
@@ -301,13 +305,13 @@ import { SubscribeTo } from '@drarzter/kafka-client';
 @Injectable()
 export class OrdersHandler {
   @SubscribeTo('order.created')
-  async handleOrderCreated(message: OrdersTopicMap['order.created'], topic: string) {
-    console.log('New order:', message.orderId);
+  async handleOrderCreated(envelope: EventEnvelope<OrdersTopicMap['order.created']>) {
+    console.log('New order:', envelope.payload.orderId);
   }
 
   @SubscribeTo('order.completed', { retry: { maxRetries: 3 }, dlq: true })
-  async handleOrderCompleted(message: OrdersTopicMap['order.completed'], topic: string) {
-    console.log('Order completed:', message.orderId);
+  async handleOrderCompleted(envelope: EventEnvelope<OrdersTopicMap['order.completed']>) {
+    console.log('Order completed:', envelope.payload.orderId);
   }
 }
 ```
@@ -327,8 +331,8 @@ export class OrdersService implements OnModuleInit {
   async onModuleInit() {
     await this.kafka.startConsumer(
       ['order.created', 'order.completed'],
-      async (message, topic) => {
-        console.log(`${topic}:`, message);
+      async (envelope) => {
+        console.log(`${envelope.topic}:`, envelope.payload);
       },
       {
         retry: { maxRetries: 3, backoffMs: 1000 },
@@ -354,7 +358,7 @@ await kafka.startConsumer(['orders'], auditHandler, { groupId: 'orders-audit' })
 
 // Works with @SubscribeTo too
 @SubscribeTo('orders', { groupId: 'orders-audit' })
-async auditOrders(message) { ... }
+async auditOrders(envelope) { ... }
 ```
 
 **Important:** You cannot mix `eachMessage` and `eachBatch` consumers on the same `groupId`. The library throws a clear error if you try:
@@ -404,7 +408,7 @@ Same with `@SubscribeTo()` — use `clientName` to target a specific named clien
 
 ```typescript
 @SubscribeTo('payment.received', { clientName: 'payments' })  // ← matches name: 'payments'
-async handlePayment(message: PaymentsTopicMap['payment.received']) {
+async handlePayment(envelope: EventEnvelope<PaymentsTopicMap['payment.received']>) {
   // ...
 }
 ```
@@ -460,16 +464,16 @@ await this.kafka.sendBatch('order.created', [
 
 ## Batch consuming
 
-Process messages in batches for higher throughput. The handler receives an array of parsed messages and a `BatchMeta` object with offset management controls:
+Process messages in batches for higher throughput. The handler receives an array of `EventEnvelope`s and a `BatchMeta` object with offset management controls:
 
 ```typescript
 await this.kafka.startBatchConsumer(
   ['order.created'],
-  async (messages, topic, meta) => {
-    // messages: OrdersTopicMap['order.created'][]
-    for (const msg of messages) {
-      await processOrder(msg);
-      meta.resolveOffset(/* ... */);
+  async (envelopes, meta) => {
+    // envelopes: EventEnvelope<OrdersTopicMap['order.created']>[]
+    for (const env of envelopes) {
+      await processOrder(env.payload);
+      meta.resolveOffset(env.offset);
     }
     await meta.commitOffsetsIfNecessary();
   },
@@ -481,8 +485,8 @@ With `@SubscribeTo()`:
 
 ```typescript
 @SubscribeTo('order.created', { batch: true })
-async handleOrders(messages: OrdersTopicMap['order.created'][], topic: string) {
-  // messages is an array
+async handleOrders(envelopes: EventEnvelope<OrdersTopicMap['order.created']>[], meta: BatchMeta) {
+  for (const env of envelopes) { ... }
 }
 ```
 
@@ -513,20 +517,20 @@ await this.kafka.transaction(async (tx) => {
 
 ## Consumer interceptors
 
-Add before/after/onError hooks to message processing:
+Add before/after/onError hooks to message processing. Interceptors receive the full `EventEnvelope`:
 
 ```typescript
 import { ConsumerInterceptor } from '@drarzter/kafka-client';
 
 const loggingInterceptor: ConsumerInterceptor<OrdersTopicMap> = {
-  before: (message, topic) => {
-    console.log(`Processing ${topic}`, message);
+  before: (envelope) => {
+    console.log(`Processing ${envelope.topic}`, envelope.payload);
   },
-  after: (message, topic) => {
-    console.log(`Done ${topic}`);
+  after: (envelope) => {
+    console.log(`Done ${envelope.topic}`);
   },
-  onError: (message, topic, error) => {
-    console.error(`Failed ${topic}:`, error.message);
+  onError: (envelope, error) => {
+    console.error(`Failed ${envelope.topic}:`, error.message);
   },
 };
 
@@ -537,18 +541,48 @@ await this.kafka.startConsumer(['order.created'], handler, {
 
 Multiple interceptors run in order. All hooks are optional.
 
+## Instrumentation
+
+For client-wide cross-cutting concerns (tracing, metrics), use `KafkaInstrumentation` hooks instead of per-consumer interceptors:
+
+```typescript
+import { otelInstrumentation } from '@drarzter/kafka-client/otel';
+
+const kafka = new KafkaClient('my-app', 'my-group', brokers, {
+  instrumentation: [otelInstrumentation()],
+});
+```
+
+`otelInstrumentation()` injects `traceparent` on send, extracts it on consume, and creates `CONSUMER` spans automatically. Requires `@opentelemetry/api` as a peer dependency.
+
+Custom instrumentation:
+
+```typescript
+import { KafkaInstrumentation } from '@drarzter/kafka-client';
+
+const metrics: KafkaInstrumentation = {
+  beforeSend(topic, headers) { /* inject headers, start timer */ },
+  afterSend(topic) { /* record send latency */ },
+  beforeConsume(envelope) { /* start span */ return () => { /* end span */ }; },
+  onConsumeError(envelope, error) { /* record error metric */ },
+};
+```
+
 ## Options reference
 
 ### Send options
 
 Options for `sendMessage()` — the third argument:
 
-| Option    | Default | Description                                      |
-|-----------|---------|--------------------------------------------------|
-| `key`     | —       | Partition key for message routing                 |
-| `headers` | —       | Custom metadata headers (`Record<string, string>`) |
+| Option | Default | Description |
+|--------|---------|-------------|
+| `key` | — | Partition key for message routing |
+| `headers` | — | Custom metadata headers (merged with auto-generated envelope headers) |
+| `correlationId` | auto | Override the auto-propagated correlation ID (default: inherited from ALS context or new UUID) |
+| `schemaVersion` | `1` | Schema version for the payload |
+| `eventId` | auto | Override the auto-generated event ID (UUID v4) |
 
-`sendBatch()` accepts `key` and `headers` per message inside the array items.
+`sendBatch()` accepts the same options per message inside the array items.
 
 ### Consumer options
 
@@ -579,6 +613,7 @@ Passed to `KafkaModule.register()` or returned from `registerAsync()` factory:
 | `autoCreateTopics` | `false` | Auto-create topics on first send (dev only) |
 | `numPartitions` | `1` | Number of partitions for auto-created topics |
 | `strictSchemas` | `true` | Validate string topic keys against schemas registered via TopicDescriptor |
+| `instrumentation` | `[]` | Client-wide instrumentation hooks (e.g. OTel). Applied to both send and consume paths |
 
 **Module-scoped** (default) — import `KafkaModule` in each module that needs it:
 
@@ -641,7 +676,7 @@ err.cause;            // the original error
 ```typescript
 // In an onError interceptor:
 const interceptor: ConsumerInterceptor<MyTopics> = {
-  onError: (message, topic, error) => {
+  onError: (envelope, error) => {
     if (error instanceof KafkaRetryExhaustedError) {
       console.log(`Failed after ${error.attempts} attempts on ${error.topic}`);
       console.log('Last error:', error.cause);
@@ -658,7 +693,7 @@ When `retry.maxRetries` is set and all attempts fail, `KafkaRetryExhaustedError`
 import { KafkaValidationError } from '@drarzter/kafka-client';
 
 const interceptor: ConsumerInterceptor<MyTopics> = {
-  onError: (message, topic, error) => {
+  onError: (envelope, error) => {
     if (error instanceof KafkaValidationError) {
       console.log(`Bad message on ${error.topic}:`, error.cause?.message);
     }
@@ -707,9 +742,9 @@ await kafka.sendMessage(OrderCreated, { orderId: '1', userId: '2', amount: -5 })
 
 ```typescript
 @SubscribeTo(OrderCreated, { dlq: true })
-async handleOrder(message) {
-  // `message` is guaranteed to match the schema
-  console.log(message.orderId); // string — validated at runtime
+async handleOrder(envelope) {
+  // `envelope.payload` is guaranteed to match the schema
+  console.log(envelope.payload.orderId); // string — validated at runtime
 }
 ```
 
@@ -855,12 +890,13 @@ Both suites run in CI on every push to `main`.
 
 ## Project structure
 
-```
+```text
 src/
-├── client/         # Core — KafkaClient, types, topic(), error classes (0 framework deps)
+├── client/         # Core — KafkaClient, types, envelope, consumer pipeline, topic(), errors (0 framework deps)
 ├── nest/           # NestJS adapter — Module, Explorer, decorators, health
 ├── testing/        # Testing utilities — mock client, testcontainer wrapper
 ├── core.ts         # Standalone entrypoint (@drarzter/kafka-client/core)
+├── otel.ts         # OpenTelemetry entrypoint (@drarzter/kafka-client/otel)
 ├── testing.ts      # Testing entrypoint (@drarzter/kafka-client/testing)
 └── index.ts        # Full entrypoint — core + NestJS adapter
 ```

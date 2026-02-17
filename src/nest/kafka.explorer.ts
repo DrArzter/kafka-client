@@ -60,16 +60,16 @@ export class KafkaExplorer implements OnModuleInit {
         if (entry.batch) {
           await client.startBatchConsumer(
             entry.topics as any,
-            async (messages: any[], topic: any, meta: any) => {
-              await handler(messages, topic, meta);
+            async (envelopes: any[], meta: any) => {
+              await handler(envelopes, meta);
             },
             consumerOptions,
           );
         } else {
           await client.startConsumer(
             entry.topics as any,
-            async (message: any, topic: any) => {
-              await handler(message, topic);
+            async (envelope: any) => {
+              await handler(envelope);
             },
             consumerOptions,
           );

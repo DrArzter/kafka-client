@@ -1,4 +1,4 @@
-import { KafkaTestContainer } from "./test-container";
+import { KafkaTestContainer } from "../test-container";
 
 // Mock @testcontainers/kafka and kafkajs to avoid Docker dependency in unit tests
 const mockStop = jest.fn();

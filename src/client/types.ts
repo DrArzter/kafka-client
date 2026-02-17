@@ -1,4 +1,5 @@
 import { TopicDescriptor, SchemaLike } from "./topic";
+import type { EventEnvelope } from "./envelope";
 
 /**
  * Mapping of topic names to their message types.
@@ -37,8 +38,24 @@ export type MessageHeaders = Record<string, string>;
 export interface SendOptions {
   /** Partition key for message routing. */
   key?: string;
-  /** Custom headers attached to the message. */
+  /** Custom headers attached to the message (merged with auto-generated envelope headers). */
   headers?: MessageHeaders;
+  /** Override the auto-propagated correlation ID (default: inherited from ALS context or new UUID). */
+  correlationId?: string;
+  /** Schema version for the payload. Default: `1`. */
+  schemaVersion?: number;
+  /** Override the auto-generated event ID (UUID v4). */
+  eventId?: string;
+}
+
+/** Shape of each item in a `sendBatch` call. */
+export interface BatchMessageItem<V> {
+  value: V;
+  key?: string;
+  headers?: MessageHeaders;
+  correlationId?: string;
+  schemaVersion?: number;
+  eventId?: string;
 }
 
 /** Metadata exposed to batch consumer handlers. */
@@ -88,20 +105,39 @@ export interface RetryOptions {
 /**
  * Interceptor hooks for consumer message processing.
  * All methods are optional — implement only what you need.
+ *
+ * Interceptors are per-consumer. For client-wide hooks (e.g. OTel),
+ * use `KafkaInstrumentation` instead.
  */
 export interface ConsumerInterceptor<
   T extends TopicMapConstraint<T> = TTopicMessageMap,
 > {
   /** Called before the message handler. */
-  before?(message: T[keyof T], topic: string): Promise<void> | void;
+  before?(envelope: EventEnvelope<T[keyof T]>): Promise<void> | void;
   /** Called after the message handler succeeds. */
-  after?(message: T[keyof T], topic: string): Promise<void> | void;
+  after?(envelope: EventEnvelope<T[keyof T]>): Promise<void> | void;
   /** Called when the message handler throws. */
   onError?(
-    message: T[keyof T],
-    topic: string,
+    envelope: EventEnvelope<T[keyof T]>,
     error: Error,
   ): Promise<void> | void;
+}
+
+/**
+ * Client-wide instrumentation hooks for both send and consume paths.
+ * Use this for cross-cutting concerns like tracing and metrics.
+ *
+ * @see `otelInstrumentation()` from `@drarzter/kafka-client/otel`
+ */
+export interface KafkaInstrumentation {
+  /** Called before sending — can mutate `headers` (e.g. inject `traceparent`). */
+  beforeSend?(topic: string, headers: MessageHeaders): void;
+  /** Called after a successful send. */
+  afterSend?(topic: string): void;
+  /** Called before the consumer handler. Return a cleanup function called after the handler. */
+  beforeConsume?(envelope: EventEnvelope<any>): (() => void) | void;
+  /** Called when the consumer handler throws. */
+  onConsumeError?(envelope: EventEnvelope<any>, error: Error): void;
 }
 
 /** Context passed to the `transaction()` callback with type-safe send methods. */
@@ -119,15 +155,11 @@ export interface TransactionContext<T extends TopicMapConstraint<T>> {
 
   sendBatch<K extends keyof T>(
     topic: K,
-    messages: Array<{ value: T[K]; key?: string; headers?: MessageHeaders }>,
+    messages: Array<BatchMessageItem<T[K]>>,
   ): Promise<void>;
   sendBatch<D extends TopicDescriptor<string & keyof T, T[string & keyof T]>>(
     descriptor: D,
-    messages: Array<{
-      value: D["__type"];
-      key?: string;
-      headers?: MessageHeaders;
-    }>,
+    messages: Array<BatchMessageItem<D["__type"]>>,
   ): Promise<void>;
 }
 
@@ -137,7 +169,7 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
 
   startConsumer<K extends Array<keyof T>>(
     topics: K,
-    handleMessage: (message: T[K[number]], topic: K[number]) => Promise<void>,
+    handleMessage: (envelope: EventEnvelope<T[K[number]]>) => Promise<void>,
     options?: ConsumerOptions<T>,
   ): Promise<void>;
 
@@ -145,15 +177,14 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
     D extends TopicDescriptor<string & keyof T, T[string & keyof T]>,
   >(
     topics: D[],
-    handleMessage: (message: D["__type"], topic: D["__topic"]) => Promise<void>,
+    handleMessage: (envelope: EventEnvelope<D["__type"]>) => Promise<void>,
     options?: ConsumerOptions<T>,
   ): Promise<void>;
 
   startBatchConsumer<K extends Array<keyof T>>(
     topics: K,
     handleBatch: (
-      messages: T[K[number]][],
-      topic: K[number],
+      envelopes: EventEnvelope<T[K[number]]>[],
       meta: BatchMeta,
     ) => Promise<void>,
     options?: ConsumerOptions<T>,
@@ -164,8 +195,7 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
   >(
     topics: D[],
     handleBatch: (
-      messages: D["__type"][],
-      topic: D["__topic"],
+      envelopes: EventEnvelope<D["__type"]>[],
       meta: BatchMeta,
     ) => Promise<void>,
     options?: ConsumerOptions<T>,
@@ -181,7 +211,7 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
 
   sendBatch<K extends keyof T>(
     topic: K,
-    messages: Array<{ value: T[K]; key?: string; headers?: MessageHeaders }>,
+    messages: Array<BatchMessageItem<T[K]>>,
   ): Promise<void>;
 
   transaction(fn: (ctx: TransactionContext<T>) => Promise<void>): Promise<void>;
@@ -211,6 +241,8 @@ export interface KafkaClientOptions {
   logger?: KafkaLogger;
   /** Number of partitions for auto-created topics. Default: `1`. */
   numPartitions?: number;
+  /** Client-wide instrumentation hooks (e.g. OTel). Applied to both send and consume paths. */
+  instrumentation?: KafkaInstrumentation[];
 }
 
 /** Options for consumer subscribe retry when topic doesn't exist yet. */
