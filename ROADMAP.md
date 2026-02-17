@@ -8,6 +8,10 @@
 - [ ] **Benchmarks** — compare throughput/latency before and after migration
 - [ ] **Migration guide** — document any breaking changes for consumers of the library
 
+## Known issues (kafkajs)
+
+- **Rebalance duplicate delivery** — `fromBeginning: true` with a fresh consumer group can deliver messages twice due to rebalance during initial partition assignment. This is a kafkajs bug with no upstream fix (unmaintained). `autoCommitThreshold: 1` narrows the window but doesn't eliminate it. Will be resolved by the Confluent client migration (librdkafka handles rebalance correctly). CI flaky test `basic.integration.spec.ts` "should send and receive a message" is affected.
+
 ## Done
 
 ### 0.4.0
