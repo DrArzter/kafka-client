@@ -2,7 +2,8 @@ import {
   KafkaContainer,
   type StartedKafkaContainer,
 } from "@testcontainers/kafka";
-import { Kafka, logLevel as KafkaLogLevel } from "kafkajs";
+import { KafkaJS } from "@confluentinc/kafka-javascript";
+const { Kafka, logLevel: KafkaLogLevel } = KafkaJS;
 
 /** Options for `KafkaTestContainer`. */
 export interface KafkaTestContainerOptions {
@@ -81,9 +82,11 @@ export class KafkaTestContainer {
     const brokers = [`${host}:${port}`];
 
     const kafka = new Kafka({
-      clientId: "test-container-setup",
-      brokers,
-      logLevel: KafkaLogLevel.NOTHING,
+      kafkaJS: {
+        clientId: "test-container-setup",
+        brokers,
+        logLevel: KafkaLogLevel.NOTHING,
+      },
     });
 
     if (this.topics.length > 0) {
@@ -101,15 +104,18 @@ export class KafkaTestContainer {
 
     if (this.transactionWarmup) {
       const warmupKafka = new Kafka({
-        clientId: "test-container-warmup",
-        brokers,
-        logLevel: KafkaLogLevel.NOTHING,
-        retry: { retries: 30, initialRetryTime: 500, maxRetryTime: 30000 },
+        kafkaJS: {
+          clientId: "test-container-warmup",
+          brokers,
+          logLevel: KafkaLogLevel.NOTHING,
+        },
       });
       const txProducer = warmupKafka.producer({
-        transactionalId: "test-container-warmup-tx",
-        idempotent: true,
-        maxInFlightRequests: 1,
+        kafkaJS: {
+          transactionalId: "test-container-warmup-tx",
+          idempotent: true,
+          maxInFlightRequests: 1,
+        },
       });
       await txProducer.connect();
       const tx = await txProducer.transaction();

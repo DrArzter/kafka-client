@@ -63,7 +63,6 @@ describe("KafkaClient — Retry", () => {
       expect(mockSend).toHaveBeenCalledWith({
         topic: "test.topic.dlq",
         messages: [{ value: JSON.stringify({ id: "1", value: 1 }) }],
-        acks: -1,
       });
     });
   });

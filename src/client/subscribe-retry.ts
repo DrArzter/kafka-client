@@ -1,11 +1,10 @@
-import type { Consumer } from "kafkajs";
+import type { KafkaJS } from "@confluentinc/kafka-javascript";
 import type { KafkaLogger, SubscribeRetryOptions } from "./types";
 import { toError, sleep } from "./consumer-pipeline";
 
 export async function subscribeWithRetry(
-  consumer: Consumer,
+  consumer: KafkaJS.Consumer,
   topics: string[],
-  fromBeginning: boolean,
   logger: KafkaLogger,
   retryOpts?: SubscribeRetryOptions,
 ): Promise<void> {
@@ -14,7 +13,7 @@ export async function subscribeWithRetry(
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      await consumer.subscribe({ topics, fromBeginning });
+      await consumer.subscribe({ topics });
       return;
     } catch (error) {
       if (attempt === maxAttempts) throw error;

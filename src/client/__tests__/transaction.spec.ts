@@ -35,7 +35,6 @@ describe("KafkaClient — Transaction", () => {
             headers: expect.any(Object),
           },
         ],
-        acks: -1,
       });
       expect(mockTxCommit).toHaveBeenCalled();
       expect(mockTxAbort).not.toHaveBeenCalled();
@@ -75,7 +74,6 @@ describe("KafkaClient — Transaction", () => {
             headers: expect.objectContaining({ "x-trace": "t1" }),
           },
         ],
-        acks: -1,
       });
       expect(mockTxCommit).toHaveBeenCalled();
     });
@@ -96,7 +94,6 @@ describe("KafkaClient — Transaction", () => {
             headers: expect.any(Object),
           },
         ],
-        acks: -1,
       });
       expect(mockTxCommit).toHaveBeenCalled();
     });
@@ -137,7 +134,6 @@ describe("KafkaClient — Transaction", () => {
             headers: expect.any(Object),
           },
         ],
-        acks: -1,
       });
       expect(mockTxCommit).toHaveBeenCalled();
     });

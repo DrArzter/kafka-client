@@ -24,10 +24,9 @@ describe("KafkaClient — Consumer", () => {
       expect(mockConsumer.connect).toHaveBeenCalled();
       expect(mockSubscribe).toHaveBeenCalledWith({
         topics: ["test.topic"],
-        fromBeginning: false,
       });
       expect(mockRun).toHaveBeenCalledWith(
-        expect.objectContaining({ autoCommit: true }),
+        expect.objectContaining({ eachMessage: expect.any(Function) }),
       );
     });
 
@@ -40,10 +39,9 @@ describe("KafkaClient — Consumer", () => {
 
       expect(mockSubscribe).toHaveBeenCalledWith({
         topics: ["test.topic"],
-        fromBeginning: true,
       });
       expect(mockRun).toHaveBeenCalledWith(
-        expect.objectContaining({ autoCommit: false }),
+        expect.objectContaining({ eachMessage: expect.any(Function) }),
       );
     });
 
@@ -112,7 +110,6 @@ describe("KafkaClient — Consumer", () => {
 
       expect(mockSubscribe).toHaveBeenCalledWith({
         topics: ["test.topic"],
-        fromBeginning: false,
       });
     });
   });

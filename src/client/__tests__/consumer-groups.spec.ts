@@ -28,14 +28,14 @@ describe("KafkaClient — Consumer Groups", () => {
       });
 
       // The mock kafka.consumer() should be called twice (for two different groups)
-      const kafkaInstance = (require("kafkajs") as any).Kafka.mock.results[0]
+      const kafkaInstance = (require("@confluentinc/kafka-javascript") as any).KafkaJS.Kafka.mock.results[0]
         .value;
       expect(kafkaInstance.consumer).toHaveBeenCalledTimes(2);
       expect(kafkaInstance.consumer).toHaveBeenCalledWith({
-        groupId: "group-a",
+        kafkaJS: { groupId: "group-a", fromBeginning: false, autoCommit: true },
       });
       expect(kafkaInstance.consumer).toHaveBeenCalledWith({
-        groupId: "group-b",
+        kafkaJS: { groupId: "group-b", fromBeginning: false, autoCommit: true },
       });
     });
 
@@ -49,7 +49,7 @@ describe("KafkaClient — Consumer Groups", () => {
         groupId: "group-a",
       });
 
-      const kafkaInstance = (require("kafkajs") as any).Kafka.mock.results[0]
+      const kafkaInstance = (require("@confluentinc/kafka-javascript") as any).KafkaJS.Kafka.mock.results[0]
         .value;
       // Should only create one consumer for group-a
       expect(kafkaInstance.consumer).toHaveBeenCalledTimes(1);
@@ -60,10 +60,10 @@ describe("KafkaClient — Consumer Groups", () => {
 
       await client.startConsumer(["test.topic"], handler);
 
-      const kafkaInstance = (require("kafkajs") as any).Kafka.mock.results[0]
+      const kafkaInstance = (require("@confluentinc/kafka-javascript") as any).KafkaJS.Kafka.mock.results[0]
         .value;
       expect(kafkaInstance.consumer).toHaveBeenCalledWith({
-        groupId: "test-group",
+        kafkaJS: { groupId: "test-group", fromBeginning: false, autoCommit: true },
       });
     });
 
@@ -91,10 +91,10 @@ describe("KafkaClient — Consumer Groups", () => {
         groupId: "batch-group",
       });
 
-      const kafkaInstance = (require("kafkajs") as any).Kafka.mock.results[0]
+      const kafkaInstance = (require("@confluentinc/kafka-javascript") as any).KafkaJS.Kafka.mock.results[0]
         .value;
       expect(kafkaInstance.consumer).toHaveBeenCalledWith({
-        groupId: "batch-group",
+        kafkaJS: { groupId: "batch-group", fromBeginning: false, autoCommit: true },
       });
     });
   });

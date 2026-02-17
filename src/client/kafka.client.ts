@@ -1,4 +1,9 @@
-import { Consumer, Kafka, Partitioners, Producer, Admin, logLevel as KafkaLogLevel } from "kafkajs";
+import { KafkaJS } from "@confluentinc/kafka-javascript";
+type Kafka = KafkaJS.Kafka;
+type Producer = KafkaJS.Producer;
+type Consumer = KafkaJS.Consumer;
+type Admin = KafkaJS.Admin;
+const { Kafka: KafkaClass, logLevel: KafkaLogLevel } = KafkaJS;
 import { TopicDescriptor, SchemaLike } from "./topic";
 import {
   buildEnvelopeHeaders,
@@ -33,11 +38,10 @@ import type {
 // Re-export all types so existing `import { ... } from './kafka.client'` keeps working
 export * from "./types";
 
-const ACKS_ALL = -1 as const;
-
 /**
  * Type-safe Kafka client.
- * Wraps kafkajs with JSON serialization, retries, DLQ, transactions, and interceptors.
+ * Wraps @confluentinc/kafka-javascript (librdkafka) with JSON serialization,
+ * retries, DLQ, transactions, and interceptors.
  *
  * @typeParam T - Topic-to-message type mapping for compile-time safety.
  */
@@ -46,6 +50,7 @@ export class KafkaClient<
 > implements IKafkaClient<T> {
   private readonly kafka: Kafka;
   private readonly producer: Producer;
+  private txProducer: Producer | undefined;
   private readonly consumers = new Map<string, Consumer>();
   private readonly admin: Admin;
   private readonly logger: KafkaLogger;
@@ -79,36 +84,17 @@ export class KafkaClient<
     this.numPartitions = options?.numPartitions ?? 1;
     this.instrumentation = options?.instrumentation ?? [];
 
-    this.kafka = new Kafka({
-      clientId: this.clientId,
-      brokers,
-      logLevel: KafkaLogLevel.WARN,
-      logCreator: () => ({ level, log }) => {
-        const msg = `[kafkajs] ${log.message}`;
-        if (level === KafkaLogLevel.ERROR) {
-          const text = log.message ?? "";
-          const isRetriable =
-            text.includes("TOPIC_ALREADY_EXISTS") ||
-            text.includes("GROUP_COORDINATOR_NOT_AVAILABLE") ||
-            text.includes("NOT_COORDINATOR") ||
-            text.includes("coordinator is loading") ||
-            text.includes("Restarting the consumer") ||
-            text.includes("Response GroupCoordinator") ||
-            text.includes("Response CreateTopics");
-          if (isRetriable) this.logger.warn(msg);
-          else this.logger.error(msg);
-        } else if (level === KafkaLogLevel.WARN) {
-          this.logger.warn(msg);
-        } else {
-          this.logger.log(msg);
-        }
+    this.kafka = new KafkaClass({
+      kafkaJS: {
+        clientId: this.clientId,
+        brokers,
+        logLevel: KafkaLogLevel.ERROR,
       },
     });
     this.producer = this.kafka.producer({
-      createPartitioner: Partitioners.DefaultPartitioner,
-      idempotent: true,
-      transactionalId: `${clientId}-tx`,
-      maxInFlightRequests: 1,
+      kafkaJS: {
+        acks: -1,
+      },
     });
     this.admin = this.kafka.admin();
   }
@@ -173,7 +159,18 @@ export class KafkaClient<
   public async transaction(
     fn: (ctx: TransactionContext<T>) => Promise<void>,
   ): Promise<void> {
-    const tx = await this.producer.transaction();
+    if (!this.txProducer) {
+      this.txProducer = this.kafka.producer({
+        kafkaJS: {
+          acks: -1,
+          idempotent: true,
+          transactionalId: `${this.clientId}-tx`,
+          maxInFlightRequests: 1,
+        },
+      });
+      await this.txProducer.connect();
+    }
+    const tx = await this.txProducer.transaction();
     try {
       const ctx: TransactionContext<T> = {
         send: async (
@@ -254,7 +251,6 @@ export class KafkaClient<
     const deps = { logger: this.logger, producer: this.producer, instrumentation: this.instrumentation };
 
     await consumer.run({
-      autoCommit: options.autoCommit ?? true,
       eachMessage: async ({ topic, partition, message }) => {
         if (!message.value) {
           this.logger.warn(`Received empty message from topic ${topic}`);
@@ -325,7 +321,6 @@ export class KafkaClient<
     const deps = { logger: this.logger, producer: this.producer, instrumentation: this.instrumentation };
 
     await consumer.run({
-      autoCommit: options.autoCommit ?? true,
       eachBatch: async ({
         batch,
         heartbeat,
@@ -419,6 +414,10 @@ export class KafkaClient<
   /** Gracefully disconnect producer, all consumers, and admin. */
   public async disconnect(): Promise<void> {
     const tasks: Promise<void>[] = [this.producer.disconnect()];
+    if (this.txProducer) {
+      tasks.push(this.txProducer.disconnect());
+      this.txProducer = undefined;
+    }
     for (const consumer of this.consumers.values()) {
       tasks.push(consumer.disconnect());
     }
@@ -434,12 +433,20 @@ export class KafkaClient<
 
   // ── Private helpers ──────────────────────────────────────────────
 
-  private getOrCreateConsumer(groupId?: string): Consumer {
-    const gid = groupId || this.defaultGroupId;
-    if (!this.consumers.has(gid)) {
-      this.consumers.set(gid, this.kafka.consumer({ groupId: gid }));
+  private getOrCreateConsumer(
+    groupId: string,
+    fromBeginning: boolean,
+    autoCommit: boolean,
+  ): Consumer {
+    if (!this.consumers.has(groupId)) {
+      this.consumers.set(
+        groupId,
+        this.kafka.consumer({
+          kafkaJS: { groupId, fromBeginning, autoCommit },
+        }),
+      );
     }
-    return this.consumers.get(gid)!;
+    return this.consumers.get(groupId)!;
   }
 
   private resolveTopicName(topicOrDescriptor: unknown): string {
@@ -494,7 +501,7 @@ export class KafkaClient<
   private buildSendPayload(
     topicOrDesc: any,
     messages: Array<BatchMessageItem<any>>,
-  ): { topic: string; messages: Array<{ value: string; key: string | null; headers: MessageHeaders }>; acks: -1 } {
+  ): { topic: string; messages: Array<{ value: string; key: string | null; headers: MessageHeaders }> } {
     this.registerSchema(topicOrDesc);
     const topic = this.resolveTopicName(topicOrDesc);
     return {
@@ -518,7 +525,6 @@ export class KafkaClient<
           headers: envelopeHeaders,
         };
       }),
-      acks: ACKS_ALL,
     };
   }
 
@@ -547,15 +553,25 @@ export class KafkaClient<
       );
     }
 
-    const consumer = this.getOrCreateConsumer(optGroupId);
+    const consumer = this.getOrCreateConsumer(gid, fromBeginning, options.autoCommit ?? true);
     const schemaMap = this.buildSchemaMap(topics, optionSchemas);
 
     const topicNames = (topics as any[]).map((t: any) =>
       this.resolveTopicName(t),
     );
 
+    // Ensure topics exist before subscribing — librdkafka errors on unknown topics
+    for (const t of topicNames) {
+      await this.ensureTopic(t);
+    }
+    if (dlq) {
+      for (const t of topicNames) {
+        await this.ensureTopic(`${t}.dlq`);
+      }
+    }
+
     await consumer.connect();
-    await subscribeWithRetry(consumer, topicNames, fromBeginning, this.logger, options.subscribeRetry);
+    await subscribeWithRetry(consumer, topicNames, this.logger, options.subscribeRetry);
 
     this.logger.log(
       `${mode === "eachBatch" ? "Batch consumer" : "Consumer"} subscribed to topics: ${topicNames.join(", ")}`,

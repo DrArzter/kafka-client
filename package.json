@@ -1,6 +1,6 @@
 {
   "name": "@drarzter/kafka-client",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Type-safe Kafka client wrapper for NestJS with typed topic-message maps",
   "license": "MIT",
   "main": "./dist/index.js",
@@ -46,7 +46,8 @@
   ],
   "keywords": [
     "kafka",
-    "kafkajs",
+    "confluent",
+    "librdkafka",
     "nestjs",
     "typescript",
     "typed-kafka",
@@ -65,7 +66,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "kafkajs": "^2.2.4"
+    "@confluentinc/kafka-javascript": "^1.8.0"
   },
   "peerDependencies": {
     "@nestjs/common": ">=10.0.0",

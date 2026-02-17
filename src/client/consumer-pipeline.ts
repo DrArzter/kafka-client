@@ -1,4 +1,5 @@
-import type { Producer } from "kafkajs";
+import type { KafkaJS } from "@confluentinc/kafka-javascript";
+type Producer = KafkaJS.Producer;
 import type { EventEnvelope } from "./envelope";
 import { extractEnvelope } from "./envelope";
 import { KafkaRetryExhaustedError, KafkaValidationError } from "./errors";
@@ -11,7 +12,6 @@ import type {
   TopicMapConstraint,
 } from "./types";
 
-const ACKS_ALL = -1 as const;
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -94,7 +94,6 @@ export async function sendToDlq(
     await deps.producer.send({
       topic: dlqTopic,
       messages: [{ value: rawMessage }],
-      acks: ACKS_ALL,
     });
     deps.logger.warn(`Message sent to DLQ: ${dlqTopic}`);
   } catch (error) {

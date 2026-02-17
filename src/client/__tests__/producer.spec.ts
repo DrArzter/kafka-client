@@ -49,7 +49,6 @@ describe("KafkaClient — Producer", () => {
             }),
           },
         ],
-        acks: -1,
       });
     });
 
@@ -66,7 +65,6 @@ describe("KafkaClient — Producer", () => {
             headers: expect.any(Object),
           },
         ],
-        acks: -1,
       });
     });
 
@@ -118,7 +116,6 @@ describe("KafkaClient — Producer", () => {
             headers: expect.any(Object),
           },
         ],
-        acks: -1,
       });
     });
 
@@ -159,7 +156,6 @@ describe("KafkaClient — Producer", () => {
             headers: expect.any(Object),
           },
         ],
-        acks: -1,
       });
     });
 
@@ -177,7 +173,6 @@ describe("KafkaClient — Producer", () => {
             headers: expect.any(Object),
           },
         ],
-        acks: -1,
       });
     });
   });

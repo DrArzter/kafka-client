@@ -1,6 +1,6 @@
 import { KafkaTestContainer } from "../test-container";
 
-// Mock @testcontainers/kafka and kafkajs to avoid Docker dependency in unit tests
+// Mock @testcontainers/kafka and @confluentinc/kafka-javascript to avoid Docker dependency in unit tests
 const mockStop = jest.fn();
 const mockGetHost = jest.fn().mockReturnValue("localhost");
 const mockGetMappedPort = jest.fn().mockReturnValue(55555);
@@ -32,20 +32,22 @@ const mockProducerTransaction = jest
   .fn()
   .mockResolvedValue({ abort: mockTxAbort });
 
-jest.mock("kafkajs", () => ({
-  Kafka: jest.fn().mockImplementation(() => ({
-    admin: jest.fn().mockReturnValue({
-      connect: mockAdminConnect,
-      createTopics: mockCreateTopics,
-      disconnect: mockAdminDisconnect,
-    }),
-    producer: jest.fn().mockReturnValue({
-      connect: mockProducerConnect,
-      disconnect: mockProducerDisconnect,
-      transaction: mockProducerTransaction,
-    }),
-  })),
-  logLevel: { NOTHING: 0 },
+jest.mock("@confluentinc/kafka-javascript", () => ({
+  KafkaJS: {
+    Kafka: jest.fn().mockImplementation(() => ({
+      admin: jest.fn().mockReturnValue({
+        connect: mockAdminConnect,
+        createTopics: mockCreateTopics,
+        disconnect: mockAdminDisconnect,
+      }),
+      producer: jest.fn().mockReturnValue({
+        connect: mockProducerConnect,
+        disconnect: mockProducerDisconnect,
+        transaction: mockProducerTransaction,
+      }),
+    })),
+    logLevel: { NOTHING: 0 },
+  },
 }));
 
 describe("KafkaTestContainer", () => {

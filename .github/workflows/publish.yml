@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+  pull_request:
+    branches: [main]
 
 jobs:
   test:
@@ -15,13 +17,20 @@ jobs:
         with:
           node-version: 20
 
-      - run: npm install
+      - name: Install system librdkafka
+        run: sudo apt-get update && sudo apt-get install -y librdkafka-dev
 
-      - run: npm test
+      - name: Install dependencies
+        run: BUILD_LIBRDKAFKA=0 npm install
 
-      - run: npm run lint
+      - name: Unit tests
+        run: npm test
 
-      - run: npm run test:integration
+      - name: Lint
+        run: npm run lint
+
+      - name: Integration tests
+        run: npm run test:integration
 
   publish:
     needs: test
@@ -35,7 +44,11 @@ jobs:
           node-version: 20
           registry-url: https://registry.npmjs.org
 
-      - run: npm install
+      - name: Install system librdkafka
+        run: sudo apt-get update && sudo apt-get install -y librdkafka-dev
+
+      - name: Install dependencies
+        run: BUILD_LIBRDKAFKA=0 npm install
 
       - run: npm run build
 

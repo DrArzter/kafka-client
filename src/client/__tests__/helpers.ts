@@ -1,4 +1,4 @@
-jest.mock("kafkajs");
+jest.mock("@confluentinc/kafka-javascript");
 
 import { KafkaClient, TTopicMessageMap } from "../kafka.client";
 import {
@@ -15,7 +15,7 @@ import {
   mockTxSend,
   mockTxCommit,
   mockTxAbort,
-} from "../../__mocks__/kafkajs";
+} from "../../__mocks__/@confluentinc/kafka-javascript";
 
 export interface TestTopicMap extends TTopicMessageMap {
   "test.topic": { id: string; value: number };

@@ -43,22 +43,21 @@ const Kafka = jest.fn().mockImplementation(() => ({
   admin: jest.fn().mockReturnValue(mockAdmin),
 }));
 
-const Partitioners = {
-  DefaultPartitioner: jest.fn(),
-};
-
 const logLevel = {
   NOTHING: 0,
   ERROR: 1,
   WARN: 2,
-  INFO: 4,
-  DEBUG: 5,
+  INFO: 3,
+  DEBUG: 4,
+};
+
+const KafkaJS = {
+  Kafka,
+  logLevel,
 };
 
 export {
-  Kafka,
-  Partitioners,
-  logLevel,
+  KafkaJS,
   mockProducer,
   mockConsumer,
   mockAdmin,

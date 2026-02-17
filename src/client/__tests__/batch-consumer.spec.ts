@@ -27,11 +27,9 @@ describe("KafkaClient — Batch Consumer", () => {
     expect(mockConsumer.connect).toHaveBeenCalled();
     expect(mockSubscribe).toHaveBeenCalledWith({
       topics: ["test.topic"],
-      fromBeginning: false,
     });
     expect(mockRun).toHaveBeenCalledWith(
       expect.objectContaining({
-        autoCommit: true,
         eachBatch: expect.any(Function),
       }),
     );

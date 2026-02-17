@@ -1,5 +1,6 @@
 import { KafkaContainer } from "@testcontainers/kafka";
-import { Kafka, logLevel as KafkaLogLevel } from "kafkajs";
+import { KafkaJS } from "@confluentinc/kafka-javascript";
+const { Kafka, logLevel: KafkaLogLevel } = KafkaJS;
 import * as fs from "fs";
 import * as path from "path";
 
@@ -49,9 +50,11 @@ export default async function globalSetup() {
   fs.writeFileSync(BROKER_FILE, brokers, "utf-8");
 
   const kafka = new Kafka({
-    clientId: "setup",
-    brokers: [brokers],
-    logLevel: KafkaLogLevel.NOTHING,
+    kafkaJS: {
+      clientId: "setup",
+      brokers: [brokers],
+      logLevel: KafkaLogLevel.NOTHING,
+    },
   });
 
   // Pre-create topics
@@ -64,29 +67,21 @@ export default async function globalSetup() {
 
   // Warmup: trigger transaction coordinator initialization
   const warmupKafka = new Kafka({
-    clientId: "warmup",
-    brokers: [brokers],
-    logLevel: KafkaLogLevel.NOTHING,
-    retry: { retries: 30, initialRetryTime: 500, maxRetryTime: 30000 },
+    kafkaJS: {
+      clientId: "warmup",
+      brokers: [brokers],
+      logLevel: KafkaLogLevel.NOTHING,
+    },
   });
   const txProducer = warmupKafka.producer({
-    transactionalId: "warmup-tx",
-    idempotent: true,
-    maxInFlightRequests: 1,
+    kafkaJS: {
+      transactionalId: "warmup-tx",
+      idempotent: true,
+      maxInFlightRequests: 1,
+    },
   });
   await txProducer.connect();
   const tx = await txProducer.transaction();
   await tx.abort();
   await txProducer.disconnect();
-
-  // Warmup: trigger group coordinator initialization so consumers don't hit
-  // "coordinator is loading" on first join
-  const warmupConsumer = warmupKafka.consumer({ groupId: "warmup-group" });
-  await warmupConsumer.connect();
-  await warmupConsumer.subscribe({ topics: [ALL_TOPICS[0]], fromBeginning: false });
-  await warmupConsumer.run({ eachMessage: async () => {} });
-  // Give the coordinator time to fully initialize
-  await new Promise((r) => setTimeout(r, 2000));
-  await warmupConsumer.stop();
-  await warmupConsumer.disconnect();
 }

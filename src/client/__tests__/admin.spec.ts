@@ -122,10 +122,23 @@ describe("KafkaClient — Admin & Lifecycle", () => {
       });
     });
 
-    it("should NOT create topics on startConsumer (consumers don't create topics)", async () => {
+    it("should create topics on startConsumer (librdkafka errors on unknown topics)", async () => {
       await autoClient.startConsumer(["test.topic"], jest.fn());
 
-      expect(mockCreateTopics).not.toHaveBeenCalled();
+      expect(mockCreateTopics).toHaveBeenCalledWith({
+        topics: [{ topic: "test.topic", numPartitions: 1 }],
+      });
+    });
+
+    it("should create DLQ topics on startConsumer when dlq is enabled", async () => {
+      await autoClient.startConsumer(["test.topic"], jest.fn(), { dlq: true });
+
+      expect(mockCreateTopics).toHaveBeenCalledWith({
+        topics: [{ topic: "test.topic", numPartitions: 1 }],
+      });
+      expect(mockCreateTopics).toHaveBeenCalledWith({
+        topics: [{ topic: "test.topic.dlq", numPartitions: 1 }],
+      });
     });
 
     it("should reuse admin connection across ensureTopic calls", async () => {
