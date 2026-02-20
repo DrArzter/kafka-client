@@ -4,11 +4,11 @@
 [![CI](https://github.com/drarzter/kafka-client/actions/workflows/publish.yml/badge.svg)](https://github.com/drarzter/kafka-client/actions/workflows/publish.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-Type-safe Kafka client for Node.js. Framework-agnostic core with a first-class NestJS adapter. Built on top of [kafkajs](https://kafka.js.org/).
+Type-safe Kafka client for Node.js. Framework-agnostic core with a first-class NestJS adapter. Built on top of [`@confluentinc/kafka-javascript`](https://github.com/confluentinc/confluent-kafka-javascript) (librdkafka).
 
 ## What is this?
 
-An opinionated, type-safe abstraction over kafkajs. Works standalone (Express, Fastify, raw Node) or as a NestJS DynamicModule. Not a full-featured framework — just a clean, typed layer for producing and consuming Kafka messages.
+An opinionated, type-safe abstraction over `@confluentinc/kafka-javascript` (librdkafka). Works standalone (Express, Fastify, raw Node) or as a NestJS DynamicModule. Not a full-featured framework — just a clean, typed layer for producing and consuming Kafka messages.
 
 ## Why?
 
@@ -40,6 +40,21 @@ See the [Roadmap](./ROADMAP.md) for upcoming features and version history.
 ```bash
 npm install @drarzter/kafka-client
 ```
+
+`@confluentinc/kafka-javascript` uses a native librdkafka addon. On most systems it builds automatically. For faster installs (skips compilation), install the system library first:
+
+```bash
+# Arch / CachyOS
+sudo pacman -S librdkafka
+
+# Debian / Ubuntu
+sudo apt-get install librdkafka-dev
+
+# macOS
+brew install librdkafka
+```
+
+Then install with `BUILD_LIBRDKAFKA=0 npm install`.
 
 For NestJS projects, install peer dependencies: `@nestjs/common`, `@nestjs/core`, `reflect-metadata`, `rxjs`.
 
@@ -221,7 +236,7 @@ import { OrdersTopicMap } from './orders.types';
 export class OrdersModule {}
 ```
 
-`autoCreateTopics` calls `admin.createTopics()` (idempotent — no-op if topic already exists) before the first send/consume for each topic. Useful in development, not recommended for production.
+`autoCreateTopics` calls `admin.createTopics()` (idempotent — no-op if topic already exists) before the first send **and** before each `startConsumer` / `startBatchConsumer` call. librdkafka errors on unknown topics at subscribe time, so consumer-side creation is required. Useful in development, not recommended for production.
 
 Or with `ConfigService`:
 
@@ -347,7 +362,7 @@ export class OrdersService implements OnModuleInit {
 
 ### Per-consumer groupId
 
-Override the default consumer group for specific consumers. Each unique `groupId` creates a separate kafkajs Consumer internally:
+Override the default consumer group for specific consumers. Each unique `groupId` creates a separate librdkafka Consumer internally:
 
 ```typescript
 // Default group from constructor
@@ -812,6 +827,8 @@ export class HealthService {
 
 Import from `@drarzter/kafka-client/testing` — zero runtime deps, only `jest` and `@testcontainers/kafka` as peer dependencies.
 
+> Unit tests mock `@confluentinc/kafka-javascript` — no Kafka broker needed. Integration tests use Testcontainers (requires Docker).
+
 #### `createMockKafkaClient<T>()`
 
 Fully typed mock with `jest.fn()` on every `IKafkaClient` method. All methods resolve to sensible defaults:
@@ -872,7 +889,7 @@ Options:
 
 ### Running tests
 
-Unit tests (mocked kafkajs):
+Unit tests (mocked `@confluentinc/kafka-javascript` — no broker needed):
 
 ```bash
 npm test
@@ -886,7 +903,7 @@ npm run test:integration
 
 The integration suite spins up a single-node KRaft Kafka container and tests sending, consuming, batching, transactions, retry + DLQ, interceptors, health checks, and `fromBeginning` — no mocks.
 
-Both suites run in CI on every push to `main`.
+Both suites run in CI on every push to `main` and on pull requests.
 
 ## Project structure
 

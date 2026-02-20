@@ -26,6 +26,7 @@ export type TestTopics = {
   "test.schema-send": { name: string; age: number };
   "test.batch-consume": { id: number; text: string };
   "test.multi-group": { seq: number };
+  "test.health": { probe: boolean };
 };
 
 // ── Descriptors ─────────────────────────────────────────────────────

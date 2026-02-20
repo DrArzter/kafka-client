@@ -25,6 +25,7 @@ const ALL_TOPICS = [
   "test.schema-send",
   "test.batch-consume",
   "test.multi-group",
+  "test.health",
 ];
 
 const BROKER_FILE = path.join(__dirname, ".integration-brokers.tmp");

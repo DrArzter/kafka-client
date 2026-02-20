@@ -144,15 +144,15 @@ describe("Integration — Consumer Features", () => {
     const client = createClient("health");
     await client.connectProducer();
 
-    await client.sendMessage("test.basic", { text: "probe", seq: 0 });
+    await client.sendMessage("test.health", { probe: true });
 
     const status = await client.checkStatus();
-    expect(status.topics).toContain("test.basic");
+    expect(status.topics).toContain("test.health");
 
     const health = new KafkaHealthIndicator();
     const result = await health.check(client);
     expect(result.status).toBe("up");
-    expect(result.topics).toContain("test.basic");
+    expect(result.topics).toContain("test.health");
 
     await client.disconnect();
   });
