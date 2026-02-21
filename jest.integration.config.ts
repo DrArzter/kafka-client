@@ -10,4 +10,7 @@ export default {
   globalTeardown: "<rootDir>/integration/global-teardown.ts",
   // Run sequentially — tests share one Kafka container
   maxWorkers: 1,
+  transform: {
+    "^.+\\.tsx?$": ["ts-jest", { tsconfig: "./tsconfig.spec.json" }],
+  },
 };

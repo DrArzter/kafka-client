@@ -135,6 +135,58 @@ export async function sendToDlq(
   }
 }
 
+// ── Retry topic routing ─────────────────────────────────────────────
+
+/** Headers stamped on messages sent to a `<topic>.retry` topic. */
+export const RETRY_HEADER_ATTEMPT = 'x-retry-attempt';
+export const RETRY_HEADER_AFTER = 'x-retry-after';
+export const RETRY_HEADER_MAX_RETRIES = 'x-retry-max-retries';
+export const RETRY_HEADER_ORIGINAL_TOPIC = 'x-retry-original-topic';
+
+/**
+ * Send raw messages to the retry topic `<originalTopic>.retry`.
+ * Stamps scheduling headers so the retry consumer knows when and how many times to retry.
+ */
+export async function sendToRetryTopic(
+  originalTopic: string,
+  rawMessages: string[],
+  attempt: number,
+  maxRetries: number,
+  delayMs: number,
+  originalHeaders: MessageHeaders,
+  deps: { logger: KafkaLogger; producer: Producer },
+): Promise<void> {
+  const retryTopic = `${originalTopic}.retry`;
+  // Strip any stale retry headers from a previous hop so they don't leak through.
+  const {
+    [RETRY_HEADER_ATTEMPT]: _a,
+    [RETRY_HEADER_AFTER]: _b,
+    [RETRY_HEADER_MAX_RETRIES]: _c,
+    [RETRY_HEADER_ORIGINAL_TOPIC]: _d,
+    ...userHeaders
+  } = originalHeaders;
+  const headers: MessageHeaders = {
+    ...userHeaders,
+    [RETRY_HEADER_ATTEMPT]: String(attempt),
+    [RETRY_HEADER_AFTER]: String(Date.now() + delayMs),
+    [RETRY_HEADER_MAX_RETRIES]: String(maxRetries),
+    [RETRY_HEADER_ORIGINAL_TOPIC]: originalTopic,
+  };
+  try {
+    for (const raw of rawMessages) {
+      await deps.producer.send({ topic: retryTopic, messages: [{ value: raw, headers }] });
+    }
+    deps.logger.warn(
+      `Message queued in retry topic ${retryTopic} (attempt ${attempt}/${maxRetries})`,
+    );
+  } catch (error) {
+    deps.logger.error(
+      `Failed to send message to retry topic ${retryTopic}:`,
+      toError(error).stack,
+    );
+  }
+}
+
 // ── Retry pipeline ──────────────────────────────────────────────────
 
 export interface ExecuteWithRetryContext<T extends TopicMapConstraint<T>> {
@@ -144,6 +196,12 @@ export interface ExecuteWithRetryContext<T extends TopicMapConstraint<T>> {
   dlq: boolean;
   retry?: RetryOptions;
   isBatch?: boolean;
+  /**
+   * When `true`, failed messages are routed to `<topic>.retry` instead of being
+   * retried in-process. All backoff and subsequent attempts are handled by the
+   * companion retry consumer started by `startRetryTopicConsumers`.
+   */
+  retryTopics?: boolean;
 }
 
 /**
@@ -160,8 +218,9 @@ export async function executeWithRetry<T extends TopicMapConstraint<T>>(
     onMessageLost?: (ctx: MessageLostContext) => void | Promise<void>;
   },
 ): Promise<void> {
-  const { envelope, rawMessages, interceptors, dlq, retry, isBatch } = ctx;
-  const maxAttempts = retry ? retry.maxRetries + 1 : 1;
+  const { envelope, rawMessages, interceptors, dlq, retry, isBatch, retryTopics } = ctx;
+  // With retryTopics mode the main consumer tries exactly once — retry consumer takes over.
+  const maxAttempts = retryTopics ? 1 : retry ? retry.maxRetries + 1 : 1;
   const backoffMs = retry?.backoffMs ?? 1000;
   const maxBackoffMs = retry?.maxBackoffMs ?? 30_000;
   const envelopes = Array.isArray(envelope) ? envelope : [envelope];
@@ -238,7 +297,16 @@ export async function executeWithRetry<T extends TopicMapConstraint<T>>(
         err.stack,
       );
 
-      if (isLastAttempt) {
+      if (retryTopics && retry) {
+        // Route to retry topic — retry consumer handles backoff and further attempts.
+        // Always use attempt 1 here (main consumer never retries in-process).
+        const cap = Math.min(backoffMs, maxBackoffMs);
+        const delay = Math.floor(Math.random() * cap);
+        await sendToRetryTopic(
+          topic, rawMessages, 1, retry.maxRetries, delay,
+          envelopes[0]?.headers ?? {}, deps,
+        );
+      } else if (isLastAttempt) {
         if (dlq) {
           const dlqMeta: DlqMetadata = {
             error: err,

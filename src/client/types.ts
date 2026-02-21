@@ -92,6 +92,18 @@ export interface ConsumerOptions<
   schemas?: Map<string, SchemaLike>;
   /** Retry config for `consumer.subscribe()` when the topic doesn't exist yet. */
   subscribeRetry?: SubscribeRetryOptions;
+  /**
+   * Route failed messages through a Kafka retry topic (`<topic>.retry`) instead of sleeping
+   * in-process between retry attempts. Requires `retry` to be set.
+   *
+   * Benefits over in-process retry:
+   * - Retry messages survive consumer restarts (durable)
+   * - Original consumer is not blocked during retry delay
+   *
+   * A companion consumer on `<topic>.retry` is auto-started with group `<groupId>-retry`.
+   * On exhaustion, messages go to `<topic>.dlq` (if `dlq: true`) or `onMessageLost`.
+   */
+  retryTopics?: boolean;
 }
 
 /** Configuration for consumer retry behavior. */
@@ -203,7 +215,12 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
     options?: ConsumerOptions<T>,
   ): Promise<void>;
 
-  stopConsumer(): Promise<void>;
+  /**
+   * Stop consumer(s).
+   * - `stopConsumer(groupId)` — disconnect and remove the consumer for a specific group.
+   * - `stopConsumer()` — disconnect and remove all consumers.
+   */
+  stopConsumer(groupId?: string): Promise<void>;
 
   sendMessage<K extends keyof T>(
     topic: K,

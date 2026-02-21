@@ -27,6 +27,12 @@ export type TestTopics = {
   "test.batch-consume": { id: number; text: string };
   "test.multi-group": { seq: number };
   "test.health": { probe: boolean };
+  // chaos / rebalance tests
+  "test.rebalance": { seq: number };
+  // retry topic chain tests
+  "test.retry-topic": { value: string };
+  "test.retry-topic.retry": { value: string };
+  "test.retry-topic.dlq": { value: string };
 };
 
 // ── Descriptors ─────────────────────────────────────────────────────

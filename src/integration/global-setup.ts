@@ -26,7 +26,16 @@ const ALL_TOPICS = [
   "test.batch-consume",
   "test.multi-group",
   "test.health",
+  // retry topic chain tests
+  "test.retry-topic",
+  "test.retry-topic.retry",
+  "test.retry-topic.dlq",
 ];
+
+// Topics that need more than 1 partition (for rebalance tests)
+const MULTI_PARTITION_TOPICS: Record<string, number> = {
+  "test.rebalance": 2,
+};
 
 const BROKER_FILE = path.join(__dirname, ".integration-brokers.tmp");
 
@@ -61,9 +70,14 @@ export default async function globalSetup() {
   // Pre-create topics
   const admin = kafka.admin();
   await admin.connect();
-  await admin.createTopics({
-    topics: ALL_TOPICS.map((topic) => ({ topic, numPartitions: 1 })),
-  });
+  const allTopicConfigs = [
+    ...ALL_TOPICS.map((topic) => ({ topic, numPartitions: 1 })),
+    ...Object.entries(MULTI_PARTITION_TOPICS).map(([topic, numPartitions]) => ({
+      topic,
+      numPartitions,
+    })),
+  ];
+  await admin.createTopics({ topics: allTopicConfigs });
   await admin.disconnect();
 
   // Warmup: trigger transaction coordinator initialization

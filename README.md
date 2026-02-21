@@ -6,9 +6,52 @@
 
 Type-safe Kafka client for Node.js. Framework-agnostic core with a first-class NestJS adapter. Built on top of [`@confluentinc/kafka-javascript`](https://github.com/confluentinc/confluent-kafka-javascript) (librdkafka).
 
+## Table of contents
+
+- [What is this?](#what-is-this)
+- [Why?](#why)
+- [Installation](#installation)
+- [Standalone usage](#standalone-usage-no-nestjs)
+- [Quick start (NestJS)](#quick-start-nestjs)
+- [Usage](#usage)
+  - [1. Define your topic map](#1-define-your-topic-map)
+  - [2. Register the module](#2-register-the-module)
+  - [3. Inject and use](#3-inject-and-use)
+- [Consuming messages](#consuming-messages)
+  - [Declarative: @SubscribeTo()](#declarative-subscribeto)
+  - [Imperative: startConsumer()](#imperative-startconsumer)
+- [Multiple consumer groups](#multiple-consumer-groups)
+- [Partition key](#partition-key)
+- [Message headers](#message-headers)
+- [Batch sending](#batch-sending)
+- [Batch consuming](#batch-consuming)
+- [Transactions](#transactions)
+- [Consumer interceptors](#consumer-interceptors)
+- [Instrumentation](#instrumentation)
+- [Options reference](#options-reference)
+- [Error classes](#error-classes)
+- [Retry topic chain](#retry-topic-chain)
+- [stopConsumer](#stopconsumer)
+- [onMessageLost](#onmessagelost)
+- [Schema validation](#schema-validation)
+- [Health check](#health-check)
+- [Testing](#testing)
+- [Project structure](#project-structure)
+
 ## What is this?
 
 An opinionated, type-safe abstraction over `@confluentinc/kafka-javascript` (librdkafka). Works standalone (Express, Fastify, raw Node) or as a NestJS DynamicModule. Not a full-featured framework — just a clean, typed layer for producing and consuming Kafka messages.
+
+**This library exists so you don't have to think about:**
+
+- rebalance edge cases
+- retry loops and backoff scheduling
+- dead letter queue wiring
+- transaction coordinator warmup
+- graceful shutdown and offset commit pitfalls
+- silent message loss
+
+Safe by default. Configurable when you need it. Escape hatches for when you know what you're doing.
 
 ## Why?
 
@@ -666,6 +709,7 @@ Options for `sendMessage()` — the third argument:
 | `retry.backoffMs` | `1000` | Base delay for exponential backoff in ms |
 | `retry.maxBackoffMs` | `30000` | Maximum delay cap for exponential backoff in ms |
 | `dlq` | `false` | Send to `{topic}.dlq` after all retries exhausted — message carries `x-dlq-*` metadata headers |
+| `retryTopics` | `false` | Route failed messages through `{topic}.retry` instead of sleeping in-process (see [Retry topic chain](#retry-topic-chain)) |
 | `interceptors` | `[]` | Array of before/after/onError hooks |
 | `batch` | `false` | (decorator only) Use `startBatchConsumer` instead of `startConsumer` |
 | `subscribeRetry.retries` | `5` | Max attempts for `consumer.subscribe()` when topic doesn't exist yet |
@@ -773,6 +817,49 @@ const interceptor: ConsumerInterceptor<MyTopics> = {
   },
 };
 ```
+
+## Retry topic chain
+
+By default, retry is handled in-process: the consumer sleeps between attempts while holding the partition. With `retryTopics: true`, failed messages are routed to a `<topic>.retry` Kafka topic instead. A companion consumer auto-starts on `<topic>.retry` (group `<groupId>-retry`), waits until the scheduled retry time, then calls the same handler.
+
+Benefits over in-process retry:
+
+- **Durable** — retry messages survive a consumer restart
+- **Non-blocking** — the original consumer is free immediately; the retry consumer pauses only the specific partition being delayed, so other partitions continue processing
+
+```typescript
+await kafka.startConsumer(['orders.created'], handler, {
+  retry: { maxRetries: 3, backoffMs: 1000, maxBackoffMs: 30_000 },
+  dlq: true,
+  retryTopics: true,   // ← opt in
+});
+```
+
+Message flow with `maxRetries: 2`:
+
+```text
+orders.created  →  handler fails  →  orders.created.retry  (attempt 1, delay ~1 s)
+                                   →  handler fails  →  orders.created.retry  (attempt 2, delay ~2 s)
+                                                      →  handler fails  →  orders.created.dlq
+```
+
+The retry topic messages carry scheduling headers (`x-retry-attempt`, `x-retry-after`, `x-retry-original-topic`, `x-retry-max-retries`) that the companion consumer reads automatically — no manual configuration needed.
+
+> **Note:** `retryTopics` requires `retry` to be set — an error is thrown at startup if `retry` is missing. Currently only applies to `startConsumer`; batch consumers (`startBatchConsumer`) use in-process retry regardless.
+
+## stopConsumer
+
+Stop all consumers or a specific group:
+
+```typescript
+// Stop a specific consumer group
+await kafka.stopConsumer('my-group');
+
+// Stop all consumers
+await kafka.stopConsumer();
+```
+
+`stopConsumer(groupId)` disconnects and removes only that group's consumer, leaving other groups running. Useful when you want to pause processing for a specific topic without restarting the whole client.
 
 ## onMessageLost
 

@@ -4,11 +4,39 @@
 
 ## Upcoming
 
-- **Benchmarks** — compare throughput/latency kafkajs → librdkafka
-- **Transport abstraction** — `KafkaTransport` interface to decouple `KafkaClient` from `@confluentinc/kafka-javascript`; swap transports without touching business code
+### Small / quick wins
+
+- **`getConsumerLag(groupId)`** — query consumer group lag per partition via the admin API; returns `[{ topic, partition, lag }]`; no external tooling required
+- **Handler timeout warning** — `handlerTimeoutMs` option on `startConsumer` / `startBatchConsumer`; logs a `warn` if the handler has not resolved within the configured window — catches stuck handlers before they silently starve a partition
+- **`onRebalance` hook** — `KafkaClientOptions.onRebalance(type: 'assign' | 'revoke', partitions)` callback; exposes librdkafka's native rebalance events so callers can react to partition assignment changes without patching the consumer
+- **`startConsumer` returns `stop()`** — return `{ groupId: string; stop: () => Promise<void> }` instead of `void` so callers don't need to remember the group ID to call `stopConsumer(groupId)` later
+
+### Larger features
+
+- **DLQ replay** — `client.replayDlq(topic, options?)` reads `{topic}.dlq`, strips DLQ metadata headers, and re-publishes messages to the original topic; supports `from` / `to` time-range filters and a dry-run mode
+- **Graceful shutdown with drain** — on `SIGTERM` / `SIGINT`: pause all consumers, wait for in-flight handlers to complete, commit offsets, then disconnect; currently `disconnect()` tears down immediately
+- **`SchemaContext` in `parse()`** — extend `SchemaLike.parse(data, ctx?: { topic, headers, version })` so validators can inspect message metadata; enables schema-registry adapters, version-aware migration, and header-driven parsing
+- **Metrics hooks** — dedicated `metricsHook` in `KafkaClientOptions` for numeric observability (consumer lag, retry count, DLQ count, handler duration histogram); separate from OTel spans, targets Prometheus / Datadog / StatsD
+- **Benchmarks** — compare throughput / latency: raw `@confluentinc/kafka-javascript` → `@drarzter/kafka-client` → `@nestjs/microservices` Kafka transport; quantify abstraction overhead
+- **`retryTopics` for batch consumer** — `startBatchConsumer` currently does not support `retryTopics`; routing individual failed messages from a batch needs per-message retry topic dispatch
 - **Circuit breaker** — stop retrying when downstream is consistently unavailable
+- **Transport abstraction** — `KafkaTransport` interface to decouple `KafkaClient` from `@confluentinc/kafka-javascript`; swap transports without touching business code
+
+---
 
 ## Done
+
+### 0.5.4
+
+- [x] **`retryTopics` validation** — throws a clear error at startup if `retryTopics: true` is set without a `retry` config, instead of silently ignoring the option
+- [x] **Partition pause/resume in retry consumer** — replaced bare `sleep()` inside `eachMessage` with `consumer.pause(partition) → sleep → consumer.resume(partition)`; only the specific partition is paused during the scheduled delay, so other partitions on the same retry consumer continue processing
+
+### 0.5.3
+
+- [x] **`stopConsumer(groupId?)`** — selective consumer stop by group ID; `stopConsumer()` (no args) retains the existing "stop all" behaviour
+- [x] **`KafkaHealthResult` discriminated union** — replaced the loose `interface` with `{ status: "up"; topics: string[] } | { status: "down"; error: string }` — narrows cleanly in `if` / `switch` on `status`
+- [x] **Retry topic chain (`retryTopics: true`)** — opt-in durable retry via Kafka topics instead of in-process sleep; failed messages are routed to `<topic>.retry` with scheduling headers (`x-retry-attempt`, `x-retry-after`, `x-retry-max-retries`, `x-retry-original-topic`); a companion consumer auto-starts on `<topic>.retry` with group `<groupId>-retry`, backs off, retries, and on exhaustion routes to `<topic>.dlq` or calls `onMessageLost`
+- [x] **Chaos / rebalance integration tests** — `chaos.integration.spec.ts`: rebalance test (2 consumers, one leaves mid-flight, remaining consumer resumes without loss), selective-stop test, retry topic chain happy + exhaustion paths
 
 ### 0.5.2
 
@@ -36,28 +64,12 @@
 - [x] **Send options** — `correlationId`, `schemaVersion`, `eventId` fields added to `SendOptions` and `BatchMessageItem`
 - [x] **Refactor** — extracted `envelope.ts`, `consumer-pipeline.ts`, `subscribe-retry.ts` from `kafka.client.ts`; unit tests split into per-feature files under `__tests__/`
 
-### 0.2.0
-
-- [x] Schema validation (`SchemaLike<T>` — works with Zod, Valibot, ArkType, or any `.parse()`)
-- [x] Batch consumer (`startBatchConsumer` with `eachBatch`)
-- [x] Multiple consumer groups (per-call `groupId` override)
-- [x] `TopicDescriptor` with type inference
-- [x] `@SubscribeTo` decorator with batch & groupId support
-
-### 0.2.1
-
-- [x] `strictSchemas` mode (default `true`) — validates string topics against schemas registered via TopicDescriptor
-- [x] Mixed eachMessage/eachBatch detection — clear error instead of kafkajs crash
-- [x] `subscribeWithRetry` — configurable retry/backoff for `consumer.subscribe()`
-- [x] Remove `ensureTopic()` from consumer paths (producers only)
-- [x] Refactor — extract `toError`, `parseJsonMessage`, `validateWithSchema`, `executeWithRetry`, `buildSendPayload`, `setupConsumer`; eliminate duplication (721 → 681 lines)
-
 ### 0.3.1
 
 - [x] **Testing utilities** (`@drarzter/kafka-client/testing` entrypoint)
   - [x] `createMockKafkaClient<T>()` — fully typed mock with `jest.fn()` / `vi.fn()` on every `IKafkaClient` method
   - [x] `KafkaTestContainer` — testcontainers wrapper that starts Kafka and exposes `brokers`
-- [x] **Quieter kafkajs logs** — retriable broker errors (`TOPIC_ALREADY_EXISTS`, `GROUP_COORDINATOR_NOT_AVAILABLE`) downgraded from `error` to `warn`
+- [x] **Quieter logs** — retriable broker errors (`TOPIC_ALREADY_EXISTS`, `GROUP_COORDINATOR_NOT_AVAILABLE`) downgraded from `error` to `warn`
 - [x] **`typesVersions` fallback** — subpath imports (`/core`, `/testing`) work with `moduleResolution: "node"`
 
 ### 0.3.0
@@ -68,3 +80,19 @@
 - [x] **Adapter pattern** — NestJS code moved to `src/nest/`, core in `src/client/`
 - [x] **Transaction abort safety** — `tx.abort()` failure no longer masks the original error
 - [x] **Configurable partitions** — `numPartitions` option in `KafkaClientOptions`
+
+### 0.2.1
+
+- [x] `strictSchemas` mode (default `true`) — validates string topics against schemas registered via TopicDescriptor
+- [x] Mixed eachMessage/eachBatch detection — clear error instead of kafkajs crash
+- [x] `subscribeWithRetry` — configurable retry/backoff for `consumer.subscribe()`
+- [x] Remove `ensureTopic()` from consumer paths (producers only)
+- [x] Refactor — extract `toError`, `parseJsonMessage`, `validateWithSchema`, `executeWithRetry`, `buildSendPayload`, `setupConsumer`; eliminate duplication (721 → 681 lines)
+
+### 0.2.0
+
+- [x] Schema validation (`SchemaLike<T>` — works with Zod, Valibot, ArkType, or any `.parse()`)
+- [x] Batch consumer (`startBatchConsumer` with `eachBatch`)
+- [x] Multiple consumer groups (per-call `groupId` override)
+- [x] `TopicDescriptor` with type inference
+- [x] `@SubscribeTo` decorator with batch & groupId support

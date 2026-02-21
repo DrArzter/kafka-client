@@ -14,10 +14,18 @@ import {
 import type { EventEnvelope } from "./envelope";
 import {
   toError,
+  sleep,
   parseJsonMessage,
   validateWithSchema,
   executeWithRetry,
+  sendToDlq,
+  sendToRetryTopic,
+  RETRY_HEADER_ATTEMPT,
+  RETRY_HEADER_AFTER,
+  RETRY_HEADER_MAX_RETRIES,
+  RETRY_HEADER_ORIGINAL_TOPIC,
 } from "./consumer-pipeline";
+import { KafkaRetryExhaustedError } from "./errors";
 import { subscribeWithRetry } from "./subscribe-retry";
 import type {
   ClientId,
@@ -247,7 +255,13 @@ export class KafkaClient<
     handleMessage: (envelope: EventEnvelope<any>) => Promise<void>,
     options: ConsumerOptions<T> = {},
   ): Promise<void> {
-    const { consumer, schemaMap, gid, dlq, interceptors, retry } =
+    if (options.retryTopics && !options.retry) {
+      throw new Error(
+        'retryTopics requires retry to be configured — set retry.maxRetries to enable the retry topic chain',
+      );
+    }
+
+    const { consumer, schemaMap, topicNames, gid, dlq, interceptors, retry } =
       await this.setupConsumer(topics, "eachMessage", options);
 
     const deps = { logger: this.logger, producer: this.producer, instrumentation: this.instrumentation, onMessageLost: this.onMessageLost };
@@ -280,13 +294,19 @@ export class KafkaClient<
               { correlationId: envelope.correlationId, traceparent: envelope.traceparent },
               () => handleMessage(envelope),
             ),
-          { envelope, rawMessages: [raw], interceptors, dlq, retry },
+          { envelope, rawMessages: [raw], interceptors, dlq, retry, retryTopics: options.retryTopics },
           deps,
         );
       },
     });
 
     this.runningConsumers.set(gid, "eachMessage");
+
+    if (options.retryTopics && retry) {
+      await this.startRetryTopicConsumers(
+        topicNames, gid, handleMessage, retry, dlq, interceptors, schemaMap,
+      );
+    }
   }
 
   // ── Consumer: eachBatch ──────────────────────────────────────────
@@ -389,15 +409,26 @@ export class KafkaClient<
 
   // ── Consumer lifecycle ───────────────────────────────────────────
 
-  public async stopConsumer(): Promise<void> {
-    const tasks = [];
-    for (const consumer of this.consumers.values()) {
-      tasks.push(consumer.disconnect());
+  public async stopConsumer(groupId?: string): Promise<void> {
+    if (groupId !== undefined) {
+      const consumer = this.consumers.get(groupId);
+      if (!consumer) {
+        this.logger.warn(`stopConsumer: no active consumer for group "${groupId}"`);
+        return;
+      }
+      await consumer.disconnect().catch(() => {});
+      this.consumers.delete(groupId);
+      this.runningConsumers.delete(groupId);
+      this.logger.log(`Consumer disconnected: group "${groupId}"`);
+    } else {
+      const tasks = Array.from(this.consumers.values()).map((c) =>
+        c.disconnect().catch(() => {}),
+      );
+      await Promise.allSettled(tasks);
+      this.consumers.clear();
+      this.runningConsumers.clear();
+      this.logger.log("All consumers disconnected");
     }
-    await Promise.allSettled(tasks);
-    this.consumers.clear();
-    this.runningConsumers.clear();
-    this.logger.log("All consumers disconnected");
   }
 
   /** Check broker connectivity and return status, clientId, and available topics. */
@@ -434,7 +465,200 @@ export class KafkaClient<
     this.logger.log("All connections closed");
   }
 
+  // ── Retry topic chain ────────────────────────────────────────────
+
+  /**
+   * Auto-start companion consumers on `<topic>.retry` for each original topic.
+   * Called by `startConsumer` when `retryTopics: true`.
+   *
+   * Flow per message:
+   *   1. Sleep until `x-retry-after` (scheduled by the main consumer or previous retry hop)
+   *   2. Call the original handler
+   *   3. On failure: if retries remain → re-send to `<originalTopic>.retry` with incremented attempt
+   *                  if exhausted       → DLQ or onMessageLost
+   */
+  private async startRetryTopicConsumers(
+    originalTopics: string[],
+    originalGroupId: string,
+    handleMessage: (envelope: EventEnvelope<any>) => Promise<void>,
+    retry: { maxRetries: number; backoffMs?: number; maxBackoffMs?: number },
+    dlq: boolean,
+    interceptors: any[],
+    schemaMap: Map<string, SchemaLike>,
+  ): Promise<void> {
+    const retryTopicNames = originalTopics.map((t) => `${t}.retry`);
+    const retryGroupId = `${originalGroupId}-retry`;
+    const backoffMs = retry.backoffMs ?? 1_000;
+    const maxBackoffMs = retry.maxBackoffMs ?? 30_000;
+    const deps = {
+      logger: this.logger,
+      producer: this.producer,
+      instrumentation: this.instrumentation,
+      onMessageLost: this.onMessageLost,
+    };
+
+    for (const rt of retryTopicNames) {
+      await this.ensureTopic(rt);
+    }
+
+    const consumer = this.getOrCreateConsumer(retryGroupId, false, true);
+    await consumer.connect();
+    await subscribeWithRetry(consumer, retryTopicNames, this.logger);
+
+    await consumer.run({
+      eachMessage: async ({ topic: retryTopic, partition, message }) => {
+        if (!message.value) return;
+
+        const raw = message.value.toString();
+        const parsed = parseJsonMessage(raw, retryTopic, this.logger);
+        if (parsed === null) return;
+
+        const headers = decodeHeaders(message.headers);
+        const originalTopic =
+          (headers[RETRY_HEADER_ORIGINAL_TOPIC] as string | undefined) ??
+          retryTopic.replace(/\.retry$/, '');
+        const currentAttempt = parseInt(
+          (headers[RETRY_HEADER_ATTEMPT] as string | undefined) ?? '1',
+          10,
+        );
+        const maxRetries = parseInt(
+          (headers[RETRY_HEADER_MAX_RETRIES] as string | undefined) ??
+            String(retry.maxRetries),
+          10,
+        );
+        const retryAfter = parseInt(
+          (headers[RETRY_HEADER_AFTER] as string | undefined) ?? '0',
+          10,
+        );
+
+        // Pause only this partition for the scheduled delay so that other
+        // topic-partitions on the same retry consumer continue processing.
+        const remaining = retryAfter - Date.now();
+        if (remaining > 0) {
+          consumer.pause([{ topic: retryTopic, partitions: [partition] }]);
+          await sleep(remaining);
+          consumer.resume([{ topic: retryTopic, partitions: [partition] }]);
+        }
+
+        // Validate schema against original topic's schema (if any)
+        const validated = await validateWithSchema(
+          parsed, raw, originalTopic, schemaMap, interceptors, dlq,
+          { ...deps, originalHeaders: headers },
+        );
+        if (validated === null) return;
+
+        // Build envelope with originalTopic so correlationId/traceparent are correct
+        const envelope = extractEnvelope(
+          validated, headers, originalTopic, partition, message.offset,
+        );
+
+        try {
+          // Instrumentation: beforeConsume
+          const cleanups: (() => void)[] = [];
+          for (const inst of this.instrumentation) {
+            const c = inst.beforeConsume?.(envelope);
+            if (typeof c === 'function') cleanups.push(c);
+          }
+          for (const interceptor of interceptors) await interceptor.before?.(envelope);
+
+          await runWithEnvelopeContext(
+            { correlationId: envelope.correlationId, traceparent: envelope.traceparent },
+            () => handleMessage(envelope),
+          );
+
+          for (const interceptor of interceptors) await interceptor.after?.(envelope);
+          for (const cleanup of cleanups) cleanup();
+        } catch (error) {
+          const err = toError(error);
+          const nextAttempt = currentAttempt + 1;
+          const exhausted = currentAttempt >= maxRetries;
+
+          for (const inst of this.instrumentation) inst.onConsumeError?.(envelope, err);
+
+          const reportedError = exhausted && maxRetries > 1
+            ? new KafkaRetryExhaustedError(originalTopic, [envelope.payload], maxRetries, { cause: err })
+            : err;
+          for (const interceptor of interceptors) {
+            await interceptor.onError?.(envelope, reportedError);
+          }
+
+          this.logger.error(
+            `Retry consumer error for ${originalTopic} (attempt ${currentAttempt}/${maxRetries}):`,
+            err.stack,
+          );
+
+          if (!exhausted) {
+            // currentAttempt is the hop that just failed (1-based).
+            // Before hop N+1 we want backoffMs * 2^N, so exponent = currentAttempt.
+            const cap = Math.min(backoffMs * 2 ** currentAttempt, maxBackoffMs);
+            const delay = Math.floor(Math.random() * cap);
+            await sendToRetryTopic(
+              originalTopic, [raw], nextAttempt, maxRetries, delay, headers, deps,
+            );
+          } else if (dlq) {
+            await sendToDlq(originalTopic, raw, deps, {
+              error: err,
+              // +1 to account for the main consumer's initial attempt before
+              // routing to the retry topic, making this consistent with the
+              // in-process retry path where attempt counts all tries.
+              attempt: currentAttempt + 1,
+              originalHeaders: headers,
+            });
+          } else {
+            await deps.onMessageLost?.({
+              topic: originalTopic,
+              error: err,
+              attempt: currentAttempt,
+              headers,
+            });
+          }
+        }
+      },
+    });
+
+    this.runningConsumers.set(retryGroupId, 'eachMessage');
+
+    // Block until the retry consumer has received at least one partition assignment.
+    // consumer.run() starts the group-join protocol asynchronously; without this wait,
+    // the caller may send a message to the original topic before the retry consumer
+    // has established its "latest" offset on the (initially empty) retry partition,
+    // causing it to skip any retry messages produced in that window.
+    await this.waitForPartitionAssignment(consumer, retryTopicNames);
+
+    this.logger.log(
+      `Retry topic consumers started for: ${originalTopics.join(', ')} (group: ${retryGroupId})`,
+    );
+  }
+
   // ── Private helpers ──────────────────────────────────────────────
+
+  /**
+   * Poll `consumer.assignment()` until the consumer has received at least one
+   * partition for the given topics, then return. Logs a warning and returns
+   * (rather than throwing) on timeout so that a slow broker does not break
+   * the caller — in the worst case a message sent immediately after would be
+   * missed, which is the same behaviour as before this guard was added.
+   */
+  private async waitForPartitionAssignment(
+    consumer: Consumer,
+    topics: string[],
+    timeoutMs = 10_000,
+  ): Promise<void> {
+    const topicSet = new Set(topics);
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const assigned: { topic: string; partition: number }[] = consumer.assignment();
+        if (assigned.some((a) => topicSet.has(a.topic))) return;
+      } catch {
+        // consumer.assignment() throws if not yet in CONNECTED state — keep polling
+      }
+      await sleep(200);
+    }
+    this.logger.warn(
+      `Retry consumer did not receive partition assignments for [${topics.join(', ')}] within ${timeoutMs}ms`,
+    );
+  }
 
   private getOrCreateConsumer(
     groupId: string,

@@ -2,6 +2,8 @@ import "reflect-metadata";
 import {
   TestTopics,
   createClient,
+  KafkaClient,
+  getBrokers,
   KafkaHealthIndicator,
   ConsumerInterceptor,
 } from "./helpers";
@@ -152,13 +154,12 @@ describe("Integration — Consumer Features", () => {
     const health = new KafkaHealthIndicator();
     const result = await health.check(client);
     expect(result.status).toBe("up");
-    expect(result.topics).toContain("test.health");
+    if (result.status === "up") expect(result.topics).toContain("test.health");
 
     await client.disconnect();
   });
 
   it("should auto-create topics when autoCreateTopics is enabled", async () => {
-    const { getBrokers, KafkaClient } = require("./helpers");
     const topicName = `test.autocreate-${Date.now()}`;
     type AutoTopics = { [K: string]: { data: string } };
 
