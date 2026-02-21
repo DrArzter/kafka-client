@@ -12,7 +12,7 @@ describe("KafkaHealthIndicator", () => {
       clientId: "test-client",
       checkStatus: jest
         .fn()
-        .mockResolvedValue({ topics: ["topic1", "topic2"] }),
+        .mockResolvedValue({ status: "up", clientId: "test-client", topics: ["topic1", "topic2"] }),
     } as any;
 
     const result = await health.check(mockClient);

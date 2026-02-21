@@ -16,12 +16,7 @@ export class KafkaHealthIndicator {
     client: KafkaClient<T>,
   ): Promise<KafkaHealthResult> {
     try {
-      const { topics } = await client.checkStatus();
-      return {
-        status: "up",
-        clientId: client.clientId,
-        topics,
-      };
+      return await client.checkStatus();
     } catch (error) {
       return {
         status: "down",

@@ -41,7 +41,7 @@ function detectMockFactory(): MockFactory {
  * `mockFactory` for other frameworks.
  *
  * All methods resolve to sensible defaults:
- * - `checkStatus()` → `{ topics: [] }`
+ * - `checkStatus()` → `{ status: 'up', clientId: 'mock-client', topics: [] }`
  * - `getClientId()` → `"mock-client"`
  * - void methods → `undefined`
  *
@@ -68,7 +68,7 @@ export function createMockKafkaClient<T extends TopicMapConstraint<T>>(
   const returning = (value: unknown) => mock().mockReturnValue(value);
 
   return {
-    checkStatus: resolved({ topics: [] }),
+    checkStatus: resolved({ status: 'up', clientId: 'mock-client', topics: [] }),
     getClientId: returning("mock-client"),
     sendMessage: resolved(undefined),
     sendBatch: resolved(undefined),

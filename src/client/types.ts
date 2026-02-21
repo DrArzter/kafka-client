@@ -165,7 +165,7 @@ export interface TransactionContext<T extends TopicMapConstraint<T>> {
 
 /** Interface describing all public methods of the Kafka client. */
 export interface IKafkaClient<T extends TopicMapConstraint<T>> {
-  checkStatus(): Promise<{ topics: string[] }>;
+  checkStatus(): Promise<{ status: 'up'; clientId: string; topics: string[] }>;
 
   startConsumer<K extends Array<keyof T>>(
     topics: K,

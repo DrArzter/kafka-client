@@ -82,6 +82,22 @@ await kafka.startConsumer([OrderCreated], async (envelope) => {
 const kafka2 = new KafkaClient('my-app', 'my-group', ['localhost:9092'], {
   logger: myWinstonLogger,
 });
+
+// All module options work in standalone mode too
+const kafka3 = new KafkaClient('my-app', 'my-group', ['localhost:9092'], {
+  autoCreateTopics: true,   // auto-create topics on first use
+  numPartitions: 3,         // partitions for auto-created topics
+  strictSchemas: false,     // disable schema enforcement for string topic keys
+  instrumentation: [...],   // client-wide tracing/metrics hooks
+});
+
+// Health check — available directly, no NestJS needed
+const status = await kafka.checkStatus();
+// { status: 'up', clientId: 'my-app', topics: ['order.created', ...] }
+
+// Stop all consumers without disconnecting the producer or admin
+// Useful when you want to re-subscribe with different options
+await kafka.stopConsumer();
 ```
 
 ## Quick start (NestJS)
@@ -489,10 +505,32 @@ await this.kafka.startBatchConsumer(
     for (const env of envelopes) {
       await processOrder(env.payload);
       meta.resolveOffset(env.offset);
+
+      // Call heartbeat() during long-running batch processing to prevent
+      // the broker from considering the consumer dead (session.timeout.ms)
+      await meta.heartbeat();
     }
     await meta.commitOffsetsIfNecessary();
   },
   { retry: { maxRetries: 3 }, dlq: true },
+);
+```
+
+With `autoCommit: false` for full manual offset control:
+
+```typescript
+await this.kafka.startBatchConsumer(
+  ['order.created'],
+  async (envelopes, meta) => {
+    for (const env of envelopes) {
+      await processOrder(env.payload);
+      meta.resolveOffset(env.offset);
+    }
+    // commitOffsetsIfNecessary() commits only when autoCommit is off
+    // or when the commit interval has elapsed
+    await meta.commitOffsetsIfNecessary();
+  },
+  { autoCommit: false },
 );
 ```
 
@@ -507,7 +545,15 @@ async handleOrders(envelopes: EventEnvelope<OrdersTopicMap['order.created']>[], 
 
 Schema validation runs per-message — invalid messages are skipped (DLQ'd if enabled), valid ones are passed to the handler. Retry applies to the whole batch.
 
-`BatchMeta` exposes: `partition`, `highWatermark`, `heartbeat()`, `resolveOffset(offset)`, `commitOffsetsIfNecessary()`.
+`BatchMeta` exposes:
+
+| Property/Method | Description |
+| --------------- | ----------- |
+| `partition` | Partition number for this batch |
+| `highWatermark` | Latest offset in the partition (lag indicator) |
+| `heartbeat()` | Send a heartbeat to keep the consumer session alive — call during long processing loops |
+| `resolveOffset(offset)` | Mark offset as processed (required before `commitOffsetsIfNecessary`) |
+| `commitOffsetsIfNecessary()` | Commit resolved offsets; respects `autoCommit` setting |
 
 ## Transactions
 
@@ -528,7 +574,17 @@ await this.kafka.transaction(async (tx) => {
 });
 ```
 
-`tx.sendBatch()` is also available inside transactions.
+`tx.sendBatch()` is also available inside transactions:
+
+```typescript
+await this.kafka.transaction(async (tx) => {
+  await tx.sendBatch('order.created', [
+    { value: { orderId: '1', userId: '10', amount: 50 }, key: '1' },
+    { value: { orderId: '2', userId: '20', amount: 75 }, key: '2' },
+  ]);
+  // if anything throws, all messages are rolled back
+});
+```
 
 ## Consumer interceptors
 
@@ -590,7 +646,7 @@ const metrics: KafkaInstrumentation = {
 Options for `sendMessage()` — the third argument:
 
 | Option | Default | Description |
-|--------|---------|-------------|
+| ------ | ------- | ----------- |
 | `key` | — | Partition key for message routing |
 | `headers` | — | Custom metadata headers (merged with auto-generated envelope headers) |
 | `correlationId` | auto | Override the auto-propagated correlation ID (default: inherited from ALS context or new UUID) |
@@ -602,7 +658,7 @@ Options for `sendMessage()` — the third argument:
 ### Consumer options
 
 | Option | Default | Description |
-|--------|---------|-------------|
+| ------ | ------- | ----------- |
 | `groupId` | constructor value | Override consumer group for this subscription |
 | `fromBeginning` | `false` | Read from the beginning of the topic |
 | `autoCommit` | `true` | Auto-commit offsets |
@@ -619,7 +675,7 @@ Options for `sendMessage()` — the third argument:
 Passed to `KafkaModule.register()` or returned from `registerAsync()` factory:
 
 | Option | Default | Description |
-|--------|---------|-------------|
+| ------ | ------- | ----------- |
 | `clientId` | — | Kafka client identifier (required) |
 | `groupId` | — | Default consumer group ID (required) |
 | `brokers` | — | Array of broker addresses (required) |
@@ -882,7 +938,7 @@ it('sends and receives', async () => {
 Options:
 
 | Option | Default | Description |
-|--------|---------|-------------|
+| ------ | ------- | ----------- |
 | `image` | `"confluentinc/cp-kafka:7.7.0"` | Docker image |
 | `transactionWarmup` | `true` | Warm up transaction coordinator on start |
 | `topics` | `[]` | Topics to pre-create (string or `{ topic, numPartitions }`) |

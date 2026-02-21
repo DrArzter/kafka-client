@@ -24,8 +24,8 @@ describe("createMockKafkaClient", () => {
     expect(mock.disconnect).toBeDefined();
   });
 
-  it("checkStatus resolves to { topics: [] }", async () => {
-    await expect(mock.checkStatus()).resolves.toEqual({ topics: [] });
+  it("checkStatus resolves to { status: 'up', clientId: 'mock-client', topics: [] }", async () => {
+    await expect(mock.checkStatus()).resolves.toEqual({ status: 'up', clientId: 'mock-client', topics: [] });
   });
 
   it("getClientId returns 'mock-client'", () => {

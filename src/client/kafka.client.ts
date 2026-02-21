@@ -397,14 +397,14 @@ export class KafkaClient<
     this.logger.log("All consumers disconnected");
   }
 
-  /** Check broker connectivity and return available topics. */
-  public async checkStatus(): Promise<{ topics: string[] }> {
+  /** Check broker connectivity and return status, clientId, and available topics. */
+  public async checkStatus(): Promise<{ status: 'up'; clientId: string; topics: string[] }> {
     if (!this.isAdminConnected) {
       await this.admin.connect();
       this.isAdminConnected = true;
     }
     const topics = await this.admin.listTopics();
-    return { topics };
+    return { status: 'up', clientId: this.clientId, topics };
   }
 
   public getClientId(): ClientId {
