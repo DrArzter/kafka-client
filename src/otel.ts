@@ -63,7 +63,7 @@ export function otelInstrumentation(): KafkaInstrumentation {
       return () => span.end();
     },
 
-    onConsumeError(envelope: EventEnvelope<any>, error: Error) {
+    onConsumeError(_envelope: EventEnvelope<any>, error: Error) {
       const span = trace.getActiveSpan();
       if (span) {
         span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });

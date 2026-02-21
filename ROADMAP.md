@@ -2,17 +2,27 @@
 
 > Living document — updated as priorities shift.
 
-## 0.5.0 — Confluent client migration
+## Upcoming
 
-- [ ] **Replace kafkajs** with `@confluentinc/kafka-javascript` — kafkajs is unmaintained, Confluent's client wraps librdkafka with a KafkaJS-compatible API
-- [ ] **Benchmarks** — compare throughput/latency before and after migration
-- [ ] **Migration guide** — document any breaking changes for consumers of the library
-
-## Known issues (kafkajs)
-
-- **Rebalance duplicate delivery** — `fromBeginning: true` with a fresh consumer group can deliver messages twice due to rebalance during initial partition assignment. This is a kafkajs bug with no upstream fix (unmaintained). `autoCommitThreshold: 1` narrows the window but doesn't eliminate it. Will be resolved by the Confluent client migration (librdkafka handles rebalance correctly). CI flaky test `basic.integration.spec.ts` "should send and receive a message" is affected.
+- **Benchmarks** — compare throughput/latency kafkajs → librdkafka
+- **Transport abstraction** — `KafkaTransport` interface to decouple `KafkaClient` from `@confluentinc/kafka-javascript`; swap transports without touching business code
+- **Circuit breaker** — stop retrying when downstream is consistently unavailable
 
 ## Done
+
+### 0.5.2
+
+- [x] **Exponential backoff + full jitter** — retry delay was linear (`backoffMs * attempt`); now `random(0, min(backoffMs * 2^attempt, maxBackoffMs))` — prevents thundering herd under load
+- [x] **`retry.maxBackoffMs`** — new option to cap the exponential delay (default `30000` ms)
+- [x] **DLQ metadata headers** — dead letter messages now carry `x-dlq-original-topic`, `x-dlq-failed-at`, `x-dlq-error-message`, `x-dlq-error-stack`, `x-dlq-attempt-count`, plus all original message headers (preserves `x-correlation-id`, `traceparent`, etc.)
+- [x] **Async `SchemaLike`** — `parse(data: unknown): T | Promise<T>` — enables async validators, remote schema registry lookup, and Confluent Schema Registry adapters
+- [x] **`onMessageLost` hook** — `KafkaClientOptions.onMessageLost(ctx)` is called whenever a message is silently dropped (handler throws without DLQ, or schema validation fails without DLQ); receives `{ topic, error, attempt, headers }` — closes the "silent loss" gap
+
+### 0.5.1 — Confluent client migration
+
+- [x] **Replace kafkajs** with `@confluentinc/kafka-javascript` — kafkajs is unmaintained; Confluent's client wraps librdkafka with a KafkaJS-compatible API
+- [x] **Separate transactional producer** — librdkafka forbids non-tx sends on a transactional producer; lazy-created `txProducer` on first `transaction()` call
+- [x] **System librdkafka support** — `BUILD_LIBRDKAFKA=0` install path documented; resolves native build failures on Arch/CachyOS
 
 ### 0.4.0
 

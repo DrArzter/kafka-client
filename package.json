@@ -1,6 +1,6 @@
 {
   "name": "@drarzter/kafka-client",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Type-safe Kafka client wrapper for NestJS with typed topic-message maps",
   "license": "MIT",
   "main": "./dist/index.js",

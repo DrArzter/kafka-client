@@ -16,7 +16,7 @@ An opinionated, type-safe abstraction over `@confluentinc/kafka-javascript` (lib
 - **Topic descriptors** — `topic()` DX sugar lets you define topics as standalone typed objects instead of string keys
 - **Framework-agnostic** — use standalone or with NestJS (`register()` / `registerAsync()`, DI, lifecycle hooks)
 - **Idempotent producer** — `acks: -1`, `idempotent: true` by default
-- **Retry + DLQ** — configurable retries with backoff, dead letter queue for failed messages
+- **Retry + DLQ** — exponential backoff with full jitter; dead letter queue with error metadata headers (original topic, error message, stack, attempt count)
 - **Batch sending** — send multiple messages in a single request
 - **Batch consuming** — `startBatchConsumer()` for high-throughput `eachBatch` processing
 - **Partition key support** — route related messages to the same partition
@@ -663,8 +663,9 @@ Options for `sendMessage()` — the third argument:
 | `fromBeginning` | `false` | Read from the beginning of the topic |
 | `autoCommit` | `true` | Auto-commit offsets |
 | `retry.maxRetries` | — | Number of retry attempts |
-| `retry.backoffMs` | `1000` | Base delay between retries (multiplied by attempt number) |
-| `dlq` | `false` | Send to `{topic}.dlq` after all retries exhausted |
+| `retry.backoffMs` | `1000` | Base delay for exponential backoff in ms |
+| `retry.maxBackoffMs` | `30000` | Maximum delay cap for exponential backoff in ms |
+| `dlq` | `false` | Send to `{topic}.dlq` after all retries exhausted — message carries `x-dlq-*` metadata headers |
 | `interceptors` | `[]` | Array of before/after/onError hooks |
 | `batch` | `false` | (decorator only) Use `startBatchConsumer` instead of `startConsumer` |
 | `subscribeRetry.retries` | `5` | Max attempts for `consumer.subscribe()` when topic doesn't exist yet |
@@ -685,6 +686,7 @@ Passed to `KafkaModule.register()` or returned from `registerAsync()` factory:
 | `numPartitions` | `1` | Number of partitions for auto-created topics |
 | `strictSchemas` | `true` | Validate string topic keys against schemas registered via TopicDescriptor |
 | `instrumentation` | `[]` | Client-wide instrumentation hooks (e.g. OTel). Applied to both send and consume paths |
+| `onMessageLost` | — | Called when a message is silently dropped without DLQ — use to alert, log to external systems, or trigger fallback logic |
 
 **Module-scoped** (default) — import `KafkaModule` in each module that needs it:
 
@@ -772,6 +774,31 @@ const interceptor: ConsumerInterceptor<MyTopics> = {
 };
 ```
 
+## onMessageLost
+
+By default, if a consumer handler throws and `dlq` is not enabled, the message is logged and dropped. Use `onMessageLost` to catch these silent losses:
+
+```typescript
+import { KafkaClient, MessageLostContext } from '@drarzter/kafka-client/core';
+
+const kafka = new KafkaClient('my-app', 'my-group', ['localhost:9092'], {
+  onMessageLost: (ctx: MessageLostContext) => {
+    // ctx.topic    — topic the message came from
+    // ctx.error    — what caused the failure
+    // ctx.attempt  — number of attempts (0 = schema validation failed before handler ran)
+    // ctx.headers  — original message headers (correlationId, traceparent, ...)
+    myAlertSystem.send(`Message lost on ${ctx.topic}: ${ctx.error.message}`);
+  },
+});
+```
+
+`onMessageLost` fires in two cases:
+
+1. **Handler error** — handler threw after all retries and `dlq: false`
+2. **Validation error** — schema rejected the message and `dlq: false` (attempt is `0`)
+
+It does NOT fire when `dlq: true` — in that case the message is preserved in `{topic}.dlq`.
+
 ## Schema validation
 
 Add runtime message validation using any library with a `.parse()` method — Zod, Valibot, ArkType, or a custom validator. No extra dependency required.
@@ -835,16 +862,25 @@ Disable with `strictSchemas: false` in `KafkaModule.register()` options if you w
 
 ### Bring your own validator
 
-Any object with `parse(data: unknown): T` works:
+Any object with `parse(data: unknown): T | Promise<T>` works — sync and async validators are both supported:
 
 ```typescript
 import { SchemaLike } from '@drarzter/kafka-client';
 
+// Sync validator
 const customValidator: SchemaLike<{ id: string }> = {
   parse(data: unknown) {
     const d = data as any;
     if (typeof d?.id !== 'string') throw new Error('id must be a string');
     return { id: d.id };
+  },
+};
+
+// Async validator — e.g. remote schema registry lookup
+const asyncValidator: SchemaLike<{ id: string }> = {
+  async parse(data: unknown) {
+    const schema = await fetchSchemaFromRegistry('my.topic');
+    return schema.validate(data);
   },
 };
 

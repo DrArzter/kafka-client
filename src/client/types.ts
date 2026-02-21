@@ -98,8 +98,10 @@ export interface ConsumerOptions<
 export interface RetryOptions {
   /** Maximum number of retry attempts before giving up. */
   maxRetries: number;
-  /** Base delay between retries in ms (multiplied by attempt number). Default: `1000`. */
+  /** Base delay for exponential backoff in ms. Default: `1000`. */
   backoffMs?: number;
+  /** Maximum delay cap for exponential backoff in ms. Default: `30000`. */
+  maxBackoffMs?: number;
 }
 
 /**
@@ -231,6 +233,21 @@ export interface KafkaLogger {
   error(message: string, ...args: any[]): void;
 }
 
+/**
+ * Context passed to `onMessageLost` when a message is silently dropped
+ * (handler threw and `dlq` is not enabled).
+ */
+export interface MessageLostContext {
+  /** Topic the message was consumed from. */
+  topic: string;
+  /** Error that caused the message to be dropped. */
+  error: Error;
+  /** Number of processing attempts (0 = validation failure, before handler ran). */
+  attempt: number;
+  /** Original Kafka message headers (correlationId, traceparent, etc.). */
+  headers: MessageHeaders;
+}
+
 /** Options for `KafkaClient` constructor. */
 export interface KafkaClientOptions {
   /** Auto-create topics via admin before the first `sendMessage`, `sendBatch`, or `transaction` for each topic. Useful for development — not recommended in production. */
@@ -243,6 +260,12 @@ export interface KafkaClientOptions {
   numPartitions?: number;
   /** Client-wide instrumentation hooks (e.g. OTel). Applied to both send and consume paths. */
   instrumentation?: KafkaInstrumentation[];
+  /**
+   * Called when a message is dropped without being sent to a DLQ.
+   * Fires when the handler throws after all retries, or schema validation fails — and `dlq` is not enabled.
+   * Use this to alert, log to external systems, or trigger fallback logic.
+   */
+  onMessageLost?: (ctx: MessageLostContext) => void | Promise<void>;
 }
 
 /** Options for consumer subscribe retry when topic doesn't exist yet. */

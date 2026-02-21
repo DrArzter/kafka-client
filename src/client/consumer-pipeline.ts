@@ -8,6 +8,8 @@ import type {
   ConsumerInterceptor,
   KafkaInstrumentation,
   KafkaLogger,
+  MessageHeaders,
+  MessageLostContext,
   RetryOptions,
   TopicMapConstraint,
 } from "./types";
@@ -56,13 +58,18 @@ export async function validateWithSchema<T extends TopicMapConstraint<T>>(
   schemaMap: Map<string, SchemaLike>,
   interceptors: ConsumerInterceptor<T>[],
   dlq: boolean,
-  deps: { logger: KafkaLogger; producer: Producer },
+  deps: {
+    logger: KafkaLogger;
+    producer: Producer;
+    onMessageLost?: (ctx: MessageLostContext) => void | Promise<void>;
+    originalHeaders?: MessageHeaders;
+  },
 ): Promise<any | null> {
   const schema = schemaMap.get(topic);
   if (!schema) return message;
 
   try {
-    return schema.parse(message);
+    return await schema.parse(message);
   } catch (error) {
     const err = toError(error);
     const validationError = new KafkaValidationError(topic, message, {
@@ -72,9 +79,17 @@ export async function validateWithSchema<T extends TopicMapConstraint<T>>(
       `Schema validation failed for topic ${topic}:`,
       err.message,
     );
-    if (dlq) await sendToDlq(topic, raw, deps);
+    if (dlq) {
+      await sendToDlq(topic, raw, deps, {
+        error: validationError,
+        attempt: 0,
+        originalHeaders: deps.originalHeaders,
+      });
+    } else {
+      await deps.onMessageLost?.({ topic, error: validationError, attempt: 0, headers: deps.originalHeaders ?? {} });
+    }
     // Validation errors don't have an envelope yet — call onError with a minimal envelope
-    const errorEnvelope = extractEnvelope(message, {}, topic, -1, "");
+    const errorEnvelope = extractEnvelope(message, deps.originalHeaders ?? {}, topic, -1, "");
     for (const interceptor of interceptors) {
       await interceptor.onError?.(errorEnvelope, validationError);
     }
@@ -84,16 +99,32 @@ export async function validateWithSchema<T extends TopicMapConstraint<T>>(
 
 // ── DLQ ─────────────────────────────────────────────────────────────
 
+export interface DlqMetadata {
+  error: Error;
+  attempt: number;
+  /** Original Kafka message headers — forwarded to DLQ to preserve correlationId, traceparent, etc. */
+  originalHeaders?: MessageHeaders;
+}
+
 export async function sendToDlq(
   topic: string,
   rawMessage: string,
   deps: { logger: KafkaLogger; producer: Producer },
+  meta?: DlqMetadata,
 ): Promise<void> {
   const dlqTopic = `${topic}.dlq`;
+  const headers: MessageHeaders = {
+    ...(meta?.originalHeaders ?? {}),
+    'x-dlq-original-topic': topic,
+    'x-dlq-failed-at': new Date().toISOString(),
+    'x-dlq-error-message': meta?.error.message ?? 'unknown',
+    'x-dlq-error-stack': meta?.error.stack?.slice(0, 2000) ?? '',
+    'x-dlq-attempt-count': String(meta?.attempt ?? 0),
+  };
   try {
     await deps.producer.send({
       topic: dlqTopic,
-      messages: [{ value: rawMessage }],
+      messages: [{ value: rawMessage, headers }],
     });
     deps.logger.warn(`Message sent to DLQ: ${dlqTopic}`);
   } catch (error) {
@@ -126,11 +157,13 @@ export async function executeWithRetry<T extends TopicMapConstraint<T>>(
     logger: KafkaLogger;
     producer: Producer;
     instrumentation: KafkaInstrumentation[];
+    onMessageLost?: (ctx: MessageLostContext) => void | Promise<void>;
   },
 ): Promise<void> {
   const { envelope, rawMessages, interceptors, dlq, retry, isBatch } = ctx;
   const maxAttempts = retry ? retry.maxRetries + 1 : 1;
   const backoffMs = retry?.backoffMs ?? 1000;
+  const maxBackoffMs = retry?.maxBackoffMs ?? 30_000;
   const envelopes = Array.isArray(envelope) ? envelope : [envelope];
   const topic = envelopes[0]?.topic ?? "unknown";
 
@@ -207,12 +240,26 @@ export async function executeWithRetry<T extends TopicMapConstraint<T>>(
 
       if (isLastAttempt) {
         if (dlq) {
+          const dlqMeta: DlqMetadata = {
+            error: err,
+            attempt,
+            originalHeaders: envelopes[0]?.headers,
+          };
           for (const raw of rawMessages) {
-            await sendToDlq(topic, raw, deps);
+            await sendToDlq(topic, raw, deps, dlqMeta);
           }
+        } else {
+          await deps.onMessageLost?.({
+            topic,
+            error: err,
+            attempt,
+            headers: envelopes[0]?.headers ?? {},
+          });
         }
       } else {
-        await sleep(backoffMs * attempt);
+        // Exponential backoff with full jitter to avoid thundering herd
+        const cap = Math.min(backoffMs * 2 ** (attempt - 1), maxBackoffMs);
+        await sleep(Math.random() * cap);
       }
     }
   }

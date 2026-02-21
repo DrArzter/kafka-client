@@ -62,6 +62,7 @@ export class KafkaClient<
   private readonly schemaRegistry = new Map<string, SchemaLike>();
   private readonly runningConsumers = new Map<string, "eachMessage" | "eachBatch">();
   private readonly instrumentation: KafkaInstrumentation[];
+  private readonly onMessageLost: KafkaClientOptions['onMessageLost'];
 
   private isAdminConnected = false;
   public readonly clientId: ClientId;
@@ -83,6 +84,7 @@ export class KafkaClient<
     this.strictSchemasEnabled = options?.strictSchemas ?? true;
     this.numPartitions = options?.numPartitions ?? 1;
     this.instrumentation = options?.instrumentation ?? [];
+    this.onMessageLost = options?.onMessageLost;
 
     this.kafka = new KafkaClass({
       kafkaJS: {
@@ -115,7 +117,7 @@ export class KafkaClient<
     message: any,
     options: SendOptions = {},
   ): Promise<void> {
-    const payload = this.buildSendPayload(topicOrDesc, [
+    const payload = await this.buildSendPayload(topicOrDesc, [
       {
         value: message,
         key: options.key,
@@ -147,7 +149,7 @@ export class KafkaClient<
     topicOrDesc: any,
     messages: Array<BatchMessageItem<any>>,
   ): Promise<void> {
-    const payload = this.buildSendPayload(topicOrDesc, messages);
+    const payload = await this.buildSendPayload(topicOrDesc, messages);
     await this.ensureTopic(payload.topic);
     await this.producer.send(payload);
     for (const inst of this.instrumentation) {
@@ -178,7 +180,7 @@ export class KafkaClient<
           message: any,
           options: SendOptions = {},
         ) => {
-          const payload = this.buildSendPayload(topicOrDesc, [
+          const payload = await this.buildSendPayload(topicOrDesc, [
             {
               value: message,
               key: options.key,
@@ -192,7 +194,7 @@ export class KafkaClient<
           await tx.send(payload);
         },
         sendBatch: async (topicOrDesc: any, messages: BatchMessageItem<any>[]) => {
-          const payload = this.buildSendPayload(topicOrDesc, messages);
+          const payload = await this.buildSendPayload(topicOrDesc, messages);
           await this.ensureTopic(payload.topic);
           await tx.send(payload);
         },
@@ -248,7 +250,7 @@ export class KafkaClient<
     const { consumer, schemaMap, gid, dlq, interceptors, retry } =
       await this.setupConsumer(topics, "eachMessage", options);
 
-    const deps = { logger: this.logger, producer: this.producer, instrumentation: this.instrumentation };
+    const deps = { logger: this.logger, producer: this.producer, instrumentation: this.instrumentation, onMessageLost: this.onMessageLost };
 
     await consumer.run({
       eachMessage: async ({ topic, partition, message }) => {
@@ -261,12 +263,13 @@ export class KafkaClient<
         const parsed = parseJsonMessage(raw, topic, this.logger);
         if (parsed === null) return;
 
+        const headers = decodeHeaders(message.headers);
         const validated = await validateWithSchema(
-          parsed, raw, topic, schemaMap, interceptors, dlq, deps,
+          parsed, raw, topic, schemaMap, interceptors, dlq,
+          { ...deps, originalHeaders: headers },
         );
         if (validated === null) return;
 
-        const headers = decodeHeaders(message.headers);
         const envelope = extractEnvelope(
           validated, headers, topic, partition, message.offset,
         );
@@ -318,7 +321,7 @@ export class KafkaClient<
     const { consumer, schemaMap, gid, dlq, interceptors, retry } =
       await this.setupConsumer(topics, "eachBatch", options);
 
-    const deps = { logger: this.logger, producer: this.producer, instrumentation: this.instrumentation };
+    const deps = { logger: this.logger, producer: this.producer, instrumentation: this.instrumentation, onMessageLost: this.onMessageLost };
 
     await consumer.run({
       eachBatch: async ({
@@ -342,12 +345,12 @@ export class KafkaClient<
           const parsed = parseJsonMessage(raw, batch.topic, this.logger);
           if (parsed === null) continue;
 
+          const headers = decodeHeaders(message.headers);
           const validated = await validateWithSchema(
-            parsed, raw, batch.topic, schemaMap, interceptors, dlq, deps,
+            parsed, raw, batch.topic, schemaMap, interceptors, dlq,
+            { ...deps, originalHeaders: headers },
           );
           if (validated === null) continue;
-
-          const headers = decodeHeaders(message.headers);
           envelopes.push(
             extractEnvelope(validated, headers, batch.topic, batch.partition, message.offset),
           );
@@ -482,13 +485,13 @@ export class KafkaClient<
   }
 
   /** Validate message against schema. Pure — no side-effects on registry. */
-  private validateMessage(topicOrDesc: any, message: any): any {
+  private async validateMessage(topicOrDesc: any, message: any): Promise<any> {
     if (topicOrDesc?.__schema) {
-      return topicOrDesc.__schema.parse(message);
+      return await topicOrDesc.__schema.parse(message);
     }
     if (this.strictSchemasEnabled && typeof topicOrDesc === "string") {
       const schema = this.schemaRegistry.get(topicOrDesc);
-      if (schema) return schema.parse(message);
+      if (schema) return await schema.parse(message);
     }
     return message;
   }
@@ -498,15 +501,14 @@ export class KafkaClient<
    * Handles: topic resolution, schema registration, validation, JSON serialization,
    * envelope header generation, and instrumentation hooks.
    */
-  private buildSendPayload(
+  private async buildSendPayload(
     topicOrDesc: any,
     messages: Array<BatchMessageItem<any>>,
-  ): { topic: string; messages: Array<{ value: string; key: string | null; headers: MessageHeaders }> } {
+  ): Promise<{ topic: string; messages: Array<{ value: string; key: string | null; headers: MessageHeaders }> }> {
     this.registerSchema(topicOrDesc);
     const topic = this.resolveTopicName(topicOrDesc);
-    return {
-      topic,
-      messages: messages.map((m) => {
+    const builtMessages = await Promise.all(
+      messages.map(async (m) => {
         const envelopeHeaders = buildEnvelopeHeaders({
           correlationId: m.correlationId,
           schemaVersion: m.schemaVersion,
@@ -520,12 +522,13 @@ export class KafkaClient<
         }
 
         return {
-          value: JSON.stringify(this.validateMessage(topicOrDesc, m.value)),
+          value: JSON.stringify(await this.validateMessage(topicOrDesc, m.value)),
           key: m.key ?? null,
           headers: envelopeHeaders,
         };
       }),
-    };
+    );
+    return { topic, messages: builtMessages };
   }
 
   /** Shared consumer setup: groupId check, schema map, connect, subscribe. */

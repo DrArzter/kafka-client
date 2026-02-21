@@ -9,7 +9,7 @@
  * ```
  */
 export interface SchemaLike<T = any> {
-  parse(data: unknown): T;
+  parse(data: unknown): T | Promise<T>;
 }
 
 /** Infer the output type from a SchemaLike. */
