@@ -1,4 +1,4 @@
 export * from "./client/kafka.client";
-export * from "./client/topic";
+export * from "./client/message/topic";
 export * from "./client/errors";
-export * from "./client/envelope";
+export * from "./client/message/envelope";

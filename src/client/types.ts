@@ -1,5 +1,5 @@
-import { TopicDescriptor, SchemaLike } from "./topic";
-import type { EventEnvelope } from "./envelope";
+import { TopicDescriptor, SchemaLike } from "./message/topic";
+import type { EventEnvelope } from "./message/envelope";
 
 /**
  * Mapping of topic names to their message types.
@@ -267,11 +267,14 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
 /**
  * Logger interface for KafkaClient.
  * Compatible with NestJS Logger, console, winston, pino, or any custom logger.
+ *
+ * `debug` is optional — omit it to suppress debug output in production.
  */
 export interface KafkaLogger {
   log(message: string): void;
   warn(message: string, ...args: any[]): void;
   error(message: string, ...args: any[]): void;
+  debug?(message: string, ...args: any[]): void;
 }
 
 /**

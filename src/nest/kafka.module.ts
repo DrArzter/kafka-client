@@ -6,22 +6,27 @@ import {
   GroupId,
   TopicMapConstraint,
   KafkaInstrumentation,
+  KafkaClientOptions,
 } from "../client/kafka.client";
 import { getKafkaClientToken } from "./kafka.constants";
 import { KafkaExplorer } from "./kafka.explorer";
 
-/** Synchronous configuration for `KafkaModule.register()`. */
-export interface KafkaModuleOptions {
+/** Shared configuration fields for both `register()` and `registerAsync()`. */
+interface KafkaModuleBaseOptions {
   /** Optional name for multi-client setups. Must match `@InjectKafkaClient(name)`. */
   name?: string;
+  /** If true, makes KAFKA_CLIENT available globally without importing KafkaModule in every feature module. */
+  isGlobal?: boolean;
+}
+
+/** Synchronous configuration for `KafkaModule.register()`. */
+export interface KafkaModuleOptions extends KafkaModuleBaseOptions {
   /** Unique Kafka client identifier. */
   clientId: ClientId;
   /** Consumer group identifier. */
   groupId: GroupId;
   /** List of Kafka broker addresses. */
   brokers: string[];
-  /** If true, makes KAFKA_CLIENT available globally without importing KafkaModule in every feature module. */
-  isGlobal?: boolean;
   /** Auto-create topics via admin on first use (send/consume). Useful for development. */
   autoCreateTopics?: boolean;
   /** When `true`, string topic keys are validated against any schema previously registered via a TopicDescriptor. Default: `true`. */
@@ -30,15 +35,14 @@ export interface KafkaModuleOptions {
   numPartitions?: number;
   /** Client-wide instrumentation hooks (e.g. OTel). Applied to both send and consume paths. */
   instrumentation?: KafkaInstrumentation[];
+  /** Called when a message is dropped without being sent to a DLQ. @see `KafkaClientOptions.onMessageLost` */
+  onMessageLost?: KafkaClientOptions["onMessageLost"];
+  /** Called whenever a consumer group rebalance occurs. @see `KafkaClientOptions.onRebalance` */
+  onRebalance?: KafkaClientOptions["onRebalance"];
 }
 
 /** Async configuration for `KafkaModule.registerAsync()` with dependency injection. */
-export interface KafkaModuleAsyncOptions {
-  name?: string;
-  /** If true, makes KAFKA_CLIENT available globally without importing KafkaModule in every feature module. */
-  isGlobal?: boolean;
-  /** Auto-create topics via admin on first use (send/consume). Useful for development. */
-  autoCreateTopics?: boolean;
+export interface KafkaModuleAsyncOptions extends KafkaModuleBaseOptions {
   imports?: any[];
   useFactory: (
     ...args: any[]
@@ -60,37 +64,18 @@ export class KafkaModule {
 
     const kafkaClientProvider: Provider = {
       provide: token,
-      useFactory: async (): Promise<KafkaClient<T>> => {
-        const client = new KafkaClient<T>(
-          options.clientId,
-          options.groupId,
-          options.brokers,
-          {
-            autoCreateTopics: options.autoCreateTopics,
-            strictSchemas: options.strictSchemas,
-            numPartitions: options.numPartitions,
-            instrumentation: options.instrumentation,
-            logger: new Logger(`KafkaClient:${options.clientId}`),
-          },
-        );
-        await client.connectProducer();
-        return client;
-      },
-    };
-
-    const destroyProvider: Provider = {
-      provide: `${token}_DESTROY`,
-      useFactory: (client: KafkaClient<T>) => ({
-        onModuleDestroy: () => client.disconnect(),
-      }),
-      inject: [token],
+      useFactory: () => KafkaModule.buildClient<T>(options),
     };
 
     return {
       global: options.isGlobal ?? false,
       module: KafkaModule,
       imports: [DiscoveryModule],
-      providers: [kafkaClientProvider, destroyProvider, KafkaExplorer],
+      providers: [
+        kafkaClientProvider,
+        KafkaModule.buildDestroyProvider(token),
+        KafkaExplorer,
+      ],
       exports: [kafkaClientProvider],
     };
   }
@@ -103,40 +88,54 @@ export class KafkaModule {
 
     const kafkaClientProvider: Provider = {
       provide: token,
-      useFactory: async (...args: any[]): Promise<KafkaClient<T>> => {
-        const options = await asyncOptions.useFactory(...args);
-        const client = new KafkaClient<T>(
-          options.clientId,
-          options.groupId,
-          options.brokers,
-          {
-            autoCreateTopics: options.autoCreateTopics,
-            strictSchemas: options.strictSchemas,
-            numPartitions: options.numPartitions,
-            instrumentation: options.instrumentation,
-            logger: new Logger(`KafkaClient:${options.clientId}`),
-          },
-        );
-        await client.connectProducer();
-        return client;
-      },
+      useFactory: async (...args: any[]): Promise<KafkaClient<T>> =>
+        KafkaModule.buildClient<T>(await asyncOptions.useFactory(...args)),
       inject: asyncOptions.inject || [],
-    };
-
-    const destroyProvider: Provider = {
-      provide: `${token}_DESTROY`,
-      useFactory: (client: KafkaClient<T>) => ({
-        onModuleDestroy: () => client.disconnect(),
-      }),
-      inject: [token],
     };
 
     return {
       global: asyncOptions.isGlobal ?? false,
       module: KafkaModule,
       imports: [...(asyncOptions.imports || []), DiscoveryModule],
-      providers: [kafkaClientProvider, destroyProvider, KafkaExplorer],
+      providers: [
+        kafkaClientProvider,
+        KafkaModule.buildDestroyProvider(token),
+        KafkaExplorer,
+      ],
       exports: [kafkaClientProvider],
+    };
+  }
+
+  private static async buildClient<T extends TopicMapConstraint<T>>(
+    options: KafkaModuleOptions,
+  ): Promise<KafkaClient<T>> {
+    const client = new KafkaClient<T>(
+      options.clientId,
+      options.groupId,
+      options.brokers,
+      {
+        autoCreateTopics: options.autoCreateTopics,
+        strictSchemas: options.strictSchemas,
+        numPartitions: options.numPartitions,
+        instrumentation: options.instrumentation,
+        onMessageLost: options.onMessageLost,
+        onRebalance: options.onRebalance,
+        logger: new Logger(`KafkaClient:${options.clientId}`),
+      },
+    );
+    await client.connectProducer();
+    return client;
+  }
+
+  private static buildDestroyProvider<T extends TopicMapConstraint<T>>(
+    token: string,
+  ): Provider {
+    return {
+      provide: `${token}_DESTROY`,
+      useFactory: (client: KafkaClient<T>) => ({
+        onModuleDestroy: () => client.disconnect(),
+      }),
+      inject: [token],
     };
   }
 }

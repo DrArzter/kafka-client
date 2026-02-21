@@ -1,9 +1,9 @@
 import type { KafkaJS } from "@confluentinc/kafka-javascript";
 type Producer = KafkaJS.Producer;
-import type { EventEnvelope } from "./envelope";
-import { extractEnvelope } from "./envelope";
-import { KafkaRetryExhaustedError, KafkaValidationError } from "./errors";
-import type { SchemaLike } from "./topic";
+import type { EventEnvelope } from "../message/envelope";
+import { extractEnvelope } from "../message/envelope";
+import { KafkaRetryExhaustedError, KafkaValidationError } from "../errors";
+import type { SchemaLike } from "../message/topic";
 import type {
   ConsumerInterceptor,
   KafkaInstrumentation,
@@ -12,7 +12,7 @@ import type {
   MessageLostContext,
   RetryOptions,
   TopicMapConstraint,
-} from "./types";
+} from "../types";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -200,6 +200,93 @@ export async function sendToRetryTopic(
   }
 }
 
+// ── Pipeline helpers ─────────────────────────────────────────────────
+
+async function broadcastToInterceptors<T extends TopicMapConstraint<T>>(
+  envelopes: EventEnvelope<any>[],
+  interceptors: ConsumerInterceptor<T>[],
+  cb: (
+    interceptor: ConsumerInterceptor<T>,
+    env: EventEnvelope<any>,
+  ) => Promise<void> | void | undefined,
+): Promise<void> {
+  for (const env of envelopes) {
+    for (const interceptor of interceptors) {
+      await cb(interceptor, env);
+    }
+  }
+}
+
+/**
+ * Run `fn` through the full instrumentation and interceptor lifecycle:
+ *   beforeConsume → interceptor.before → fn → interceptor.after → cleanup
+ *
+ * On error: fires `onConsumeError` and cleanup, then returns the error.
+ * The caller is responsible for calling `notifyInterceptorsOnError` (with
+ * a possibly-wrapped error) and deciding what happens next.
+ *
+ * Returns `null` on success, the caught `Error` on failure.
+ */
+export async function runHandlerWithPipeline<T extends TopicMapConstraint<T>>(
+  fn: () => Promise<void>,
+  envelopes: EventEnvelope<any>[],
+  interceptors: ConsumerInterceptor<T>[],
+  instrumentation: KafkaInstrumentation[],
+): Promise<Error | null> {
+  const cleanups: (() => void)[] = [];
+
+  try {
+    for (const env of envelopes) {
+      for (const inst of instrumentation) {
+        const cleanup = inst.beforeConsume?.(env);
+        if (typeof cleanup === "function") cleanups.push(cleanup);
+      }
+    }
+    for (const env of envelopes) {
+      for (const interceptor of interceptors) {
+        await interceptor.before?.(env);
+      }
+    }
+
+    await fn();
+
+    for (const env of envelopes) {
+      for (const interceptor of interceptors) {
+        await interceptor.after?.(env);
+      }
+    }
+    for (const cleanup of cleanups) cleanup();
+
+    return null;
+  } catch (error) {
+    const err = toError(error);
+    for (const env of envelopes) {
+      for (const inst of instrumentation) {
+        inst.onConsumeError?.(env, err);
+      }
+    }
+    for (const cleanup of cleanups) cleanup();
+    return err;
+  }
+}
+
+/**
+ * Call `interceptor.onError` for every envelope with the given error.
+ * Separated from `runHandlerWithPipeline` so callers can wrap the raw error
+ * (e.g. in `KafkaRetryExhaustedError`) before notifying interceptors.
+ */
+export async function notifyInterceptorsOnError<
+  T extends TopicMapConstraint<T>,
+>(
+  envelopes: EventEnvelope<any>[],
+  interceptors: ConsumerInterceptor<T>[],
+  error: Error,
+): Promise<void> {
+  await broadcastToInterceptors(envelopes, interceptors, (i, env) =>
+    i.onError?.(env, error),
+  );
+}
+
 // ── Retry pipeline ──────────────────────────────────────────────────
 
 export interface ExecuteWithRetryContext<T extends TopicMapConstraint<T>> {
@@ -248,113 +335,68 @@ export async function executeWithRetry<T extends TopicMapConstraint<T>>(
   const topic = envelopes[0]?.topic ?? "unknown";
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    // Collect instrumentation cleanup functions
-    const cleanups: (() => void)[] = [];
+    const error = await runHandlerWithPipeline(
+      fn,
+      envelopes,
+      interceptors,
+      deps.instrumentation,
+    );
+    if (!error) return;
 
-    try {
-      // Instrumentation: beforeConsume
-      for (const env of envelopes) {
-        for (const inst of deps.instrumentation) {
-          const cleanup = inst.beforeConsume?.(env);
-          if (typeof cleanup === "function") cleanups.push(cleanup);
-        }
-      }
-
-      // Consumer interceptors: before
-      for (const env of envelopes) {
-        for (const interceptor of interceptors) {
-          await interceptor.before?.(env);
-        }
-      }
-
-      await fn();
-
-      // Consumer interceptors: after
-      for (const env of envelopes) {
-        for (const interceptor of interceptors) {
-          await interceptor.after?.(env);
-        }
-      }
-
-      // Instrumentation: cleanup (end spans etc.)
-      for (const cleanup of cleanups) cleanup();
-
-      return;
-    } catch (error) {
-      const err = toError(error);
-      const isLastAttempt = attempt === maxAttempts;
-
-      // Instrumentation: onConsumeError
-      for (const env of envelopes) {
-        for (const inst of deps.instrumentation) {
-          inst.onConsumeError?.(env, err);
-        }
-      }
-      // Instrumentation: cleanup even on error
-      for (const cleanup of cleanups) cleanup();
-
-      if (isLastAttempt && maxAttempts > 1) {
-        const exhaustedError = new KafkaRetryExhaustedError(
-          topic,
-          envelopes.map((e) => e.payload),
-          maxAttempts,
-          { cause: err },
-        );
-        for (const env of envelopes) {
-          for (const interceptor of interceptors) {
-            await interceptor.onError?.(env, exhaustedError);
-          }
-        }
-      } else {
-        for (const env of envelopes) {
-          for (const interceptor of interceptors) {
-            await interceptor.onError?.(env, err);
-          }
-        }
-      }
-
-      deps.logger.error(
-        `Error processing ${isBatch ? "batch" : "message"} from topic ${topic} (attempt ${attempt}/${maxAttempts}):`,
-        err.stack,
-      );
-
-      if (retryTopics && retry) {
-        // Route to retry topic — retry consumer handles backoff and further attempts.
-        // Always use attempt 1 here (main consumer never retries in-process).
-        const cap = Math.min(backoffMs, maxBackoffMs);
-        const delay = Math.floor(Math.random() * cap);
-        await sendToRetryTopic(
-          topic,
-          rawMessages,
-          1,
-          retry.maxRetries,
-          delay,
-          envelopes[0]?.headers ?? {},
-          deps,
-        );
-      } else if (isLastAttempt) {
-        if (dlq) {
-          const dlqMeta: DlqMetadata = {
-            error: err,
-            attempt,
-            originalHeaders: envelopes[0]?.headers,
-          };
-          for (const raw of rawMessages) {
-            await sendToDlq(topic, raw, deps, dlqMeta);
-          }
-        } else {
-          await deps.onMessageLost?.({
+    const isLastAttempt = attempt === maxAttempts;
+    const reportedError =
+      isLastAttempt && maxAttempts > 1
+        ? new KafkaRetryExhaustedError(
             topic,
-            error: err,
-            attempt,
-            headers: envelopes[0]?.headers ?? {},
-          });
+            envelopes.map((e) => e.payload),
+            maxAttempts,
+            { cause: error },
+          )
+        : error;
+
+    await notifyInterceptorsOnError(envelopes, interceptors, reportedError);
+
+    deps.logger.error(
+      `Error processing ${isBatch ? "batch" : "message"} from topic ${topic} (attempt ${attempt}/${maxAttempts}):`,
+      error.stack,
+    );
+
+    if (retryTopics && retry) {
+      // Route to retry topic — retry consumer handles backoff and further attempts.
+      // Always use attempt 1 here (main consumer never retries in-process).
+      const cap = Math.min(backoffMs, maxBackoffMs);
+      const delay = Math.floor(Math.random() * cap);
+      await sendToRetryTopic(
+        topic,
+        rawMessages,
+        1,
+        retry.maxRetries,
+        delay,
+        envelopes[0]?.headers ?? {},
+        deps,
+      );
+    } else if (isLastAttempt) {
+      if (dlq) {
+        const dlqMeta: DlqMetadata = {
+          error,
+          attempt,
+          originalHeaders: envelopes[0]?.headers,
+        };
+        for (const raw of rawMessages) {
+          await sendToDlq(topic, raw, deps, dlqMeta);
         }
       } else {
-        // Exponential backoff with full jitter to avoid thundering herd
-        const cap = Math.min(backoffMs * 2 ** (attempt - 1), maxBackoffMs);
-        await sleep(Math.random() * cap);
+        await deps.onMessageLost?.({
+          topic,
+          error,
+          attempt,
+          headers: envelopes[0]?.headers ?? {},
+        });
       }
+    } else {
+      // Exponential backoff with full jitter to avoid thundering herd
+      const cap = Math.min(backoffMs * 2 ** (attempt - 1), maxBackoffMs);
+      await sleep(Math.random() * cap);
     }
   }
 }

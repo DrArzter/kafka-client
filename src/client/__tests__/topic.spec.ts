@@ -1,4 +1,9 @@
-import { topic, TopicDescriptor, TopicsFrom, SchemaLike } from "../topic";
+import {
+  topic,
+  TopicDescriptor,
+  TopicsFrom,
+  SchemaLike,
+} from "../message/topic";
 
 describe("topic()", () => {
   it("should create a TopicDescriptor with __topic set", () => {

@@ -10,13 +10,11 @@ describe("KafkaHealthIndicator", () => {
   it("should return up when checkStatus succeeds", async () => {
     const mockClient = {
       clientId: "test-client",
-      checkStatus: jest
-        .fn()
-        .mockResolvedValue({
-          status: "up",
-          clientId: "test-client",
-          topics: ["topic1", "topic2"],
-        }),
+      checkStatus: jest.fn().mockResolvedValue({
+        status: "up",
+        clientId: "test-client",
+        topics: ["topic1", "topic2"],
+      }),
     } as any;
 
     const result = await health.check(mockClient);

@@ -15,9 +15,26 @@
 - **Circuit breaker** — stop retrying when downstream is consistently unavailable
 - **Transport abstraction** — `KafkaTransport` interface to decouple `KafkaClient` from `@confluentinc/kafka-javascript`; swap transports without touching business code
 
+### Fixes & small improvements
+
+- **`checkStatus()` discriminated union** — currently returns `{ status: "up" }` or throws; align with `KafkaHealthResult` so callers get `{ status: "up"; ... } | { status: "down"; error: string }` instead of a try/catch
+- **Expose `waitForPartitionAssignment` timeout** — the 10 s deadline is hardcoded; add `retryTopicAssignmentTimeoutMs` to `ConsumerOptions` so slow brokers don't silently stall `onModuleInit`
+
 ---
 
 ## Done
+
+### Refactoring
+
+- [x] **Split `KafkaClient` into subdirectory modules** — `kafka.client.ts` (1 034 lines) decomposed into `kafka.client/index.ts`, `producer-ops.ts`, `consumer-ops.ts`, `message-handler.ts`, `retry-topic.ts`; `topic`/`envelope` moved to `message/`, `pipeline`/`subscribe-retry` to `consumer/`; extracted `preparePayload()`, `parseSingleMessage()`, `notifyAfterSend()`, `broadcastToInterceptors()`, `buildClient()`, `buildDestroyProvider()` to eliminate repeated send/consume patterns
+- [x] **Deduplicate retry consumer pipeline** — extracted `runHandlerWithPipeline` and `notifyInterceptorsOnError` from `consumer-pipeline.ts`; both `executeWithRetry` and `startRetryTopicConsumers` now share one instrumentation/interceptor lifecycle instead of two parallel copies
+- [x] **`KafkaModuleBaseOptions`** — extracted shared `name` / `isGlobal` into a base interface; `KafkaModuleOptions` and `KafkaModuleAsyncOptions` both extend it; removed dead `autoCreateTopics` field from async options
+- [x] **Expose `onMessageLost` / `onRebalance` in `KafkaModule`** — both options now appear in `KafkaModuleOptions` and are forwarded to `KafkaClient` in `register()` and `registerAsync()`
+- [x] **Warn on `getOrCreateConsumer` option mismatch** — tracks creation options per group ID; logs a warning when `fromBeginning` or `autoCommit` differ for an existing consumer instead of silently dropping new values
+- [x] **Document `transactionalId` uniqueness** — added JSDoc warning to `transaction()`: two `KafkaClient` instances with the same `clientId` share the same `transactionalId`, causing Kafka to fence one of the producers
+- [x] **`beforeSend` / `afterSend` symmetry** — `afterSend` is now called once per message (N times for a batch of N), matching `beforeSend` semantics; previously it was called once per `sendMessage`/`sendBatch` invocation regardless of batch size
+- [x] **`KafkaLogger` `debug` level** — added optional `debug?(message, ...args)` to the `KafkaLogger` interface; omit it to suppress debug output in production; NestJS `Logger` satisfies the interface without changes
+- [x] **`eval` in `detectMockFactory` — investigated and kept intentionally** — Jest injects `jest` as a module-scope binding (not a `globalThis` property), so `globalThis["jest"]` returns `undefined`; `eval` is the only reliable way to reach this scope-level binding without a hard `@jest/globals` import; replaced the original two-eval pattern with a cleaner try/catch structure
 
 ### 0.5.5
 

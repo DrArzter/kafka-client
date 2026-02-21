@@ -6,7 +6,7 @@ import {
   SpanStatusCode,
 } from "@opentelemetry/api";
 import type { KafkaInstrumentation } from "./client/types";
-import type { EventEnvelope } from "./client/envelope";
+import type { EventEnvelope } from "./client/message/envelope";
 
 /**
  * Create a `KafkaInstrumentation` that automatically propagates

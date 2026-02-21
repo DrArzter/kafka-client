@@ -1,7 +1,7 @@
 import "reflect-metadata";
 import { SubscribeTo, KAFKA_SUBSCRIBER_METADATA } from "../kafka.decorator";
 import { getKafkaClientToken, KAFKA_CLIENT } from "../kafka.constants";
-import { topic } from "../../client/topic";
+import { topic } from "../../client/message/topic";
 
 describe("SubscribeTo", () => {
   it("should store metadata for a single topic", () => {
@@ -98,7 +98,7 @@ describe("SubscribeTo", () => {
   });
 
   it("should extract schemas from descriptors with .schema()", () => {
-    const mockSchema = { parse: (d: unknown) => d };
+    const mockSchema = { parse: (d: unknown) => d as Record<string, any> };
     const WithSchema = topic("test.topic").schema(mockSchema);
 
     class TestService {

@@ -1,7 +1,7 @@
 import { Inject } from "@nestjs/common";
 import { getKafkaClientToken } from "./kafka.constants";
 import { ConsumerOptions } from "../client/kafka.client";
-import { TopicDescriptor, SchemaLike } from "../client/topic";
+import { TopicDescriptor, SchemaLike } from "../client/message/topic";
 
 export const KAFKA_SUBSCRIBER_METADATA = "KAFKA_SUBSCRIBER_METADATA";
 

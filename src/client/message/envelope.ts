@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import type { MessageHeaders } from "./types";
+import type { MessageHeaders } from "../types";
 
 // ── Header keys ──────────────────────────────────────────────────────
 

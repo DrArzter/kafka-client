@@ -64,5 +64,5 @@ export {
 
 export { KafkaClient } from "../kafka.client";
 export type { MessageLostContext } from "../kafka.client";
-export { topic, SchemaLike } from "../topic";
+export { topic, SchemaLike } from "../message/topic";
 export { KafkaRetryExhaustedError, KafkaValidationError } from "../errors";

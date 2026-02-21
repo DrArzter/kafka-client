@@ -13,23 +13,24 @@ export type MockKafkaClient<T extends TopicMapConstraint<T>> = {
 export type MockFactory = () => (...args: any[]) => any;
 
 function detectMockFactory(): MockFactory {
-  // Jest and Vitest inject globals into the test environment scope,
-  // which may not be on `globalThis`. Use eval to check the actual scope.
+  // Jest and Vitest inject their globals (`jest` / `vi`) as module-scope
+  // bindings, not as properties of `globalThis`. The only reliable way to
+  // detect them without a hard import is via `eval`, which evaluates in the
+  // current module scope where those bindings are available.
   try {
-    const jestFn = eval("typeof jest !== 'undefined' && jest.fn");
-    if (typeof jestFn === "function")
-      return () => (eval("jest.fn") as () => (...args: any[]) => any)();
+    if (eval("typeof jest === 'object' && typeof jest.fn === 'function'")) {
+      return () => eval("jest.fn()");
+    }
   } catch {
     /* not available */
   }
   try {
-    const viFn = eval("typeof vi !== 'undefined' && vi.fn");
-    if (typeof viFn === "function")
-      return () => (eval("vi.fn") as () => (...args: any[]) => any)();
+    if (eval("typeof vi === 'object' && typeof vi.fn === 'function'")) {
+      return () => eval("vi.fn()");
+    }
   } catch {
     /* not available */
   }
-
   throw new Error(
     "createMockKafkaClient: no mock framework detected (jest/vitest). " +
       "Pass a custom mockFactory.",
