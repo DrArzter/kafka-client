@@ -135,9 +135,7 @@ export class KafkaTestContainer {
   /** Broker connection strings. Throws if container is not started. */
   get brokers(): string[] {
     if (!this.container) {
-      throw new Error(
-        "KafkaTestContainer is not started. Call start() first.",
-      );
+      throw new Error("KafkaTestContainer is not started. Call start() first.");
     }
     const host = this.container.getHost();
     const port = this.container.getMappedPort(9093);

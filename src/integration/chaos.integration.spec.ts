@@ -4,15 +4,13 @@ import { TestTopics, createClient, waitForMessages } from "./helpers";
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /** Wait until `predicate` returns true, polling every 200 ms. */
-function waitUntil(
-  predicate: () => boolean,
-  timeout = 30_000,
-): Promise<void> {
+function waitUntil(predicate: () => boolean, timeout = 30_000): Promise<void> {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeout;
     const poll = () => {
       if (predicate()) return resolve();
-      if (Date.now() >= deadline) return reject(new Error("waitUntil: timeout"));
+      if (Date.now() >= deadline)
+        return reject(new Error("waitUntil: timeout"));
       setTimeout(poll, 200);
     };
     poll();
@@ -102,16 +100,26 @@ describe("Integration — Chaos: rebalance", () => {
     const groupA = `chaos-stop-a-${Date.now()}`;
     const groupB = `chaos-stop-b-${Date.now()}`;
 
-    const { messages: messagesA, promise: promiseA } = waitForMessages<TestTopics[typeof TOPIC]>(1);
-    const { messages: messagesB, promise: promiseB } = waitForMessages<TestTopics[typeof TOPIC]>(1);
+    const { messages: messagesA, promise: promiseA } =
+      waitForMessages<TestTopics[typeof TOPIC]>(1);
+    const { messages: messagesB, promise: promiseB } =
+      waitForMessages<TestTopics[typeof TOPIC]>(1);
 
-    await client.startConsumer([TOPIC], async (env) => {
-      messagesA.push(env.payload);
-    }, { groupId: groupA, fromBeginning: false });
+    await client.startConsumer(
+      [TOPIC],
+      async (env) => {
+        messagesA.push(env.payload);
+      },
+      { groupId: groupA, fromBeginning: false },
+    );
 
-    await client.startConsumer([TOPIC], async (env) => {
-      messagesB.push(env.payload);
-    }, { groupId: groupB, fromBeginning: false });
+    await client.startConsumer(
+      [TOPIC],
+      async (env) => {
+        messagesB.push(env.payload);
+      },
+      { groupId: groupB, fromBeginning: false },
+    );
 
     await new Promise((r) => setTimeout(r, 6_000));
 
@@ -121,7 +129,9 @@ describe("Integration — Chaos: rebalance", () => {
     // Wait until both groups received something
     await Promise.race([
       Promise.all([promiseA, promiseB]),
-      new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 15_000)),
+      new Promise((_, rej) =>
+        setTimeout(() => rej(new Error("timeout")), 15_000),
+      ),
     ]).catch(() => {}); // allow partial — just verify selective stop
 
     // Stop only groupA
@@ -155,7 +165,10 @@ describe("Integration — Retry topic chain (retryTopics: true)", () => {
     await client.connectProducer();
 
     let attempts = 0;
-    const dlqCaptures: Array<{ payload: any; headers: Record<string, string> }> = [];
+    const dlqCaptures: Array<{
+      payload: any;
+      headers: Record<string, string>;
+    }> = [];
 
     // DLQ consumer
     const dlqClient = createClient("chaos-retry-topic-dlq");
@@ -195,7 +208,9 @@ describe("Integration — Retry topic chain (retryTopics: true)", () => {
 
     // DLQ message must carry standard metadata headers.
     // attempt-count = 1 (main) + 2 (retry hops) = 3, consistent with in-process retry behaviour.
-    expect(dlqCaptures[0].headers["x-dlq-original-topic"]).toBe("test.retry-topic");
+    expect(dlqCaptures[0].headers["x-dlq-original-topic"]).toBe(
+      "test.retry-topic",
+    );
     expect(dlqCaptures[0].headers["x-dlq-error-message"]).toBe("always fails");
     expect(dlqCaptures[0].headers["x-dlq-attempt-count"]).toBe("3");
 

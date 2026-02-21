@@ -130,7 +130,10 @@ describe("KafkaClient — Producer", () => {
 
       const sent = mockSend.mock.calls[0][0];
       expect(sent.messages[0].headers).toEqual(
-        expect.objectContaining({ "x-trace": "t1", "x-event-id": expect.any(String) }),
+        expect.objectContaining({
+          "x-trace": "t1",
+          "x-event-id": expect.any(String),
+        }),
       );
     });
   });

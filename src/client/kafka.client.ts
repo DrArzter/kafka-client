@@ -34,6 +34,7 @@ import type {
   MessageHeaders,
   BatchMessageItem,
   ConsumerOptions,
+  ConsumerHandle,
   TransactionContext,
   TopicMapConstraint,
   IKafkaClient,
@@ -68,9 +69,13 @@ export class KafkaClient<
   private readonly ensuredTopics = new Set<string>();
   private readonly defaultGroupId: string;
   private readonly schemaRegistry = new Map<string, SchemaLike>();
-  private readonly runningConsumers = new Map<string, "eachMessage" | "eachBatch">();
+  private readonly runningConsumers = new Map<
+    string,
+    "eachMessage" | "eachBatch"
+  >();
   private readonly instrumentation: KafkaInstrumentation[];
-  private readonly onMessageLost: KafkaClientOptions['onMessageLost'];
+  private readonly onMessageLost: KafkaClientOptions["onMessageLost"];
+  private readonly onRebalance: KafkaClientOptions["onRebalance"];
 
   private isAdminConnected = false;
   public readonly clientId: ClientId;
@@ -85,14 +90,17 @@ export class KafkaClient<
     this.defaultGroupId = groupId;
     this.logger = options?.logger ?? {
       log: (msg) => console.log(`[KafkaClient:${clientId}] ${msg}`),
-      warn: (msg, ...args) => console.warn(`[KafkaClient:${clientId}] ${msg}`, ...args),
-      error: (msg, ...args) => console.error(`[KafkaClient:${clientId}] ${msg}`, ...args),
+      warn: (msg, ...args) =>
+        console.warn(`[KafkaClient:${clientId}] ${msg}`, ...args),
+      error: (msg, ...args) =>
+        console.error(`[KafkaClient:${clientId}] ${msg}`, ...args),
     };
     this.autoCreateTopicsEnabled = options?.autoCreateTopics ?? false;
     this.strictSchemasEnabled = options?.strictSchemas ?? true;
     this.numPartitions = options?.numPartitions ?? 1;
     this.instrumentation = options?.instrumentation ?? [];
     this.onMessageLost = options?.onMessageLost;
+    this.onRebalance = options?.onRebalance;
 
     this.kafka = new KafkaClass({
       kafkaJS: {
@@ -201,7 +209,10 @@ export class KafkaClient<
           await this.ensureTopic(payload.topic);
           await tx.send(payload);
         },
-        sendBatch: async (topicOrDesc: any, messages: BatchMessageItem<any>[]) => {
+        sendBatch: async (
+          topicOrDesc: any,
+          messages: BatchMessageItem<any>[],
+        ) => {
           const payload = await this.buildSendPayload(topicOrDesc, messages);
           await this.ensureTopic(payload.topic);
           await tx.send(payload);
@@ -242,29 +253,35 @@ export class KafkaClient<
     topics: K,
     handleMessage: (envelope: EventEnvelope<T[K[number]]>) => Promise<void>,
     options?: ConsumerOptions<T>,
-  ): Promise<void>;
+  ): Promise<ConsumerHandle>;
   public async startConsumer<
     D extends TopicDescriptor<string & keyof T, T[string & keyof T]>,
   >(
     topics: D[],
     handleMessage: (envelope: EventEnvelope<D["__type"]>) => Promise<void>,
     options?: ConsumerOptions<T>,
-  ): Promise<void>;
+  ): Promise<ConsumerHandle>;
   public async startConsumer(
     topics: any[],
     handleMessage: (envelope: EventEnvelope<any>) => Promise<void>,
     options: ConsumerOptions<T> = {},
-  ): Promise<void> {
+  ): Promise<ConsumerHandle> {
     if (options.retryTopics && !options.retry) {
       throw new Error(
-        'retryTopics requires retry to be configured — set retry.maxRetries to enable the retry topic chain',
+        "retryTopics requires retry to be configured — set retry.maxRetries to enable the retry topic chain",
       );
     }
 
     const { consumer, schemaMap, topicNames, gid, dlq, interceptors, retry } =
       await this.setupConsumer(topics, "eachMessage", options);
 
-    const deps = { logger: this.logger, producer: this.producer, instrumentation: this.instrumentation, onMessageLost: this.onMessageLost };
+    const deps = {
+      logger: this.logger,
+      producer: this.producer,
+      instrumentation: this.instrumentation,
+      onMessageLost: this.onMessageLost,
+    };
+    const timeoutMs = options.handlerTimeoutMs;
 
     await consumer.run({
       eachMessage: async ({ topic, partition, message }) => {
@@ -279,22 +296,46 @@ export class KafkaClient<
 
         const headers = decodeHeaders(message.headers);
         const validated = await validateWithSchema(
-          parsed, raw, topic, schemaMap, interceptors, dlq,
+          parsed,
+          raw,
+          topic,
+          schemaMap,
+          interceptors,
+          dlq,
           { ...deps, originalHeaders: headers },
         );
         if (validated === null) return;
 
         const envelope = extractEnvelope(
-          validated, headers, topic, partition, message.offset,
+          validated,
+          headers,
+          topic,
+          partition,
+          message.offset,
         );
 
         await executeWithRetry(
-          () =>
-            runWithEnvelopeContext(
-              { correlationId: envelope.correlationId, traceparent: envelope.traceparent },
-              () => handleMessage(envelope),
-            ),
-          { envelope, rawMessages: [raw], interceptors, dlq, retry, retryTopics: options.retryTopics },
+          () => {
+            const fn = () =>
+              runWithEnvelopeContext(
+                {
+                  correlationId: envelope.correlationId,
+                  traceparent: envelope.traceparent,
+                },
+                () => handleMessage(envelope),
+              );
+            return timeoutMs
+              ? this.wrapWithTimeoutWarning(fn, timeoutMs, topic)
+              : fn();
+          },
+          {
+            envelope,
+            rawMessages: [raw],
+            interceptors,
+            dlq,
+            retry,
+            retryTopics: options.retryTopics,
+          },
           deps,
         );
       },
@@ -304,9 +345,17 @@ export class KafkaClient<
 
     if (options.retryTopics && retry) {
       await this.startRetryTopicConsumers(
-        topicNames, gid, handleMessage, retry, dlq, interceptors, schemaMap,
+        topicNames,
+        gid,
+        handleMessage,
+        retry,
+        dlq,
+        interceptors,
+        schemaMap,
       );
     }
+
+    return { groupId: gid, stop: () => this.stopConsumer(gid) };
   }
 
   // ── Consumer: eachBatch ──────────────────────────────────────────
@@ -319,7 +368,7 @@ export class KafkaClient<
       meta: BatchMeta,
     ) => Promise<void>,
     options?: ConsumerOptions<T>,
-  ): Promise<void>;
+  ): Promise<ConsumerHandle>;
   public async startBatchConsumer<
     D extends TopicDescriptor<string & keyof T, T[string & keyof T]>,
   >(
@@ -329,7 +378,7 @@ export class KafkaClient<
       meta: BatchMeta,
     ) => Promise<void>,
     options?: ConsumerOptions<T>,
-  ): Promise<void>;
+  ): Promise<ConsumerHandle>;
   public async startBatchConsumer(
     topics: any[],
     handleBatch: (
@@ -337,11 +386,17 @@ export class KafkaClient<
       meta: BatchMeta,
     ) => Promise<void>,
     options: ConsumerOptions<T> = {},
-  ): Promise<void> {
+  ): Promise<ConsumerHandle> {
     const { consumer, schemaMap, gid, dlq, interceptors, retry } =
       await this.setupConsumer(topics, "eachBatch", options);
 
-    const deps = { logger: this.logger, producer: this.producer, instrumentation: this.instrumentation, onMessageLost: this.onMessageLost };
+    const deps = {
+      logger: this.logger,
+      producer: this.producer,
+      instrumentation: this.instrumentation,
+      onMessageLost: this.onMessageLost,
+    };
+    const timeoutMs = options.handlerTimeoutMs;
 
     await consumer.run({
       eachBatch: async ({
@@ -367,12 +422,23 @@ export class KafkaClient<
 
           const headers = decodeHeaders(message.headers);
           const validated = await validateWithSchema(
-            parsed, raw, batch.topic, schemaMap, interceptors, dlq,
+            parsed,
+            raw,
+            batch.topic,
+            schemaMap,
+            interceptors,
+            dlq,
             { ...deps, originalHeaders: headers },
           );
           if (validated === null) continue;
           envelopes.push(
-            extractEnvelope(validated, headers, batch.topic, batch.partition, message.offset),
+            extractEnvelope(
+              validated,
+              headers,
+              batch.topic,
+              batch.partition,
+              message.offset,
+            ),
           );
           rawMessages.push(raw);
         }
@@ -388,7 +454,12 @@ export class KafkaClient<
         };
 
         await executeWithRetry(
-          () => handleBatch(envelopes, meta),
+          () => {
+            const fn = () => handleBatch(envelopes, meta);
+            return timeoutMs
+              ? this.wrapWithTimeoutWarning(fn, timeoutMs, batch.topic)
+              : fn();
+          },
           {
             envelope: envelopes,
             rawMessages: batch.messages
@@ -405,6 +476,8 @@ export class KafkaClient<
     });
 
     this.runningConsumers.set(gid, "eachBatch");
+
+    return { groupId: gid, stop: () => this.stopConsumer(gid) };
   }
 
   // ── Consumer lifecycle ───────────────────────────────────────────
@@ -413,7 +486,9 @@ export class KafkaClient<
     if (groupId !== undefined) {
       const consumer = this.consumers.get(groupId);
       if (!consumer) {
-        this.logger.warn(`stopConsumer: no active consumer for group "${groupId}"`);
+        this.logger.warn(
+          `stopConsumer: no active consumer for group "${groupId}"`,
+        );
         return;
       }
       await consumer.disconnect().catch(() => {});
@@ -431,14 +506,53 @@ export class KafkaClient<
     }
   }
 
+  /**
+   * Query consumer group lag per partition.
+   * Lag = broker high-watermark − last committed offset.
+   * A committed offset of -1 (nothing committed yet) counts as full lag.
+   */
+  public async getConsumerLag(
+    groupId?: string,
+  ): Promise<Array<{ topic: string; partition: number; lag: number }>> {
+    const gid = groupId ?? this.defaultGroupId;
+    if (!this.isAdminConnected) {
+      await this.admin.connect();
+      this.isAdminConnected = true;
+    }
+
+    const committedByTopic = await this.admin.fetchOffsets({ groupId: gid });
+    const result: Array<{ topic: string; partition: number; lag: number }> = [];
+
+    for (const { topic, partitions } of committedByTopic) {
+      const brokerOffsets = await this.admin.fetchTopicOffsets(topic);
+
+      for (const { partition, offset } of partitions) {
+        const broker = brokerOffsets.find((o) => o.partition === partition);
+        if (!broker) continue;
+
+        const committed = parseInt(offset, 10);
+        const high = parseInt(broker.high, 10);
+        // committed === -1 means the group has never committed for this partition
+        const lag = committed === -1 ? high : Math.max(0, high - committed);
+        result.push({ topic, partition, lag });
+      }
+    }
+
+    return result;
+  }
+
   /** Check broker connectivity and return status, clientId, and available topics. */
-  public async checkStatus(): Promise<{ status: 'up'; clientId: string; topics: string[] }> {
+  public async checkStatus(): Promise<{
+    status: "up";
+    clientId: string;
+    topics: string[];
+  }> {
     if (!this.isAdminConnected) {
       await this.admin.connect();
       this.isAdminConnected = true;
     }
     const topics = await this.admin.listTopics();
-    return { status: 'up', clientId: this.clientId, topics };
+    return { status: "up", clientId: this.clientId, topics };
   }
 
   public getClientId(): ClientId {
@@ -516,9 +630,9 @@ export class KafkaClient<
         const headers = decodeHeaders(message.headers);
         const originalTopic =
           (headers[RETRY_HEADER_ORIGINAL_TOPIC] as string | undefined) ??
-          retryTopic.replace(/\.retry$/, '');
+          retryTopic.replace(/\.retry$/, "");
         const currentAttempt = parseInt(
-          (headers[RETRY_HEADER_ATTEMPT] as string | undefined) ?? '1',
+          (headers[RETRY_HEADER_ATTEMPT] as string | undefined) ?? "1",
           10,
         );
         const maxRetries = parseInt(
@@ -527,7 +641,7 @@ export class KafkaClient<
           10,
         );
         const retryAfter = parseInt(
-          (headers[RETRY_HEADER_AFTER] as string | undefined) ?? '0',
+          (headers[RETRY_HEADER_AFTER] as string | undefined) ?? "0",
           10,
         );
 
@@ -542,14 +656,23 @@ export class KafkaClient<
 
         // Validate schema against original topic's schema (if any)
         const validated = await validateWithSchema(
-          parsed, raw, originalTopic, schemaMap, interceptors, dlq,
+          parsed,
+          raw,
+          originalTopic,
+          schemaMap,
+          interceptors,
+          dlq,
           { ...deps, originalHeaders: headers },
         );
         if (validated === null) return;
 
         // Build envelope with originalTopic so correlationId/traceparent are correct
         const envelope = extractEnvelope(
-          validated, headers, originalTopic, partition, message.offset,
+          validated,
+          headers,
+          originalTopic,
+          partition,
+          message.offset,
         );
 
         try {
@@ -557,27 +680,39 @@ export class KafkaClient<
           const cleanups: (() => void)[] = [];
           for (const inst of this.instrumentation) {
             const c = inst.beforeConsume?.(envelope);
-            if (typeof c === 'function') cleanups.push(c);
+            if (typeof c === "function") cleanups.push(c);
           }
-          for (const interceptor of interceptors) await interceptor.before?.(envelope);
+          for (const interceptor of interceptors)
+            await interceptor.before?.(envelope);
 
           await runWithEnvelopeContext(
-            { correlationId: envelope.correlationId, traceparent: envelope.traceparent },
+            {
+              correlationId: envelope.correlationId,
+              traceparent: envelope.traceparent,
+            },
             () => handleMessage(envelope),
           );
 
-          for (const interceptor of interceptors) await interceptor.after?.(envelope);
+          for (const interceptor of interceptors)
+            await interceptor.after?.(envelope);
           for (const cleanup of cleanups) cleanup();
         } catch (error) {
           const err = toError(error);
           const nextAttempt = currentAttempt + 1;
           const exhausted = currentAttempt >= maxRetries;
 
-          for (const inst of this.instrumentation) inst.onConsumeError?.(envelope, err);
+          for (const inst of this.instrumentation)
+            inst.onConsumeError?.(envelope, err);
 
-          const reportedError = exhausted && maxRetries > 1
-            ? new KafkaRetryExhaustedError(originalTopic, [envelope.payload], maxRetries, { cause: err })
-            : err;
+          const reportedError =
+            exhausted && maxRetries > 1
+              ? new KafkaRetryExhaustedError(
+                  originalTopic,
+                  [envelope.payload],
+                  maxRetries,
+                  { cause: err },
+                )
+              : err;
           for (const interceptor of interceptors) {
             await interceptor.onError?.(envelope, reportedError);
           }
@@ -593,7 +728,13 @@ export class KafkaClient<
             const cap = Math.min(backoffMs * 2 ** currentAttempt, maxBackoffMs);
             const delay = Math.floor(Math.random() * cap);
             await sendToRetryTopic(
-              originalTopic, [raw], nextAttempt, maxRetries, delay, headers, deps,
+              originalTopic,
+              [raw],
+              nextAttempt,
+              maxRetries,
+              delay,
+              headers,
+              deps,
             );
           } else if (dlq) {
             await sendToDlq(originalTopic, raw, deps, {
@@ -616,7 +757,7 @@ export class KafkaClient<
       },
     });
 
-    this.runningConsumers.set(retryGroupId, 'eachMessage');
+    this.runningConsumers.set(retryGroupId, "eachMessage");
 
     // Block until the retry consumer has received at least one partition assignment.
     // consumer.run() starts the group-join protocol asynchronously; without this wait,
@@ -626,7 +767,7 @@ export class KafkaClient<
     await this.waitForPartitionAssignment(consumer, retryTopicNames);
 
     this.logger.log(
-      `Retry topic consumers started for: ${originalTopics.join(', ')} (group: ${retryGroupId})`,
+      `Retry topic consumers started for: ${originalTopics.join(", ")} (group: ${retryGroupId})`,
     );
   }
 
@@ -648,7 +789,8 @@ export class KafkaClient<
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       try {
-        const assigned: { topic: string; partition: number }[] = consumer.assignment();
+        const assigned: { topic: string; partition: number }[] =
+          consumer.assignment();
         if (assigned.some((a) => topicSet.has(a.topic))) return;
       } catch {
         // consumer.assignment() throws if not yet in CONNECTED state — keep polling
@@ -656,7 +798,7 @@ export class KafkaClient<
       await sleep(200);
     }
     this.logger.warn(
-      `Retry consumer did not receive partition assignments for [${topics.join(', ')}] within ${timeoutMs}ms`,
+      `Retry consumer did not receive partition assignments for [${topics.join(", ")}] within ${timeoutMs}ms`,
     );
   }
 
@@ -666,14 +808,58 @@ export class KafkaClient<
     autoCommit: boolean,
   ): Consumer {
     if (!this.consumers.has(groupId)) {
-      this.consumers.set(
-        groupId,
-        this.kafka.consumer({
-          kafkaJS: { groupId, fromBeginning, autoCommit },
-        }),
-      );
+      const config: Parameters<typeof this.kafka.consumer>[0] = {
+        kafkaJS: { groupId, fromBeginning, autoCommit },
+      };
+
+      if (this.onRebalance) {
+        const onRebalance = this.onRebalance;
+        // rebalance_cb is called by librdkafka on every partition assign/revoke.
+        // err.code -175 = ERR__ASSIGN_PARTITIONS, -174 = ERR__REVOKE_PARTITIONS.
+        // The library handles the actual assign/unassign in its finally block regardless
+        // of what this callback does, so we only need it for the side-effect notification.
+        (config as any)["rebalance_cb"] = (err: any, assignment: any[]) => {
+          const type = err.code === -175 ? "assign" : "revoke";
+          try {
+            onRebalance(
+              type,
+              assignment.map((p) => ({
+                topic: p.topic,
+                partition: p.partition,
+              })),
+            );
+          } catch (e) {
+            this.logger.warn(
+              `onRebalance callback threw: ${(e as Error).message}`,
+            );
+          }
+        };
+      }
+
+      this.consumers.set(groupId, this.kafka.consumer(config));
     }
     return this.consumers.get(groupId)!;
+  }
+
+  /**
+   * Start a timer that logs a warning if `fn` hasn't resolved within `timeoutMs`.
+   * The handler itself is not cancelled — the warning is diagnostic only.
+   */
+  private wrapWithTimeoutWarning<R>(
+    fn: () => Promise<R>,
+    timeoutMs: number,
+    topic: string,
+  ): Promise<R> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const promise = fn().finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+    });
+    timer = setTimeout(() => {
+      this.logger.warn(
+        `Handler for topic "${topic}" has not resolved after ${timeoutMs}ms — possible stuck handler`,
+      );
+    }, timeoutMs);
+    return promise;
   }
 
   private resolveTopicName(topicOrDescriptor: unknown): string {
@@ -728,7 +914,14 @@ export class KafkaClient<
   private async buildSendPayload(
     topicOrDesc: any,
     messages: Array<BatchMessageItem<any>>,
-  ): Promise<{ topic: string; messages: Array<{ value: string; key: string | null; headers: MessageHeaders }> }> {
+  ): Promise<{
+    topic: string;
+    messages: Array<{
+      value: string;
+      key: string | null;
+      headers: MessageHeaders;
+    }>;
+  }> {
     this.registerSchema(topicOrDesc);
     const topic = this.resolveTopicName(topicOrDesc);
     const builtMessages = await Promise.all(
@@ -746,7 +939,9 @@ export class KafkaClient<
         }
 
         return {
-          value: JSON.stringify(await this.validateMessage(topicOrDesc, m.value)),
+          value: JSON.stringify(
+            await this.validateMessage(topicOrDesc, m.value),
+          ),
           key: m.key ?? null,
           headers: envelopeHeaders,
         };
@@ -780,7 +975,11 @@ export class KafkaClient<
       );
     }
 
-    const consumer = this.getOrCreateConsumer(gid, fromBeginning, options.autoCommit ?? true);
+    const consumer = this.getOrCreateConsumer(
+      gid,
+      fromBeginning,
+      options.autoCommit ?? true,
+    );
     const schemaMap = this.buildSchemaMap(topics, optionSchemas);
 
     const topicNames = (topics as any[]).map((t: any) =>
@@ -798,7 +997,12 @@ export class KafkaClient<
     }
 
     await consumer.connect();
-    await subscribeWithRetry(consumer, topicNames, this.logger, options.subscribeRetry);
+    await subscribeWithRetry(
+      consumer,
+      topicNames,
+      this.logger,
+      options.subscribeRetry,
+    );
 
     this.logger.log(
       `${mode === "eachBatch" ? "Batch consumer" : "Consumer"} subscribed to topics: ${topicNames.join(", ")}`,

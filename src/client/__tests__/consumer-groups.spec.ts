@@ -28,8 +28,8 @@ describe("KafkaClient — Consumer Groups", () => {
       });
 
       // The mock kafka.consumer() should be called twice (for two different groups)
-      const kafkaInstance = (require("@confluentinc/kafka-javascript") as any).KafkaJS.Kafka.mock.results[0]
-        .value;
+      const kafkaInstance = (require("@confluentinc/kafka-javascript") as any)
+        .KafkaJS.Kafka.mock.results[0].value;
       expect(kafkaInstance.consumer).toHaveBeenCalledTimes(2);
       expect(kafkaInstance.consumer).toHaveBeenCalledWith({
         kafkaJS: { groupId: "group-a", fromBeginning: false, autoCommit: true },
@@ -49,8 +49,8 @@ describe("KafkaClient — Consumer Groups", () => {
         groupId: "group-a",
       });
 
-      const kafkaInstance = (require("@confluentinc/kafka-javascript") as any).KafkaJS.Kafka.mock.results[0]
-        .value;
+      const kafkaInstance = (require("@confluentinc/kafka-javascript") as any)
+        .KafkaJS.Kafka.mock.results[0].value;
       // Should only create one consumer for group-a
       expect(kafkaInstance.consumer).toHaveBeenCalledTimes(1);
     });
@@ -60,10 +60,14 @@ describe("KafkaClient — Consumer Groups", () => {
 
       await client.startConsumer(["test.topic"], handler);
 
-      const kafkaInstance = (require("@confluentinc/kafka-javascript") as any).KafkaJS.Kafka.mock.results[0]
-        .value;
+      const kafkaInstance = (require("@confluentinc/kafka-javascript") as any)
+        .KafkaJS.Kafka.mock.results[0].value;
       expect(kafkaInstance.consumer).toHaveBeenCalledWith({
-        kafkaJS: { groupId: "test-group", fromBeginning: false, autoCommit: true },
+        kafkaJS: {
+          groupId: "test-group",
+          fromBeginning: false,
+          autoCommit: true,
+        },
       });
     });
 
@@ -91,10 +95,14 @@ describe("KafkaClient — Consumer Groups", () => {
         groupId: "batch-group",
       });
 
-      const kafkaInstance = (require("@confluentinc/kafka-javascript") as any).KafkaJS.Kafka.mock.results[0]
-        .value;
+      const kafkaInstance = (require("@confluentinc/kafka-javascript") as any)
+        .KafkaJS.Kafka.mock.results[0].value;
       expect(kafkaInstance.consumer).toHaveBeenCalledWith({
-        kafkaJS: { groupId: "batch-group", fromBeginning: false, autoCommit: true },
+        kafkaJS: {
+          groupId: "batch-group",
+          fromBeginning: false,
+          autoCommit: true,
+        },
       });
     });
   });
@@ -169,9 +177,7 @@ describe("KafkaClient — Consumer Groups", () => {
     });
 
     it("should throw after all retry attempts exhausted", async () => {
-      mockSubscribe.mockRejectedValue(
-        new Error("UNKNOWN_TOPIC_OR_PARTITION"),
-      );
+      mockSubscribe.mockRejectedValue(new Error("UNKNOWN_TOPIC_OR_PARTITION"));
 
       await expect(
         client.startConsumer(["test.topic"], jest.fn(), {

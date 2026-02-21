@@ -26,7 +26,10 @@ describe("Integration — Retry & DLQ", () => {
       },
     );
 
-    type DlqCapture = { payload: TestTopics["test.retry"]; headers: Record<string, string> };
+    type DlqCapture = {
+      payload: TestTopics["test.retry"];
+      headers: Record<string, string>;
+    };
     const dlqCaptures: DlqCapture[] = [];
     const dlqClient = createClient("retry-dlq");
     await dlqClient.connectProducer();
@@ -52,7 +55,9 @@ describe("Integration — Retry & DLQ", () => {
     expect(dlqCaptures[0].payload).toEqual({ value: "fail-me" });
     expect(dlqCaptures[0].headers["x-dlq-original-topic"]).toBe("test.retry");
     expect(dlqCaptures[0].headers["x-dlq-attempt-count"]).toBe("3");
-    expect(dlqCaptures[0].headers["x-dlq-error-message"]).toBe("Processing failed");
+    expect(dlqCaptures[0].headers["x-dlq-error-message"]).toBe(
+      "Processing failed",
+    );
     expect(dlqCaptures[0].headers["x-dlq-failed-at"]).toBeDefined();
 
     await client.disconnect();

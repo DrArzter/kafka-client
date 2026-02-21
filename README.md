@@ -32,7 +32,11 @@ Type-safe Kafka client for Node.js. Framework-agnostic core with a first-class N
 - [Error classes](#error-classes)
 - [Retry topic chain](#retry-topic-chain)
 - [stopConsumer](#stopconsumer)
+- [Consumer handles](#consumer-handles)
 - [onMessageLost](#onmessagelost)
+- [onRebalance](#onrebalance)
+- [Consumer lag](#consumer-lag)
+- [Handler timeout warning](#handler-timeout-warning)
 - [Schema validation](#schema-validation)
 - [Health check](#health-check)
 - [Testing](#testing)
@@ -711,6 +715,7 @@ Options for `sendMessage()` — the third argument:
 | `dlq` | `false` | Send to `{topic}.dlq` after all retries exhausted — message carries `x-dlq-*` metadata headers |
 | `retryTopics` | `false` | Route failed messages through `{topic}.retry` instead of sleeping in-process (see [Retry topic chain](#retry-topic-chain)) |
 | `interceptors` | `[]` | Array of before/after/onError hooks |
+| `handlerTimeoutMs` | — | Log a warning if the handler hasn't resolved within this window (ms) — does not cancel the handler |
 | `batch` | `false` | (decorator only) Use `startBatchConsumer` instead of `startConsumer` |
 | `subscribeRetry.retries` | `5` | Max attempts for `consumer.subscribe()` when topic doesn't exist yet |
 | `subscribeRetry.backoffMs` | `5000` | Delay between subscribe retry attempts (ms) |
@@ -731,6 +736,7 @@ Passed to `KafkaModule.register()` or returned from `registerAsync()` factory:
 | `strictSchemas` | `true` | Validate string topic keys against schemas registered via TopicDescriptor |
 | `instrumentation` | `[]` | Client-wide instrumentation hooks (e.g. OTel). Applied to both send and consume paths |
 | `onMessageLost` | — | Called when a message is silently dropped without DLQ — use to alert, log to external systems, or trigger fallback logic |
+| `onRebalance` | — | Called on every partition assign/revoke event across all consumers created by this client |
 
 **Module-scoped** (default) — import `KafkaModule` in each module that needs it:
 
@@ -861,6 +867,21 @@ await kafka.stopConsumer();
 
 `stopConsumer(groupId)` disconnects and removes only that group's consumer, leaving other groups running. Useful when you want to pause processing for a specific topic without restarting the whole client.
 
+## Consumer handles
+
+`startConsumer()` and `startBatchConsumer()` return a `ConsumerHandle` instead of `void`. Use it to stop a specific consumer without needing to remember the group ID:
+
+```typescript
+const handle = await kafka.startConsumer(['orders'], handler);
+
+console.log(handle.groupId); // e.g. "my-group"
+
+// Later — stop only this consumer, producer stays connected
+await handle.stop();
+```
+
+`handle.stop()` is equivalent to `kafka.stopConsumer(handle.groupId)`. Useful in lifecycle methods or when you need to conditionally stop one consumer while others keep running.
+
 ## onMessageLost
 
 By default, if a consumer handler throws and `dlq` is not enabled, the message is logged and dropped. Use `onMessageLost` to catch these silent losses:
@@ -885,6 +906,59 @@ const kafka = new KafkaClient('my-app', 'my-group', ['localhost:9092'], {
 2. **Validation error** — schema rejected the message and `dlq: false` (attempt is `0`)
 
 It does NOT fire when `dlq: true` — in that case the message is preserved in `{topic}.dlq`.
+
+## onRebalance
+
+React to partition rebalance events without patching the consumer. Useful for flushing in-flight state before partitions are revoked, or for logging/metrics:
+
+```typescript
+const kafka = new KafkaClient('my-app', 'my-group', ['localhost:9092'], {
+  onRebalance: (type, partitions) => {
+    // type       — 'assign' | 'revoke'
+    // partitions — Array<{ topic: string; partition: number }>
+    console.log(`Rebalance ${type}:`, partitions);
+  },
+});
+```
+
+- `'assign'` fires when this instance receives new partitions (e.g. on startup or when another consumer leaves the group).
+- `'revoke'` fires when partitions are taken away (e.g. another consumer joins).
+
+The callback is applied to **every** consumer created by this client. If you need per-consumer rebalance handling, use separate `KafkaClient` instances.
+
+## Consumer lag
+
+Query consumer group lag per partition via the admin API — no external tooling needed:
+
+```typescript
+const lag = await kafka.getConsumerLag();
+// [{ topic: 'orders', partition: 0, lag: 12 }, ...]
+
+// Or for a different group:
+const lag2 = await kafka.getConsumerLag('another-group');
+```
+
+Lag is computed as `brokerHighWatermark − lastCommittedOffset`. A partition with a committed offset of `-1` (nothing ever committed) reports full lag equal to the high watermark.
+
+Returns an empty array when the group has no committed offsets at all.
+
+## Handler timeout warning
+
+Catch stuck handlers before they silently starve a partition. Set `handlerTimeoutMs` on `startConsumer` or `startBatchConsumer`:
+
+```typescript
+await kafka.startConsumer(['orders'], handler, {
+  handlerTimeoutMs: 5_000, // warn if handler hasn't resolved after 5 s
+});
+```
+
+If the handler hasn't resolved within the window, a `warn` is logged:
+
+```text
+[KafkaClient:my-app] Handler for topic "orders" has not resolved after 5000ms — possible stuck handler
+```
+
+The handler is **not** cancelled — the warning is diagnostic only. Combine with `retry` to automatically give up after a fixed number of slow attempts.
 
 ## Schema validation
 

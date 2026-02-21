@@ -82,7 +82,9 @@ describe("KafkaClient — onMessageLost hook", () => {
 
   it("should call onMessageLost with attempt=0 on validation failure without DLQ", async () => {
     const failingSchema: SchemaLike<TestTopicMap["test.topic"]> = {
-      parse() { throw new Error("schema rejected"); },
+      parse() {
+        throw new Error("schema rejected");
+      },
     };
     const TopicWithSchema = topic("test.topic").schema(failingSchema);
 
@@ -100,7 +102,9 @@ describe("KafkaClient — onMessageLost hook", () => {
 
   it("should NOT call onMessageLost on validation failure when DLQ is enabled", async () => {
     const failingSchema: SchemaLike<TestTopicMap["test.topic"]> = {
-      parse() { throw new Error("schema rejected"); },
+      parse() {
+        throw new Error("schema rejected");
+      },
     };
     const TopicWithSchema = topic("test.topic").schema(failingSchema);
 

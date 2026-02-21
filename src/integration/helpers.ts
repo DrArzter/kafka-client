@@ -33,6 +33,9 @@ export type TestTopics = {
   "test.retry-topic": { value: string };
   "test.retry-topic.retry": { value: string };
   "test.retry-topic.dlq": { value: string };
+  // consumer handle / lag tests
+  "test.handle": { seq: number };
+  "test.lag": { seq: number };
 };
 
 // ── Descriptors ─────────────────────────────────────────────────────
@@ -52,7 +55,9 @@ export const personSchema: SchemaLike<{ name: string; age: number }> = {
 };
 
 export const SchemaValidTopic = topic("test.schema-valid").schema(personSchema);
-export const SchemaInvalidTopic = topic("test.schema-invalid").schema(personSchema);
+export const SchemaInvalidTopic = topic("test.schema-invalid").schema(
+  personSchema,
+);
 export const SchemaSendTopic = topic("test.schema-send").schema(personSchema);
 
 // ── Brokers ─────────────────────────────────────────────────────────
@@ -99,5 +104,8 @@ export function waitForMessages<T>(
 
 export { KafkaClient } from "../client/kafka.client";
 export { KafkaHealthIndicator } from "../nest/kafka.health";
-export { KafkaRetryExhaustedError, KafkaValidationError } from "../client/errors";
+export {
+  KafkaRetryExhaustedError,
+  KafkaValidationError,
+} from "../client/errors";
 export type { ConsumerInterceptor } from "../client/kafka.client";

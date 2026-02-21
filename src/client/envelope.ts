@@ -60,10 +60,7 @@ export function getEnvelopeContext(): EnvelopeCtx | undefined {
 }
 
 /** Execute `fn` inside an envelope context so nested sends inherit correlationId. */
-export function runWithEnvelopeContext<R>(
-  ctx: EnvelopeCtx,
-  fn: () => R,
-): R {
+export function runWithEnvelopeContext<R>(ctx: EnvelopeCtx, fn: () => R): R {
   return envelopeStorage.run(ctx, fn);
 }
 
@@ -115,14 +112,18 @@ export function buildEnvelopeHeaders(
  * into plain `Record<string, string>`.
  */
 export function decodeHeaders(
-  raw: Record<string, Buffer | string | (Buffer | string)[] | undefined> | undefined,
+  raw:
+    | Record<string, Buffer | string | (Buffer | string)[] | undefined>
+    | undefined,
 ): MessageHeaders {
   if (!raw) return {};
   const result: MessageHeaders = {};
   for (const [key, value] of Object.entries(raw)) {
     if (value === undefined) continue;
     if (Array.isArray(value)) {
-      result[key] = value.map((v) => (Buffer.isBuffer(v) ? v.toString() : v)).join(",");
+      result[key] = value
+        .map((v) => (Buffer.isBuffer(v) ? v.toString() : v))
+        .join(",");
     } else {
       result[key] = Buffer.isBuffer(value) ? value.toString() : value;
     }

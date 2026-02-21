@@ -104,6 +104,12 @@ export interface ConsumerOptions<
    * On exhaustion, messages go to `<topic>.dlq` (if `dlq: true`) or `onMessageLost`.
    */
   retryTopics?: boolean;
+  /**
+   * Log a warning if the message handler has not resolved within this window (ms).
+   * The handler is not cancelled — this is a diagnostic aid to surface stuck handlers
+   * before they starve a partition.
+   */
+  handlerTimeoutMs?: number;
 }
 
 /** Configuration for consumer retry behavior. */
@@ -177,15 +183,33 @@ export interface TransactionContext<T extends TopicMapConstraint<T>> {
   ): Promise<void>;
 }
 
+/** Handle returned by `startConsumer` / `startBatchConsumer`. */
+export interface ConsumerHandle {
+  /** The consumer group ID this consumer is running under. */
+  groupId: string;
+  /** Stop this consumer. Equivalent to calling `client.stopConsumer(groupId)`. */
+  stop(): Promise<void>;
+}
+
 /** Interface describing all public methods of the Kafka client. */
 export interface IKafkaClient<T extends TopicMapConstraint<T>> {
-  checkStatus(): Promise<{ status: 'up'; clientId: string; topics: string[] }>;
+  checkStatus(): Promise<{ status: "up"; clientId: string; topics: string[] }>;
+
+  /**
+   * Query the consumer group lag per partition using the admin API.
+   * Lag = (broker high-watermark offset) − (last committed offset).
+   * - A committed offset of `-1` (no offset committed yet) counts as full lag.
+   * - Defaults to the client's default `groupId` when none is provided.
+   */
+  getConsumerLag(
+    groupId?: string,
+  ): Promise<Array<{ topic: string; partition: number; lag: number }>>;
 
   startConsumer<K extends Array<keyof T>>(
     topics: K,
     handleMessage: (envelope: EventEnvelope<T[K[number]]>) => Promise<void>,
     options?: ConsumerOptions<T>,
-  ): Promise<void>;
+  ): Promise<ConsumerHandle>;
 
   startConsumer<
     D extends TopicDescriptor<string & keyof T, T[string & keyof T]>,
@@ -193,7 +217,7 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
     topics: D[],
     handleMessage: (envelope: EventEnvelope<D["__type"]>) => Promise<void>,
     options?: ConsumerOptions<T>,
-  ): Promise<void>;
+  ): Promise<ConsumerHandle>;
 
   startBatchConsumer<K extends Array<keyof T>>(
     topics: K,
@@ -202,7 +226,7 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
       meta: BatchMeta,
     ) => Promise<void>,
     options?: ConsumerOptions<T>,
-  ): Promise<void>;
+  ): Promise<ConsumerHandle>;
 
   startBatchConsumer<
     D extends TopicDescriptor<string & keyof T, T[string & keyof T]>,
@@ -213,7 +237,7 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
       meta: BatchMeta,
     ) => Promise<void>,
     options?: ConsumerOptions<T>,
-  ): Promise<void>;
+  ): Promise<ConsumerHandle>;
 
   /**
    * Stop consumer(s).
@@ -283,6 +307,18 @@ export interface KafkaClientOptions {
    * Use this to alert, log to external systems, or trigger fallback logic.
    */
   onMessageLost?: (ctx: MessageLostContext) => void | Promise<void>;
+  /**
+   * Called whenever a consumer group rebalance occurs.
+   * - `'assign'` — new partitions were granted to this instance.
+   * - `'revoke'` — partitions were taken away (e.g. another consumer joined).
+   *
+   * Applied to every consumer created by this client. If you need per-consumer
+   * rebalance handling, use separate `KafkaClient` instances.
+   */
+  onRebalance?: (
+    type: "assign" | "revoke",
+    partitions: Array<{ topic: string; partition: number }>,
+  ) => void;
 }
 
 /** Options for consumer subscribe retry when topic doesn't exist yet. */

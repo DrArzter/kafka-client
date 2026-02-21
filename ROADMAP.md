@@ -4,13 +4,6 @@
 
 ## Upcoming
 
-### Small / quick wins
-
-- **`getConsumerLag(groupId)`** — query consumer group lag per partition via the admin API; returns `[{ topic, partition, lag }]`; no external tooling required
-- **Handler timeout warning** — `handlerTimeoutMs` option on `startConsumer` / `startBatchConsumer`; logs a `warn` if the handler has not resolved within the configured window — catches stuck handlers before they silently starve a partition
-- **`onRebalance` hook** — `KafkaClientOptions.onRebalance(type: 'assign' | 'revoke', partitions)` callback; exposes librdkafka's native rebalance events so callers can react to partition assignment changes without patching the consumer
-- **`startConsumer` returns `stop()`** — return `{ groupId: string; stop: () => Promise<void> }` instead of `void` so callers don't need to remember the group ID to call `stopConsumer(groupId)` later
-
 ### Larger features
 
 - **DLQ replay** — `client.replayDlq(topic, options?)` reads `{topic}.dlq`, strips DLQ metadata headers, and re-publishes messages to the original topic; supports `from` / `to` time-range filters and a dry-run mode
@@ -25,6 +18,13 @@
 ---
 
 ## Done
+
+### 0.5.5
+
+- [x] **`getConsumerLag(groupId?)`** — query consumer group lag per partition via the admin API; returns `[{ topic, partition, lag }]`; no external tooling required
+- [x] **Handler timeout warning** — `handlerTimeoutMs` option on `startConsumer` / `startBatchConsumer`; logs a `warn` if the handler has not resolved within the configured window — catches stuck handlers before they silently starve a partition
+- [x] **`onRebalance` hook** — `KafkaClientOptions.onRebalance(type: 'assign' | 'revoke', partitions)` callback; wired via librdkafka's native `rebalance_cb`; callers can react to partition assignment changes without patching the consumer
+- [x] **`startConsumer` / `startBatchConsumer` return `ConsumerHandle`** — `{ groupId: string; stop: () => Promise<void> }` so callers don't need to remember the group ID to call `stopConsumer(groupId)` later
 
 ### 0.5.4
 

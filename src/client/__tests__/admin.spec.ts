@@ -21,7 +21,11 @@ describe("KafkaClient — Admin & Lifecycle", () => {
     it("should return topics list", async () => {
       const result = await client.checkStatus();
       expect(mockAdmin.connect).toHaveBeenCalled();
-      expect(result).toEqual({ status: 'up', clientId: 'test-client', topics: ["topic1", "topic2"] });
+      expect(result).toEqual({
+        status: "up",
+        clientId: "test-client",
+        topics: ["topic1", "topic2"],
+      });
     });
 
     it("should not reconnect admin on subsequent calls", async () => {

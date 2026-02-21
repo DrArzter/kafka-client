@@ -25,7 +25,11 @@ describe("createMockKafkaClient", () => {
   });
 
   it("checkStatus resolves to { status: 'up', clientId: 'mock-client', topics: [] }", async () => {
-    await expect(mock.checkStatus()).resolves.toEqual({ status: 'up', clientId: 'mock-client', topics: [] });
+    await expect(mock.checkStatus()).resolves.toEqual({
+      status: "up",
+      clientId: "mock-client",
+      topics: [],
+    });
   });
 
   it("getClientId returns 'mock-client'", () => {
@@ -62,18 +66,18 @@ describe("createMockKafkaClient", () => {
     expect(mock.transaction).toHaveBeenCalledTimes(1);
   });
 
-  it("startConsumer resolves", async () => {
+  it("startConsumer resolves with a ConsumerHandle", async () => {
     const handler = jest.fn();
-    await expect(
-      mock.startConsumer(["orders.created"], handler),
-    ).resolves.toBeUndefined();
+    const handle = await mock.startConsumer(["orders.created"], handler);
+    expect(handle.groupId).toBe("mock-group");
+    expect(typeof handle.stop).toBe("function");
   });
 
-  it("startBatchConsumer resolves", async () => {
+  it("startBatchConsumer resolves with a ConsumerHandle", async () => {
     const handler = jest.fn();
-    await expect(
-      mock.startBatchConsumer(["orders.created"], handler),
-    ).resolves.toBeUndefined();
+    const handle = await mock.startBatchConsumer(["orders.created"], handler);
+    expect(handle.groupId).toBe("mock-group");
+    expect(typeof handle.stop).toBe("function");
   });
 
   it("stopConsumer resolves", async () => {
@@ -101,9 +105,7 @@ describe("createMockKafkaClient", () => {
   it("tracks call counts independently", async () => {
     await mock.sendMessage("orders.created", { orderId: "1", amount: 1 });
     await mock.sendMessage("orders.created", { orderId: "2", amount: 2 });
-    await mock.sendBatch("orders.completed", [
-      { value: { orderId: "3" } },
-    ]);
+    await mock.sendBatch("orders.completed", [{ value: { orderId: "3" } }]);
 
     expect(mock.sendMessage).toHaveBeenCalledTimes(2);
     expect(mock.sendBatch).toHaveBeenCalledTimes(1);

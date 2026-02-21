@@ -29,12 +29,16 @@ const mockConsumer = {
 };
 
 const mockCreateTopics = jest.fn().mockResolvedValue(true);
+const mockFetchOffsets = jest.fn().mockResolvedValue([]);
+const mockFetchTopicOffsets = jest.fn().mockResolvedValue([]);
 
 const mockAdmin = {
   connect: jest.fn().mockResolvedValue(undefined),
   disconnect: jest.fn().mockResolvedValue(undefined),
   listTopics: mockListTopics,
   createTopics: mockCreateTopics,
+  fetchOffsets: mockFetchOffsets,
+  fetchTopicOffsets: mockFetchTopicOffsets,
 };
 
 const Kafka = jest.fn().mockImplementation(() => ({
@@ -68,6 +72,8 @@ export {
   mockRun,
   mockListTopics,
   mockCreateTopics,
+  mockFetchOffsets,
+  mockFetchTopicOffsets,
   mockTransaction,
   mockTxSend,
   mockTxCommit,

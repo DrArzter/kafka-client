@@ -30,6 +30,9 @@ const ALL_TOPICS = [
   "test.retry-topic",
   "test.retry-topic.retry",
   "test.retry-topic.dlq",
+  // consumer handle / lag tests
+  "test.handle",
+  "test.lag",
 ];
 
 // Topics that need more than 1 partition (for rebalance tests)

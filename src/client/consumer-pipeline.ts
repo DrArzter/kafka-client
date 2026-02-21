@@ -14,7 +14,6 @@ import type {
   TopicMapConstraint,
 } from "./types";
 
-
 // ── Helpers ──────────────────────────────────────────────────────────
 
 export function toError(error: unknown): Error {
@@ -86,10 +85,21 @@ export async function validateWithSchema<T extends TopicMapConstraint<T>>(
         originalHeaders: deps.originalHeaders,
       });
     } else {
-      await deps.onMessageLost?.({ topic, error: validationError, attempt: 0, headers: deps.originalHeaders ?? {} });
+      await deps.onMessageLost?.({
+        topic,
+        error: validationError,
+        attempt: 0,
+        headers: deps.originalHeaders ?? {},
+      });
     }
     // Validation errors don't have an envelope yet — call onError with a minimal envelope
-    const errorEnvelope = extractEnvelope(message, deps.originalHeaders ?? {}, topic, -1, "");
+    const errorEnvelope = extractEnvelope(
+      message,
+      deps.originalHeaders ?? {},
+      topic,
+      -1,
+      "",
+    );
     for (const interceptor of interceptors) {
       await interceptor.onError?.(errorEnvelope, validationError);
     }
@@ -115,11 +125,11 @@ export async function sendToDlq(
   const dlqTopic = `${topic}.dlq`;
   const headers: MessageHeaders = {
     ...(meta?.originalHeaders ?? {}),
-    'x-dlq-original-topic': topic,
-    'x-dlq-failed-at': new Date().toISOString(),
-    'x-dlq-error-message': meta?.error.message ?? 'unknown',
-    'x-dlq-error-stack': meta?.error.stack?.slice(0, 2000) ?? '',
-    'x-dlq-attempt-count': String(meta?.attempt ?? 0),
+    "x-dlq-original-topic": topic,
+    "x-dlq-failed-at": new Date().toISOString(),
+    "x-dlq-error-message": meta?.error.message ?? "unknown",
+    "x-dlq-error-stack": meta?.error.stack?.slice(0, 2000) ?? "",
+    "x-dlq-attempt-count": String(meta?.attempt ?? 0),
   };
   try {
     await deps.producer.send({
@@ -138,10 +148,10 @@ export async function sendToDlq(
 // ── Retry topic routing ─────────────────────────────────────────────
 
 /** Headers stamped on messages sent to a `<topic>.retry` topic. */
-export const RETRY_HEADER_ATTEMPT = 'x-retry-attempt';
-export const RETRY_HEADER_AFTER = 'x-retry-after';
-export const RETRY_HEADER_MAX_RETRIES = 'x-retry-max-retries';
-export const RETRY_HEADER_ORIGINAL_TOPIC = 'x-retry-original-topic';
+export const RETRY_HEADER_ATTEMPT = "x-retry-attempt";
+export const RETRY_HEADER_AFTER = "x-retry-after";
+export const RETRY_HEADER_MAX_RETRIES = "x-retry-max-retries";
+export const RETRY_HEADER_ORIGINAL_TOPIC = "x-retry-original-topic";
 
 /**
  * Send raw messages to the retry topic `<originalTopic>.retry`.
@@ -174,7 +184,10 @@ export async function sendToRetryTopic(
   };
   try {
     for (const raw of rawMessages) {
-      await deps.producer.send({ topic: retryTopic, messages: [{ value: raw, headers }] });
+      await deps.producer.send({
+        topic: retryTopic,
+        messages: [{ value: raw, headers }],
+      });
     }
     deps.logger.warn(
       `Message queued in retry topic ${retryTopic} (attempt ${attempt}/${maxRetries})`,
@@ -218,7 +231,15 @@ export async function executeWithRetry<T extends TopicMapConstraint<T>>(
     onMessageLost?: (ctx: MessageLostContext) => void | Promise<void>;
   },
 ): Promise<void> {
-  const { envelope, rawMessages, interceptors, dlq, retry, isBatch, retryTopics } = ctx;
+  const {
+    envelope,
+    rawMessages,
+    interceptors,
+    dlq,
+    retry,
+    isBatch,
+    retryTopics,
+  } = ctx;
   // With retryTopics mode the main consumer tries exactly once — retry consumer takes over.
   const maxAttempts = retryTopics ? 1 : retry ? retry.maxRetries + 1 : 1;
   const backoffMs = retry?.backoffMs ?? 1000;
@@ -303,8 +324,13 @@ export async function executeWithRetry<T extends TopicMapConstraint<T>>(
         const cap = Math.min(backoffMs, maxBackoffMs);
         const delay = Math.floor(Math.random() * cap);
         await sendToRetryTopic(
-          topic, rawMessages, 1, retry.maxRetries, delay,
-          envelopes[0]?.headers ?? {}, deps,
+          topic,
+          rawMessages,
+          1,
+          retry.maxRetries,
+          delay,
+          envelopes[0]?.headers ?? {},
+          deps,
         );
       } else if (isLastAttempt) {
         if (dlq) {

@@ -66,9 +66,9 @@ describe("KafkaClient — Retry", () => {
           expect.objectContaining({
             value: JSON.stringify({ id: "1", value: 1 }),
             headers: expect.objectContaining({
-              'x-dlq-original-topic': 'test.topic',
-              'x-dlq-error-message': 'always fails',
-              'x-dlq-attempt-count': '2',
+              "x-dlq-original-topic": "test.topic",
+              "x-dlq-error-message": "always fails",
+              "x-dlq-attempt-count": "2",
             }),
           }),
         ],

@@ -13,18 +13,22 @@ export type MockKafkaClient<T extends TopicMapConstraint<T>> = {
 export type MockFactory = () => (...args: any[]) => any;
 
 function detectMockFactory(): MockFactory {
-   
   // Jest and Vitest inject globals into the test environment scope,
   // which may not be on `globalThis`. Use eval to check the actual scope.
   try {
     const jestFn = eval("typeof jest !== 'undefined' && jest.fn");
-    if (typeof jestFn === "function") return () => (eval("jest.fn") as () => (...args: any[]) => any)();
-  } catch { /* not available */ }
+    if (typeof jestFn === "function")
+      return () => (eval("jest.fn") as () => (...args: any[]) => any)();
+  } catch {
+    /* not available */
+  }
   try {
     const viFn = eval("typeof vi !== 'undefined' && vi.fn");
-    if (typeof viFn === "function") return () => (eval("vi.fn") as () => (...args: any[]) => any)();
-  } catch { /* not available */ }
-   
+    if (typeof viFn === "function")
+      return () => (eval("vi.fn") as () => (...args: any[]) => any)();
+  } catch {
+    /* not available */
+  }
 
   throw new Error(
     "createMockKafkaClient: no mock framework detected (jest/vitest). " +
@@ -68,19 +72,32 @@ export function createMockKafkaClient<T extends TopicMapConstraint<T>>(
   const returning = (value: unknown) => mock().mockReturnValue(value);
 
   return {
-    checkStatus: resolved({ status: 'up', clientId: 'mock-client', topics: [] }),
+    checkStatus: resolved({
+      status: "up",
+      clientId: "mock-client",
+      topics: [],
+    }),
+    getConsumerLag: resolved([]),
     getClientId: returning("mock-client"),
     sendMessage: resolved(undefined),
     sendBatch: resolved(undefined),
-    transaction: mock().mockImplementation(async (cb: (ctx: Record<string, unknown>) => Promise<void>) => {
-      const ctx = {
-        send: resolved(undefined),
-        sendBatch: resolved(undefined),
-      };
-      await cb(ctx);
+    transaction: mock().mockImplementation(
+      async (cb: (ctx: Record<string, unknown>) => Promise<void>) => {
+        const ctx = {
+          send: resolved(undefined),
+          sendBatch: resolved(undefined),
+        };
+        await cb(ctx);
+      },
+    ),
+    startConsumer: resolved({
+      groupId: "mock-group",
+      stop: mock().mockResolvedValue(undefined),
     }),
-    startConsumer: resolved(undefined),
-    startBatchConsumer: resolved(undefined),
+    startBatchConsumer: resolved({
+      groupId: "mock-group",
+      stop: mock().mockResolvedValue(undefined),
+    }),
     stopConsumer: resolved(undefined),
     disconnect: resolved(undefined),
   } as unknown as MockKafkaClient<T>;
