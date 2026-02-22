@@ -15,7 +15,6 @@ import {
   sendToDlq,
   sendToRetryTopic,
   sleep,
-  RETRY_HEADER_ATTEMPT,
   RETRY_HEADER_AFTER,
   RETRY_HEADER_MAX_RETRIES,
   RETRY_HEADER_ORIGINAL_TOPIC,
@@ -48,8 +47,7 @@ export type RetryTopicDeps = {
  * Poll `consumer.assignment()` until the consumer has received at least one
  * partition for the given topics, then return. Logs a warning and returns
  * (rather than throwing) on timeout so that a slow broker does not break
- * the caller — in the worst case a message sent immediately after would be
- * missed, which is the same behaviour as before this guard was added.
+ * the caller.
  */
 export async function waitForPartitionAssignment(
   consumer: Consumer,
@@ -75,24 +73,37 @@ export async function waitForPartitionAssignment(
 }
 
 /**
- * Auto-start companion consumers on `<topic>.retry` for each original topic.
- * Called by `startConsumer` when `retryTopics: true`.
+ * Start a single retry level consumer on `<topic>.retry.<level>`.
+ *
+ * At-least-once guarantee:
+ *   - The partition is paused while waiting for the scheduled delay window.
+ *     The offset is NOT committed during this window, so a process crash
+ *     causes the message to be redelivered on restart.
+ *   - The offset is committed only after the handler succeeds OR after the
+ *     message has been safely routed to the next level / DLQ.
  *
  * Flow per message:
- *   1. Sleep until `x-retry-after` (scheduled by the main consumer or previous retry hop)
- *   2. Call the original handler
- *   3. On failure: if retries remain → re-send to `<originalTopic>.retry` with incremented attempt
- *                  if exhausted       → DLQ or onMessageLost
+ *   1. If `x-retry-after` is in the future: pause partition → sleep → resume.
+ *   2. Validate and call the original handler.
+ *   3. On success: commit offset.
+ *   4. On failure:
+ *      - Not exhausted → route to `<topic>.retry.<level+1>`
+ *      - Exhausted + dlq → send to `<topic>.dlq`
+ *      - Exhausted, no dlq → call `onMessageLost`
+ *   5. Commit offset after routing (message safely in next destination).
  */
-export async function startRetryTopicConsumers(
+async function startLevelConsumer(
+  level: number,
+  levelTopics: string[],
+  levelGroupId: string,
   originalTopics: string[],
-  originalGroupId: string,
   handleMessage: (envelope: EventEnvelope<any>) => Promise<void>,
   retry: { maxRetries: number; backoffMs?: number; maxBackoffMs?: number },
   dlq: boolean,
   interceptors: ConsumerInterceptor<any>[],
   schemaMap: Map<string, SchemaLike>,
   deps: RetryTopicDeps,
+  assignmentTimeoutMs?: number,
 ): Promise<void> {
   const {
     logger,
@@ -104,56 +115,63 @@ export async function startRetryTopicConsumers(
     runningConsumers,
   } = deps;
 
-  const retryTopicNames = originalTopics.map((t) => `${t}.retry`);
-  const retryGroupId = `${originalGroupId}-retry`;
   const backoffMs = retry.backoffMs ?? 1_000;
   const maxBackoffMs = retry.maxBackoffMs ?? 30_000;
   const pipelineDeps = { logger, producer, instrumentation, onMessageLost };
 
-  for (const rt of retryTopicNames) {
-    await ensureTopic(rt);
+  for (const lt of levelTopics) {
+    await ensureTopic(lt);
   }
 
-  const consumer = getOrCreateConsumer(retryGroupId, false, true);
+  // autoCommit: false — offsets are committed manually after processing.
+  const consumer = getOrCreateConsumer(levelGroupId, false, false);
   await consumer.connect();
-  await subscribeWithRetry(consumer, retryTopicNames, logger);
+  await subscribeWithRetry(consumer, levelTopics, logger);
 
   await consumer.run({
-    eachMessage: async ({ topic: retryTopic, partition, message }) => {
-      if (!message.value) return;
+    eachMessage: async ({ topic: levelTopic, partition, message }) => {
+      const nextOffset = {
+        topic: levelTopic,
+        partition,
+        offset: (parseInt(message.offset, 10) + 1).toString(),
+      };
 
-      const raw = message.value.toString();
-      const parsed = parseJsonMessage(raw, retryTopic, logger);
-      if (parsed === null) return;
+      if (!message.value) {
+        await consumer.commitOffsets([nextOffset]);
+        return;
+      }
 
       const headers = decodeHeaders(message.headers);
-      const originalTopic =
-        (headers[RETRY_HEADER_ORIGINAL_TOPIC] as string | undefined) ??
-        retryTopic.replace(/\.retry$/, "");
-      const currentAttempt = parseInt(
-        (headers[RETRY_HEADER_ATTEMPT] as string | undefined) ?? "1",
-        10,
-      );
-      const maxRetries = parseInt(
-        (headers[RETRY_HEADER_MAX_RETRIES] as string | undefined) ??
-          String(retry.maxRetries),
-        10,
-      );
       const retryAfter = parseInt(
         (headers[RETRY_HEADER_AFTER] as string | undefined) ?? "0",
         10,
       );
-
-      // Pause only this partition for the scheduled delay so that other
-      // topic-partitions on the same retry consumer continue processing.
       const remaining = retryAfter - Date.now();
+
+      // Pause this partition for the scheduled delay.
+      // The offset is not committed yet — a crash here causes redelivery (at-least-once).
       if (remaining > 0) {
-        consumer.pause([{ topic: retryTopic, partitions: [partition] }]);
+        consumer.pause([{ topic: levelTopic, partitions: [partition] }]);
         await sleep(remaining);
-        consumer.resume([{ topic: retryTopic, partitions: [partition] }]);
+        consumer.resume([{ topic: levelTopic, partitions: [partition] }]);
       }
 
-      // Validate schema against original topic's schema (if any)
+      const raw = message.value.toString();
+      const parsed = parseJsonMessage(raw, levelTopic, logger);
+      if (parsed === null) {
+        await consumer.commitOffsets([nextOffset]);
+        return;
+      }
+
+      const currentMaxRetries = parseInt(
+        (headers[RETRY_HEADER_MAX_RETRIES] as string | undefined) ??
+          String(retry.maxRetries),
+        10,
+      );
+      const originalTopic =
+        (headers[RETRY_HEADER_ORIGINAL_TOPIC] as string | undefined) ??
+        levelTopic.replace(/\.retry\.\d+$/, "");
+
       const validated = await validateWithSchema(
         parsed,
         raw,
@@ -163,9 +181,11 @@ export async function startRetryTopicConsumers(
         dlq,
         { ...pipelineDeps, originalHeaders: headers },
       );
-      if (validated === null) return;
+      if (validated === null) {
+        await consumer.commitOffsets([nextOffset]);
+        return;
+      }
 
-      // Build envelope with originalTopic so correlationId/traceparent are correct
       const envelope = extractEnvelope(
         validated,
         headers,
@@ -188,75 +208,125 @@ export async function startRetryTopicConsumers(
         instrumentation,
       );
 
-      if (error) {
-        const nextAttempt = currentAttempt + 1;
-        const exhausted = currentAttempt >= maxRetries;
-        const reportedError =
-          exhausted && maxRetries > 1
-            ? new KafkaRetryExhaustedError(
-                originalTopic,
-                [envelope.payload],
-                maxRetries,
-                { cause: error },
-              )
-            : error;
-
-        await notifyInterceptorsOnError(
-          [envelope],
-          interceptors,
-          reportedError,
-        );
-
-        logger.error(
-          `Retry consumer error for ${originalTopic} (attempt ${currentAttempt}/${maxRetries}):`,
-          error.stack,
-        );
-
-        if (!exhausted) {
-          // currentAttempt is the hop that just failed (1-based).
-          // Before hop N+1 we want backoffMs * 2^N, so exponent = currentAttempt.
-          const cap = Math.min(backoffMs * 2 ** currentAttempt, maxBackoffMs);
-          const delay = Math.floor(Math.random() * cap);
-          await sendToRetryTopic(
-            originalTopic,
-            [raw],
-            nextAttempt,
-            maxRetries,
-            delay,
-            headers,
-            pipelineDeps,
-          );
-        } else if (dlq) {
-          await sendToDlq(originalTopic, raw, pipelineDeps, {
-            error,
-            // +1 to account for the main consumer's initial attempt before
-            // routing to the retry topic, making this consistent with the
-            // in-process retry path where attempt counts all tries.
-            attempt: currentAttempt + 1,
-            originalHeaders: headers,
-          });
-        } else {
-          await onMessageLost?.({
-            topic: originalTopic,
-            error,
-            attempt: currentAttempt,
-            headers,
-          });
-        }
+      if (!error) {
+        await consumer.commitOffsets([nextOffset]);
+        return;
       }
+
+      const exhausted = level >= currentMaxRetries;
+      const reportedError =
+        exhausted && currentMaxRetries > 1
+          ? new KafkaRetryExhaustedError(
+              originalTopic,
+              [envelope.payload],
+              currentMaxRetries,
+              { cause: error },
+            )
+          : error;
+
+      await notifyInterceptorsOnError([envelope], interceptors, reportedError);
+
+      logger.error(
+        `Retry consumer error for ${originalTopic} (level ${level}/${currentMaxRetries}):`,
+        error.stack,
+      );
+
+      if (!exhausted) {
+        const nextLevel = level + 1;
+        // Exponent = current level: level 1 → delay cap = backoffMs * 2^1, etc.
+        const cap = Math.min(backoffMs * 2 ** level, maxBackoffMs);
+        const delay = Math.floor(Math.random() * cap);
+        await sendToRetryTopic(
+          originalTopic,
+          [raw],
+          nextLevel,
+          currentMaxRetries,
+          delay,
+          headers,
+          pipelineDeps,
+        );
+      } else if (dlq) {
+        await sendToDlq(originalTopic, raw, pipelineDeps, {
+          error,
+          // +1 to account for the main consumer's initial attempt before routing.
+          attempt: level + 1,
+          originalHeaders: headers,
+        });
+      } else {
+        await onMessageLost?.({
+          topic: originalTopic,
+          error,
+          attempt: level,
+          headers,
+        });
+      }
+
+      // Commit after routing — the message is safely in the next destination.
+      // If we crash between routing and this commit, the message is redelivered
+      // and routed again (duplicate in the next level), which is acceptable for
+      // at-least-once semantics.
+      await consumer.commitOffsets([nextOffset]);
     },
   });
 
-  runningConsumers.set(retryGroupId, "eachMessage");
+  runningConsumers.set(levelGroupId, "eachMessage");
 
-  // Block until the retry consumer has received at least one partition assignment.
-  // consumer.run() starts the group-join protocol asynchronously; without this wait,
-  // the caller may send a message to the original topic before the retry consumer
-  // has established its "latest" offset on the (initially empty) retry partition,
-  // causing it to skip any retry messages produced in that window.
-  await waitForPartitionAssignment(consumer, retryTopicNames, logger);
+  await waitForPartitionAssignment(consumer, levelTopics, logger, assignmentTimeoutMs);
 
   logger.log(
-    `Retry topic consumers started for: ${originalTopics.join(", ")} (group: ${retryGroupId})`,
+    `Retry level ${level}/${retry.maxRetries} consumer started for: ${originalTopics.join(", ")} (group: ${levelGroupId})`,
   );
+}
+
+/**
+ * Start one consumer per retry level on `<topic>.retry.<level>` topics.
+ *
+ * With `maxRetries: N`, creates N consumers:
+ *   - `${groupId}-retry.1` → `<topic>.retry.1`
+ *   - `${groupId}-retry.2` → `<topic>.retry.2`
+ *   - …
+ *   - `${groupId}-retry.N` → `<topic>.retry.N`
+ *
+ * Each level consumer uses pause/sleep/resume to honour the scheduled delay
+ * without committing the offset early, guaranteeing at-least-once delivery
+ * of retry messages even across process restarts.
+ *
+ * Returns the list of started consumer group IDs so the caller can stop
+ * them selectively via `stopConsumer`.
+ */
+export async function startRetryTopicConsumers(
+  originalTopics: string[],
+  originalGroupId: string,
+  handleMessage: (envelope: EventEnvelope<any>) => Promise<void>,
+  retry: { maxRetries: number; backoffMs?: number; maxBackoffMs?: number },
+  dlq: boolean,
+  interceptors: ConsumerInterceptor<any>[],
+  schemaMap: Map<string, SchemaLike>,
+  deps: RetryTopicDeps,
+  assignmentTimeoutMs?: number,
+): Promise<string[]> {
+  const levelGroupIds: string[] = [];
+
+  for (let level = 1; level <= retry.maxRetries; level++) {
+    const levelTopics = originalTopics.map((t) => `${t}.retry.${level}`);
+    const levelGroupId = `${originalGroupId}-retry.${level}`;
+
+    await startLevelConsumer(
+      level,
+      levelTopics,
+      levelGroupId,
+      originalTopics,
+      handleMessage,
+      retry,
+      dlq,
+      interceptors,
+      schemaMap,
+      deps,
+      assignmentTimeoutMs,
+    );
+
+    levelGroupIds.push(levelGroupId);
+  }
+
+  return levelGroupIds;
 }

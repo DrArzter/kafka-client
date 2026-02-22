@@ -105,6 +105,12 @@ export interface ConsumerOptions<
    */
   retryTopics?: boolean;
   /**
+   * Timeout (ms) for waiting until each retry level consumer receives partition
+   * assignments after `startConsumer` connects. Default: `10000`.
+   * Increase this when the broker is slow to rebalance.
+   */
+  retryTopicAssignmentTimeoutMs?: number;
+  /**
    * Log a warning if the message handler has not resolved within this window (ms).
    * The handler is not cancelled — this is a diagnostic aid to surface stuck handlers
    * before they starve a partition.
@@ -191,9 +197,14 @@ export interface ConsumerHandle {
   stop(): Promise<void>;
 }
 
+/** Result returned by `KafkaClient.checkStatus()`. */
+export type KafkaHealthResult =
+  | { status: "up"; clientId: string; topics: string[] }
+  | { status: "down"; clientId: string; error: string };
+
 /** Interface describing all public methods of the Kafka client. */
 export interface IKafkaClient<T extends TopicMapConstraint<T>> {
-  checkStatus(): Promise<{ status: "up"; clientId: string; topics: string[] }>;
+  checkStatus(): Promise<KafkaHealthResult>;
 
   /**
    * Query the consumer group lag per partition using the admin API.

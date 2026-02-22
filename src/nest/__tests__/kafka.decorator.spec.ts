@@ -83,7 +83,7 @@ describe("SubscribeTo", () => {
   });
 
   it("should accept a TopicDescriptor", () => {
-    const TestTopic = topic("test.topic")<{ id: string }>();
+    const TestTopic = topic("test.topic").type<{ id: string }>();
 
     class TestService {
       @SubscribeTo(TestTopic)
@@ -116,7 +116,7 @@ describe("SubscribeTo", () => {
   });
 
   it("should not set schemas when descriptors have no schema", () => {
-    const NoSchema = topic("test.topic")<{ id: string }>();
+    const NoSchema = topic("test.topic").type<{ id: string }>();
 
     class TestService {
       @SubscribeTo(NoSchema)
@@ -131,8 +131,8 @@ describe("SubscribeTo", () => {
   });
 
   it("should accept an array of TopicDescriptors", () => {
-    const TopicA = topic("topic.a")<{ id: string }>();
-    const TopicB = topic("topic.b")<{ name: string }>();
+    const TopicA = topic("topic.a").type<{ id: string }>();
+    const TopicB = topic("topic.b").type<{ name: string }>();
 
     class TestService {
       @SubscribeTo([TopicA, TopicB])

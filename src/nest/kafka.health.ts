@@ -1,25 +1,13 @@
 import { Injectable } from "@nestjs/common";
 import { KafkaClient, TopicMapConstraint } from "../client/kafka.client";
-
-/** Result returned by `KafkaHealthIndicator.check()`. */
-export type KafkaHealthResult =
-  | { status: "up"; clientId: string; topics: string[] }
-  | { status: "down"; clientId: string; error: string };
+export type { KafkaHealthResult } from "../client/types";
 
 /** Health check service. Call `check(client)` to verify broker connectivity. */
 @Injectable()
 export class KafkaHealthIndicator {
   async check<T extends TopicMapConstraint<T>>(
     client: KafkaClient<T>,
-  ): Promise<KafkaHealthResult> {
-    try {
-      return await client.checkStatus();
-    } catch (error) {
-      return {
-        status: "down",
-        clientId: client.clientId,
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
+  ): Promise<import("../client/types").KafkaHealthResult> {
+    return client.checkStatus();
   }
 }

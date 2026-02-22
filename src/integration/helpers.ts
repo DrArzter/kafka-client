@@ -31,7 +31,8 @@ export type TestTopics = {
   "test.rebalance": { seq: number };
   // retry topic chain tests
   "test.retry-topic": { value: string };
-  "test.retry-topic.retry": { value: string };
+  "test.retry-topic.retry.1": { value: string };
+  "test.retry-topic.retry.2": { value: string };
   "test.retry-topic.dlq": { value: string };
   // consumer handle / lag tests
   "test.handle": { seq: number };
@@ -40,7 +41,7 @@ export type TestTopics = {
 
 // ── Descriptors ─────────────────────────────────────────────────────
 
-export const TestDescriptor = topic("test.descriptor")<{
+export const TestDescriptor = topic("test.descriptor").type<{
   label: string;
   num: number;
 }>();

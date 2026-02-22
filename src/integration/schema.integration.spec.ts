@@ -133,7 +133,7 @@ describe("Integration — Schema Validation", () => {
         name: 42 as any,
         age: "bad" as any,
       }),
-    ).rejects.toThrow("name must be a string");
+    ).rejects.toThrow(KafkaValidationError);
 
     await client.disconnect();
   });

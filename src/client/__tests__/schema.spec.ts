@@ -52,12 +52,12 @@ describe("KafkaClient — Schema Validation", () => {
     it("should throw on invalid message", async () => {
       await expect(
         client.sendMessage(TestDescriptor as any, invalidMessage),
-      ).rejects.toThrow("Validation failed");
+      ).rejects.toThrow(KafkaValidationError);
       expect(mockSend).not.toHaveBeenCalled();
     });
 
     it("should skip validation when descriptor has no schema", async () => {
-      const NoSchema = topic("test.topic")<{ id: string; value: number }>();
+      const NoSchema = topic("test.topic").type<{ id: string; value: number }>();
       await client.sendMessage(NoSchema as any, invalidMessage as any);
       expect(mockSend).toHaveBeenCalled();
     });
@@ -70,7 +70,7 @@ describe("KafkaClient — Schema Validation", () => {
           { value: validMessage },
           { value: invalidMessage as any },
         ]),
-      ).rejects.toThrow("Validation failed");
+      ).rejects.toThrow(KafkaValidationError);
     });
 
     it("should send valid batch through schema", async () => {
@@ -88,7 +88,7 @@ describe("KafkaClient — Schema Validation", () => {
         client.transaction(async (ctx) => {
           await ctx.send(TestDescriptor as any, invalidMessage);
         }),
-      ).rejects.toThrow("Validation failed");
+      ).rejects.toThrow(KafkaValidationError);
       expect(mockTxAbort).toHaveBeenCalled();
     });
 
@@ -99,7 +99,7 @@ describe("KafkaClient — Schema Validation", () => {
             { value: invalidMessage as any },
           ]);
         }),
-      ).rejects.toThrow("Validation failed");
+      ).rejects.toThrow(KafkaValidationError);
       expect(mockTxAbort).toHaveBeenCalled();
     });
   });
@@ -198,7 +198,7 @@ describe("KafkaClient — Schema Validation", () => {
 
     it("should pass through without schema as envelope", async () => {
       const handler = jest.fn();
-      const NoSchema = topic("test.topic")<{ id: string; value: number }>();
+      const NoSchema = topic("test.topic").type<{ id: string; value: number }>();
 
       mockRun.mockImplementation(async ({ eachMessage }: any) => {
         await eachMessage({
@@ -242,7 +242,7 @@ describe("KafkaClient — strictSchemas", () => {
     // Now, string topic should be validated against the same schema
     await expect(
       client.sendMessage("test.topic", { id: 123 as any, value: "bad" as any }),
-    ).rejects.toThrow("Validation failed");
+    ).rejects.toThrow(KafkaValidationError);
   });
 
   it("should allow string topic bypass when strictSchemas is false", async () => {

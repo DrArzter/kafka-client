@@ -27,6 +27,7 @@ export * from "../types";
 
 import {
   buildSendPayload,
+  registerSchema,
   resolveTopicName,
   type BuildSendPayloadDeps,
 } from "./producer-ops";
@@ -71,6 +72,8 @@ export class KafkaClient<
     string,
     { fromBeginning: boolean; autoCommit: boolean }
   >();
+  /** Maps each main consumer groupId to its companion retry level groupIds. */
+  private readonly companionGroupIds = new Map<string, string[]>();
   private readonly instrumentation: KafkaInstrumentation[];
   private readonly onMessageLost: KafkaClientOptions["onMessageLost"];
   private readonly onRebalance: KafkaClientOptions["onRebalance"];
@@ -292,7 +295,7 @@ export class KafkaClient<
     this.runningConsumers.set(gid, "eachMessage");
 
     if (options.retryTopics && retry) {
-      await startRetryTopicConsumers(
+      const companions = await startRetryTopicConsumers(
         topicNames,
         gid,
         handleMessage,
@@ -301,7 +304,9 @@ export class KafkaClient<
         interceptors,
         schemaMap,
         this.retryTopicDeps,
+        options.retryTopicAssignmentTimeoutMs,
       );
+      this.companionGroupIds.set(gid, companions);
     }
 
     return { groupId: gid, stop: () => this.stopConsumer(gid) };
@@ -380,6 +385,20 @@ export class KafkaClient<
       this.runningConsumers.delete(groupId);
       this.consumerCreationOptions.delete(groupId);
       this.logger.log(`Consumer disconnected: group "${groupId}"`);
+
+      // Stop all companion retry level consumers started for this group
+      const companions = this.companionGroupIds.get(groupId) ?? [];
+      for (const cGroupId of companions) {
+        const cConsumer = this.consumers.get(cGroupId);
+        if (cConsumer) {
+          await cConsumer.disconnect().catch(() => {});
+          this.consumers.delete(cGroupId);
+          this.runningConsumers.delete(cGroupId);
+          this.consumerCreationOptions.delete(cGroupId);
+          this.logger.log(`Retry consumer disconnected: group "${cGroupId}"`);
+        }
+      }
+      this.companionGroupIds.delete(groupId);
     } else {
       const tasks = Array.from(this.consumers.values()).map((c) =>
         c.disconnect().catch(() => {}),
@@ -388,6 +407,7 @@ export class KafkaClient<
       this.consumers.clear();
       this.runningConsumers.clear();
       this.consumerCreationOptions.clear();
+      this.companionGroupIds.clear();
       this.logger.log("All consumers disconnected");
     }
   }
@@ -427,18 +447,22 @@ export class KafkaClient<
     return result;
   }
 
-  /** Check broker connectivity and return status, clientId, and available topics. */
-  public async checkStatus(): Promise<{
-    status: "up";
-    clientId: string;
-    topics: string[];
-  }> {
-    if (!this.isAdminConnected) {
-      await this.admin.connect();
-      this.isAdminConnected = true;
+  /** Check broker connectivity. Never throws — returns a discriminated union. */
+  public async checkStatus(): Promise<import("../types").KafkaHealthResult> {
+    try {
+      if (!this.isAdminConnected) {
+        await this.admin.connect();
+        this.isAdminConnected = true;
+      }
+      const topics = await this.admin.listTopics();
+      return { status: "up", clientId: this.clientId, topics };
+    } catch (error) {
+      return {
+        status: "down",
+        clientId: this.clientId,
+        error: error instanceof Error ? error.message : String(error),
+      };
     }
-    const topics = await this.admin.listTopics();
-    return { status: "up", clientId: this.clientId, topics };
   }
 
   public getClientId(): ClientId {
@@ -463,6 +487,7 @@ export class KafkaClient<
     this.consumers.clear();
     this.runningConsumers.clear();
     this.consumerCreationOptions.clear();
+    this.companionGroupIds.clear();
     this.logger.log("All connections closed");
   }
 
@@ -472,6 +497,7 @@ export class KafkaClient<
     topicOrDesc: any,
     messages: Array<BatchMessageItem<any>>,
   ) {
+    registerSchema(topicOrDesc, this.schemaRegistry);
     const payload = await buildSendPayload(
       topicOrDesc,
       messages,

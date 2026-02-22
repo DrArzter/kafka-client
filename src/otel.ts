@@ -32,9 +32,12 @@ import type { EventEnvelope } from "./client/message/envelope";
  */
 export function otelInstrumentation(): KafkaInstrumentation {
   const tracer = trace.getTracer("@drarzter/kafka-client");
+  // Keyed by eventId so beforeConsume/onConsumeError can share the span reference
+  // without requiring the span to be set as the active context.
+  const activeSpans = new Map<string, ReturnType<typeof tracer.startSpan>>();
 
   return {
-    beforeSend(topic: string, headers: Record<string, string>) {
+    beforeSend(_topic: string, headers: Record<string, string>) {
       propagation.inject(context.active(), headers);
     },
 
@@ -60,11 +63,15 @@ export function otelInstrumentation(): KafkaInstrumentation {
         },
         parentCtx,
       );
-      return () => span.end();
+      activeSpans.set(envelope.eventId, span);
+      return () => {
+        span.end();
+        activeSpans.delete(envelope.eventId);
+      };
     },
 
-    onConsumeError(_envelope: EventEnvelope<any>, error: Error) {
-      const span = trace.getActiveSpan();
+    onConsumeError(envelope: EventEnvelope<any>, error: Error) {
+      const span = activeSpans.get(envelope.eventId);
       if (span) {
         span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
         span.recordException(error);

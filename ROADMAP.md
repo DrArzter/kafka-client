@@ -14,17 +14,30 @@
 - **`retryTopics` for batch consumer** — `startBatchConsumer` currently does not support `retryTopics`; routing individual failed messages from a batch needs per-message retry topic dispatch
 - **Circuit breaker** — stop retrying when downstream is consistently unavailable
 - **Transport abstraction** — `KafkaTransport` interface to decouple `KafkaClient` from `@confluentinc/kafka-javascript`; swap transports without touching business code
+- **Exactly-once retry routing** — wrap `sendToRetryTopic` / `sendToDlq` + `commitOffsets` in a Kafka transaction via `sendOffsetsToTransaction`; eliminates the crash-between-route-and-commit duplicate window present in the current at-least-once implementation; requires a transactional producer on each retry level consumer
 
 ### Fixes & small improvements
 
-- **`checkStatus()` discriminated union** — currently returns `{ status: "up" }` or throws; align with `KafkaHealthResult` so callers get `{ status: "up"; ... } | { status: "down"; error: string }` instead of a try/catch
-- **Expose `waitForPartitionAssignment` timeout** — the 10 s deadline is hardcoded; add `retryTopicAssignmentTimeoutMs` to `ConsumerOptions` so slow brokers don't silently stall `onModuleInit`
+- **OTel span not activated** — `KafkaInstrumentation.beforeConsume` returns a cleanup function but no context scope; `otelInstrumentation()` starts a span via `tracer.startSpan()` which is not set as active, so `trace.getActiveSpan()` in `onConsumeError` returns `null` and span status/exception recording silently no-ops; fixing this requires extending the interface to carry a context scope (semver major)
 
 ---
 
 ## Done
 
-### Refactoring
+### 0.5.7
+
+- [x] **`topic()` API cleanup (breaking)** — removed the callable `topic('foo')<T>()` form; `topic()` now returns a plain object with only `.type<T>()` and `.schema()`; all internal usages migrated to `.type<T>()`
+- [x] **`checkStatus()` discriminated union** — `checkStatus()` now catches broker errors internally and returns `{ status: "down"; clientId: string; error: string }` instead of throwing; `KafkaHealthResult` type moved to `client/types.ts` and re-exported from `kafka.health.ts`; `KafkaHealthIndicator.check()` simplified to a direct forward
+- [x] **Expose `waitForPartitionAssignment` timeout** — `retryTopicAssignmentTimeoutMs` added to `ConsumerOptions`; passed through `startRetryTopicConsumers` → `startLevelConsumer` → `waitForPartitionAssignment`; default remains 10 s
+
+### Refactoring / 0.5.6
+
+- [x] **Multi-level retry topics (at-least-once)** — replaced single `<topic>.retry` + eager offset commit + `setTimeout` (at-most-once, retry lost on crash) with N level topics `<topic>.retry.1` … `<topic>.retry.N`; each level has its own consumer (`${groupId}-retry.1`, `${groupId}-retry.2`, …) that uses `consumer.pause → sleep(remaining) → resume` during the scheduled delay; the offset is committed only after the handler succeeds or the message is routed to the next level/DLQ — a crash during sleep or handler execution redelivers the message (at-least-once); the only remaining duplicate risk is a crash in the window between routing and the subsequent `commitOffsets`, which is a short async gap
+- [x] **`stopConsumer(groupId)` stops all companion retry level consumers** — `companionGroupIds: Map<string, string[]>` tracks which level group IDs were started for each main consumer; `stopConsumer(groupId)` disconnects all of them; previously only a single `${groupId}-retry` consumer was tracked
+- [x] **Send-side validation errors wrapped in `KafkaValidationError`** — `validateMessage` on the producer path now wraps raw schema errors in `KafkaValidationError` (with original error as `cause`), matching the consume-side behaviour; callers catch one consistent type on both paths
+- [x] **`registerSchema` side effect removed from `buildSendPayload`** — schema registration moved to `KafkaClient.preparePayload`; `buildSendPayload` is now a pure function with no hidden state mutations
+- [x] **OTel `onConsumeError` span lookup fixed** — `otelInstrumentation()` now maintains a `Map<eventId, Span>` in its closure; `beforeConsume` stores the span, the cleanup removes it, `onConsumeError` looks it up by `eventId` — span status and exception recording work correctly without requiring `trace.getActiveSpan()`
+- [x] **`topic().type<T>()` alias** — added `fn.type<M>()` as an explicit alias for `topic('name')<M>()`; both forms are equivalent at runtime; improves readability when the curried generic syntax feels unfamiliar
 
 - [x] **Split `KafkaClient` into subdirectory modules** — `kafka.client.ts` (1 034 lines) decomposed into `kafka.client/index.ts`, `producer-ops.ts`, `consumer-ops.ts`, `message-handler.ts`, `retry-topic.ts`; `topic`/`envelope` moved to `message/`, `pipeline`/`subscribe-retry` to `consumer/`; extracted `preparePayload()`, `parseSingleMessage()`, `notifyAfterSend()`, `broadcastToInterceptors()`, `buildClient()`, `buildDestroyProvider()` to eliminate repeated send/consume patterns
 - [x] **Deduplicate retry consumer pipeline** — extracted `runHandlerWithPipeline` and `notifyInterceptorsOnError` from `consumer-pipeline.ts`; both `executeWithRetry` and `startRetryTopicConsumers` now share one instrumentation/interceptor lifecycle instead of two parallel copies

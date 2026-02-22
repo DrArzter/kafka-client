@@ -21,11 +21,20 @@ const mockProducer = {
   transaction: mockTransaction,
 };
 
+const mockConsumerPause = jest.fn();
+const mockConsumerResume = jest.fn();
+const mockCommitOffsets = jest.fn().mockResolvedValue(undefined);
+const mockAssignment = jest.fn().mockReturnValue([]);
+
 const mockConsumer = {
   connect: jest.fn().mockResolvedValue(undefined),
   disconnect: jest.fn().mockResolvedValue(undefined),
   subscribe: mockSubscribe,
   run: mockRun,
+  pause: mockConsumerPause,
+  resume: mockConsumerResume,
+  commitOffsets: mockCommitOffsets,
+  assignment: mockAssignment,
 };
 
 const mockCreateTopics = jest.fn().mockResolvedValue(true);
@@ -78,4 +87,8 @@ export {
   mockTxSend,
   mockTxCommit,
   mockTxAbort,
+  mockConsumerPause,
+  mockConsumerResume,
+  mockCommitOffsets,
+  mockAssignment,
 };

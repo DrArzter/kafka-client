@@ -79,7 +79,7 @@ describe("KafkaClient — Transaction", () => {
     });
 
     it("should work in transaction via TopicDescriptor", async () => {
-      const TestTopic = topic("test.topic")<{ id: string; value: number }>();
+      const TestTopic = topic("test.topic").type<{ id: string; value: number }>();
 
       await client.transaction(async (tx) => {
         await tx.send(TestTopic, { id: "1", value: 10 });
@@ -111,7 +111,7 @@ describe("KafkaClient — Transaction", () => {
     });
 
     it("should sendBatch via TopicDescriptor in transaction", async () => {
-      const TestTopic = topic("test.topic")<{ id: string; value: number }>();
+      const TestTopic = topic("test.topic").type<{ id: string; value: number }>();
 
       await client.transaction(async (tx) => {
         await tx.sendBatch(TestTopic, [

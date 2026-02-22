@@ -145,7 +145,7 @@ describe("KafkaClient — Producer", () => {
   });
 
   describe("TopicDescriptor support", () => {
-    const TestTopic = topic("test.topic")<{ id: string; value: number }>();
+    const TestTopic = topic("test.topic").type<{ id: string; value: number }>();
 
     it("should send message via TopicDescriptor", async () => {
       await client.sendMessage(TestTopic, { id: "1", value: 42 });

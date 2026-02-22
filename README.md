@@ -112,7 +112,7 @@ For standalone usage (Express, Fastify, raw Node), no extra dependencies needed 
 ```typescript
 import { KafkaClient, topic } from '@drarzter/kafka-client/core';
 
-const OrderCreated = topic('order.created')<{ orderId: string; amount: number }>();
+const OrderCreated = topic('order.created').type<{ orderId: string; amount: number }>();
 
 const kafka = new KafkaClient('my-app', 'my-group', ['localhost:9092']);
 await kafka.connectProducer();
@@ -245,13 +245,13 @@ Instead of a centralized topic map, define each topic as a standalone typed obje
 ```typescript
 import { topic, TopicsFrom } from '@drarzter/kafka-client';
 
-export const OrderCreated = topic('order.created')<{
+export const OrderCreated = topic('order.created').type<{
   orderId: string;
   userId: string;
   amount: number;
 }>();
 
-export const OrderCompleted = topic('order.completed')<{
+export const OrderCompleted = topic('order.completed').type<{
   orderId: string;
   completedAt: string;
 }>();
@@ -713,8 +713,9 @@ Options for `sendMessage()` — the third argument:
 | `retry.backoffMs` | `1000` | Base delay for exponential backoff in ms |
 | `retry.maxBackoffMs` | `30000` | Maximum delay cap for exponential backoff in ms |
 | `dlq` | `false` | Send to `{topic}.dlq` after all retries exhausted — message carries `x-dlq-*` metadata headers |
-| `retryTopics` | `false` | Route failed messages through `{topic}.retry` instead of sleeping in-process (see [Retry topic chain](#retry-topic-chain)) |
+| `retryTopics` | `false` | Route failed messages through per-level topics (`{topic}.retry.1`, `{topic}.retry.2`, …) instead of sleeping in-process; at-least-once semantics; requires `retry` (see [Retry topic chain](#retry-topic-chain)) |
 | `interceptors` | `[]` | Array of before/after/onError hooks |
+| `retryTopicAssignmentTimeoutMs` | `10000` | Timeout (ms) to wait for each retry level consumer to receive partition assignments after connecting; increase for slow brokers |
 | `handlerTimeoutMs` | — | Log a warning if the handler hasn't resolved within this window (ms) — does not cancel the handler |
 | `batch` | `false` | (decorator only) Use `startBatchConsumer` instead of `startConsumer` |
 | `subscribeRetry.retries` | `5` | Max attempts for `consumer.subscribe()` when topic doesn't exist yet |
@@ -826,12 +827,13 @@ const interceptor: ConsumerInterceptor<MyTopics> = {
 
 ## Retry topic chain
 
-By default, retry is handled in-process: the consumer sleeps between attempts while holding the partition. With `retryTopics: true`, failed messages are routed to a `<topic>.retry` Kafka topic instead. A companion consumer auto-starts on `<topic>.retry` (group `<groupId>-retry`), waits until the scheduled retry time, then calls the same handler.
+By default, retry is handled in-process: the consumer sleeps between attempts while holding the partition. With `retryTopics: true`, failed messages are routed through a chain of Kafka topics instead — one topic per retry level. A companion consumer auto-starts per level, waits for the scheduled delay using partition pause/resume, then calls the same handler.
 
 Benefits over in-process retry:
 
-- **Durable** — retry messages survive a consumer restart
-- **Non-blocking** — the original consumer is free immediately; the retry consumer pauses only the specific partition being delayed, so other partitions continue processing
+- **Durable** — retry messages survive a consumer restart (at-least-once semantics)
+- **Non-blocking** — the original consumer is free immediately; each level consumer only pauses its specific partition during the delay window, so other partitions continue processing
+- **Isolated** — each retry level has its own consumer group, so a slow level 3 consumer never blocks a level 1 consumer
 
 ```typescript
 await kafka.startConsumer(['orders.created'], handler, {
@@ -841,17 +843,31 @@ await kafka.startConsumer(['orders.created'], handler, {
 });
 ```
 
-Message flow with `maxRetries: 2`:
+With `maxRetries: 3`, this creates three dedicated topics and three companion consumers:
 
 ```text
-orders.created  →  handler fails  →  orders.created.retry  (attempt 1, delay ~1 s)
-                                   →  handler fails  →  orders.created.retry  (attempt 2, delay ~2 s)
-                                                      →  handler fails  →  orders.created.dlq
+orders.created.retry.1  →  consumer group: my-group-retry.1  (delay ~1 s)
+orders.created.retry.2  →  consumer group: my-group-retry.2  (delay ~2 s)
+orders.created.retry.3  →  consumer group: my-group-retry.3  (delay ~4 s)
 ```
 
-The retry topic messages carry scheduling headers (`x-retry-attempt`, `x-retry-after`, `x-retry-original-topic`, `x-retry-max-retries`) that the companion consumer reads automatically — no manual configuration needed.
+Message flow with `maxRetries: 2` and `dlq: true`:
 
+```text
+orders.created       →  handler fails  →  orders.created.retry.1  (attempt 1, delay ~1 s)
+orders.created.retry.1  →  handler fails  →  orders.created.retry.2  (attempt 2, delay ~2 s)
+orders.created.retry.2  →  handler fails  →  orders.created.dlq
+```
+
+Each level consumer uses `consumer.pause → sleep(remaining) → consumer.resume` so the partition offset is never committed before the message is processed. On a process crash during sleep or handler execution, the message is redelivered on restart.
+
+The retry topic messages carry scheduling headers (`x-retry-attempt`, `x-retry-after`, `x-retry-original-topic`, `x-retry-max-retries`) that each level consumer reads automatically — no manual configuration needed.
+
+> **Delivery guarantee:** retry messages are at-least-once. A duplicate can occur in the rare case where a process crashes after routing to the next level but before committing the offset — the message appears twice in the next level topic. Design handlers to be idempotent if duplicates are unacceptable.
+>
 > **Note:** `retryTopics` requires `retry` to be set — an error is thrown at startup if `retry` is missing. Currently only applies to `startConsumer`; batch consumers (`startBatchConsumer`) use in-process retry regardless.
+
+`stopConsumer(groupId)` automatically stops all companion retry level consumers started for that group.
 
 ## stopConsumer
 
@@ -977,18 +993,18 @@ export const OrderCreated = topic('order.created').schema(z.object({
   amount: z.number().positive(),
 }));
 
-// Without schema — explicit generic (still works)
-export const OrderAudit = topic('order.audit')<{ orderId: string; action: string }>();
+// Without schema — explicit type via .type<T>()
+export const OrderAudit = topic('order.audit').type<{ orderId: string; action: string }>();
 
 export type MyTopics = TopicsFrom<typeof OrderCreated | typeof OrderAudit>;
 ```
 
 ### How it works
 
-**On send** — `sendMessage`, `sendBatch`, and `transaction` call `schema.parse(message)` before serializing. Invalid messages throw immediately (the schema library's error, e.g. `ZodError`):
+**On send** — `sendMessage`, `sendBatch`, and `transaction` call `schema.parse(message)` before serializing. Invalid messages throw immediately as `KafkaValidationError` (the original schema error is available as `cause`):
 
 ```typescript
-// This throws ZodError — amount must be positive
+// This throws KafkaValidationError — amount must be positive
 await kafka.sendMessage(OrderCreated, { orderId: '1', userId: '2', amount: -5 });
 ```
 
@@ -1100,7 +1116,7 @@ expect(kafka.sendMessage).toHaveBeenCalledWith(
 );
 
 // Override return values
-kafka.checkStatus.mockResolvedValueOnce({ topics: ['order.created'] });
+kafka.checkStatus.mockResolvedValueOnce({ status: 'up', clientId: 'mock-client', topics: ['order.created'] });
 
 // Mock rejections
 kafka.sendMessage.mockRejectedValueOnce(new Error('broker down'));

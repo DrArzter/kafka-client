@@ -166,7 +166,7 @@ export async function sendToRetryTopic(
   originalHeaders: MessageHeaders,
   deps: { logger: KafkaLogger; producer: Producer },
 ): Promise<void> {
-  const retryTopic = `${originalTopic}.retry`;
+  const retryTopic = `${originalTopic}.retry.${attempt}`;
   // Strip any stale retry headers from a previous hop so they don't leak through.
   const {
     [RETRY_HEADER_ATTEMPT]: _a,

@@ -1,4 +1,5 @@
 import { buildEnvelopeHeaders } from "../message/envelope";
+import { KafkaValidationError } from "../errors";
 import type { SchemaLike } from "../message/topic";
 import type {
   BatchMessageItem,
@@ -36,12 +37,27 @@ export async function validateMessage(
     strictSchemasEnabled: boolean;
   },
 ): Promise<any> {
+  const topicName = resolveTopicName(topicOrDesc);
   if (topicOrDesc?.__schema) {
-    return await topicOrDesc.__schema.parse(message);
+    try {
+      return await topicOrDesc.__schema.parse(message);
+    } catch (error) {
+      throw new KafkaValidationError(topicName, message, {
+        cause: error instanceof Error ? error : new Error(String(error)),
+      });
+    }
   }
   if (deps.strictSchemasEnabled && typeof topicOrDesc === "string") {
     const schema = deps.schemaRegistry.get(topicOrDesc);
-    if (schema) return await schema.parse(message);
+    if (schema) {
+      try {
+        return await schema.parse(message);
+      } catch (error) {
+        throw new KafkaValidationError(topicName, message, {
+          cause: error instanceof Error ? error : new Error(String(error)),
+        });
+      }
+    }
   }
   return message;
 }
@@ -64,7 +80,6 @@ export async function buildSendPayload(
     headers: MessageHeaders;
   }>;
 }> {
-  registerSchema(topicOrDesc, deps.schemaRegistry);
   const topic = resolveTopicName(topicOrDesc);
   const builtMessages = await Promise.all(
     messages.map(async (m) => {

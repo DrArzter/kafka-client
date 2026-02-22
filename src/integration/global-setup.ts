@@ -28,7 +28,8 @@ const ALL_TOPICS = [
   "test.health",
   // retry topic chain tests
   "test.retry-topic",
-  "test.retry-topic.retry",
+  "test.retry-topic.retry.1",
+  "test.retry-topic.retry.2",
   "test.retry-topic.dlq",
   // consumer handle / lag tests
   "test.handle",

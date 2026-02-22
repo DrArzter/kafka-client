@@ -39,8 +39,8 @@ export interface TopicDescriptor<
  *
  * @example
  * ```ts
- * // Without schema — type provided explicitly:
- * const OrderCreated = topic('order.created')<{ orderId: string; amount: number }>();
+ * // Without schema — explicit type via .type<T>():
+ * const OrderCreated = topic('order.created').type<{ orderId: string; amount: number }>();
  *
  * // With schema — type inferred from schema:
  * const OrderCreated = topic('order.created').schema(z.object({
@@ -57,20 +57,21 @@ export interface TopicDescriptor<
  * ```
  */
 export function topic<N extends string>(name: N) {
-  const fn = <M extends Record<string, any>>(): TopicDescriptor<N, M> => ({
-    __topic: name,
-    __type: undefined as unknown as M,
-  });
+  return {
+    /** Provide an explicit message type without a runtime schema. */
+    type: <M extends Record<string, any>>(): TopicDescriptor<N, M> => ({
+      __topic: name,
+      __type: undefined as unknown as M,
+    }),
 
-  fn.schema = <S extends SchemaLike<Record<string, any>>>(
-    schema: S,
-  ): TopicDescriptor<N, InferSchema<S>> => ({
-    __topic: name,
-    __type: undefined as unknown as InferSchema<S>,
-    __schema: schema as unknown as SchemaLike<InferSchema<S>>,
-  });
-
-  return fn;
+    schema: <S extends SchemaLike<Record<string, any>>>(
+      schema: S,
+    ): TopicDescriptor<N, InferSchema<S>> => ({
+      __topic: name,
+      __type: undefined as unknown as InferSchema<S>,
+      __schema: schema as unknown as SchemaLike<InferSchema<S>>,
+    }),
+  };
 }
 
 /**
@@ -78,8 +79,8 @@ export function topic<N extends string>(name: N) {
  *
  * @example
  * ```ts
- * const OrderCreated = topic('order.created')<{ orderId: string }>();
- * const OrderCompleted = topic('order.completed')<{ completedAt: string }>();
+ * const OrderCreated = topic('order.created').type<{ orderId: string }>();
+ * const OrderCompleted = topic('order.completed').type<{ completedAt: string }>();
  *
  * type MyTopics = TopicsFrom<typeof OrderCreated | typeof OrderCompleted>;
  * // { 'order.created': { orderId: string }; 'order.completed': { completedAt: string } }

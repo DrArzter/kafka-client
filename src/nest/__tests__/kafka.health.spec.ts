@@ -26,10 +26,14 @@ describe("KafkaHealthIndicator", () => {
     });
   });
 
-  it("should return down when checkStatus fails", async () => {
+  it("should return down when checkStatus returns down", async () => {
     const mockClient = {
       clientId: "test-client",
-      checkStatus: jest.fn().mockRejectedValue(new Error("Connection refused")),
+      checkStatus: jest.fn().mockResolvedValue({
+        status: "down",
+        clientId: "test-client",
+        error: "Connection refused",
+      }),
     } as any;
 
     const result = await health.check(mockClient);

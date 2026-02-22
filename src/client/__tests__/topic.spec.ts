@@ -5,20 +5,20 @@ import {
   SchemaLike,
 } from "../message/topic";
 
-describe("topic()", () => {
+describe("topic().type()", () => {
   it("should create a TopicDescriptor with __topic set", () => {
-    const OrderCreated = topic("order.created")<{ orderId: string }>();
+    const OrderCreated = topic("order.created").type<{ orderId: string }>();
     expect(OrderCreated.__topic).toBe("order.created");
   });
 
   it("should have __type as undefined at runtime", () => {
-    const OrderCreated = topic("order.created")<{ orderId: string }>();
+    const OrderCreated = topic("order.created").type<{ orderId: string }>();
     expect(OrderCreated.__type).toBeUndefined();
   });
 
   it("should create distinct descriptors for different topics", () => {
-    const A = topic("a")<{ x: number }>();
-    const B = topic("b")<{ y: string }>();
+    const A = topic("a").type<{ x: number }>();
+    const B = topic("b").type<{ y: string }>();
     expect(A.__topic).not.toBe(B.__topic);
   });
 });
@@ -41,7 +41,7 @@ describe("topic().schema()", () => {
 
   it("should work with TopicsFrom", () => {
     const A = topic("a").schema(mockSchema);
-    const B = topic("b")<{ x: number }>();
+    const B = topic("b").type<{ x: number }>();
     type Map = TopicsFrom<typeof A | typeof B>;
     const check: Map = {
       a: { orderId: "1", amount: 100 },
@@ -53,11 +53,11 @@ describe("topic().schema()", () => {
 
 describe("TopicsFrom", () => {
   it("should produce correct type at compile time", () => {
-    const OrderCreated = topic("order.created")<{
+    const OrderCreated = topic("order.created").type<{
       orderId: string;
       amount: number;
     }>();
-    const OrderCompleted = topic("order.completed")<{
+    const OrderCompleted = topic("order.completed").type<{
       orderId: string;
       completedAt: string;
     }>();
