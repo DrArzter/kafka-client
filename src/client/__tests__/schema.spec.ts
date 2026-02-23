@@ -217,6 +217,69 @@ describe("KafkaClient — Schema Validation", () => {
   });
 });
 
+describe("KafkaClient — schema registry conflict", () => {
+  const schemaA: SchemaLike<{ id: string; value: number }> = {
+    parse: (d: unknown) => d as any,
+  };
+  const schemaB: SchemaLike<{ id: string; value: number }> = {
+    parse: (d: unknown) => d as any,
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("should warn when two different schemas are registered for the same topic via sendMessage", async () => {
+    const DescA = topic("test.topic").schema(schemaA);
+    const DescB = topic("test.topic").schema(schemaB);
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+
+    const client = createClient();
+    await client.sendMessage(DescA as any, { id: "1", value: 1 });
+    await client.sendMessage(DescB as any, { id: "2", value: 2 });
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining(`Schema conflict for topic "test.topic"`),
+    );
+    warnSpy.mockRestore();
+  });
+
+  it("should NOT warn when the same schema object is re-registered", async () => {
+    const Desc = topic("test.topic").schema(schemaA);
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+
+    const client = createClient();
+    await client.sendMessage(Desc as any, { id: "1", value: 1 });
+    await client.sendMessage(Desc as any, { id: "2", value: 2 });
+
+    const schemaWarnings = warnSpy.mock.calls.filter((args) =>
+      String(args[0]).includes("Schema conflict"),
+    );
+    expect(schemaWarnings).toHaveLength(0);
+    warnSpy.mockRestore();
+  });
+
+  it("should warn when conflicting schemas arrive via startConsumer options.schemas", async () => {
+    const schemasFirst = new Map([["test.topic", schemaA]]);
+    const schemasSecond = new Map([["test.topic", schemaB]]);
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+
+    const client = createClient();
+    await client.startConsumer(["test.topic"] as any, jest.fn(), {
+      schemas: schemasFirst,
+    });
+    await client.startConsumer(["test.topic"] as any, jest.fn(), {
+      groupId: "group-2",
+      schemas: schemasSecond,
+    });
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining(`Schema conflict for topic "test.topic"`),
+    );
+    warnSpy.mockRestore();
+  });
+});
+
 describe("KafkaClient — strictSchemas", () => {
   const strictSchema: SchemaLike<{ id: string; value: number }> = {
     parse(data: unknown) {

@@ -32,12 +32,14 @@ Type-safe Kafka client for Node.js. Framework-agnostic core with a first-class N
 - [Error classes](#error-classes)
 - [Retry topic chain](#retry-topic-chain)
 - [stopConsumer](#stopconsumer)
+- [Graceful shutdown](#graceful-shutdown)
 - [Consumer handles](#consumer-handles)
 - [onMessageLost](#onmessagelost)
 - [onRebalance](#onrebalance)
 - [Consumer lag](#consumer-lag)
 - [Handler timeout warning](#handler-timeout-warning)
 - [Schema validation](#schema-validation)
+  - [Context-aware validators](#context-aware-validators-schemaparsecontext)
 - [Health check](#health-check)
 - [Testing](#testing)
 - [Project structure](#project-structure)
@@ -581,6 +583,8 @@ await this.kafka.startBatchConsumer(
 );
 ```
 
+> **Note:** If your handler calls `resolveOffset()` or `commitOffsetsIfNecessary()` without setting `autoCommit: false`, a `warn` is logged at consumer-start time — mixing autoCommit with manual offset control causes offset conflicts. Set `autoCommit: false` to suppress the warning and take full control of offset management.
+
 With `@SubscribeTo()`:
 
 ```typescript
@@ -591,6 +595,20 @@ async handleOrders(envelopes: EventEnvelope<OrdersTopicMap['order.created']>[], 
 ```
 
 Schema validation runs per-message — invalid messages are skipped (DLQ'd if enabled), valid ones are passed to the handler. Retry applies to the whole batch.
+
+`retryTopics: true` is also supported on `startBatchConsumer`. On handler failure, each envelope in the batch is routed individually to `<topic>.retry.1`; the companion retry consumers call the batch handler one message at a time with a stub `BatchMeta` (no-op `heartbeat`/`resolveOffset`/`commitOffsetsIfNecessary`):
+
+```typescript
+await kafka.startBatchConsumer(
+  ['orders.created'],
+  async (envelopes, meta) => { /* same handler */ },
+  {
+    retry: { maxRetries: 3, backoffMs: 1000 },
+    dlq: true,
+    retryTopics: true, // ← now supported for batch consumers too
+  },
+);
+```
 
 `BatchMeta` exposes:
 
@@ -671,20 +689,54 @@ const kafka = new KafkaClient('my-app', 'my-group', brokers, {
 });
 ```
 
-`otelInstrumentation()` injects `traceparent` on send, extracts it on consume, and creates `CONSUMER` spans automatically. Requires `@opentelemetry/api` as a peer dependency.
+`otelInstrumentation()` injects `traceparent` on send, extracts it on consume, and creates `CONSUMER` spans automatically. The span is set as the **active OTel context** for the handler's duration via `context.with()` — so `trace.getActiveSpan()` works inside your handler and any child spans are automatically parented to the consume span. Requires `@opentelemetry/api` as a peer dependency.
 
-Custom instrumentation:
+### Custom instrumentation
+
+`beforeConsume` can return a `BeforeConsumeResult` — either the legacy `() => void` cleanup function, or an object with `cleanup` and/or `wrap`:
 
 ```typescript
-import { KafkaInstrumentation } from '@drarzter/kafka-client';
+import { KafkaInstrumentation, BeforeConsumeResult } from '@drarzter/kafka-client';
 
-const metrics: KafkaInstrumentation = {
+const myInstrumentation: KafkaInstrumentation = {
   beforeSend(topic, headers) { /* inject headers, start timer */ },
   afterSend(topic) { /* record send latency */ },
-  beforeConsume(envelope) { /* start span */ return () => { /* end span */ }; },
+
+  beforeConsume(envelope): BeforeConsumeResult {
+    const span = startMySpan(envelope.topic);
+    return {
+      // cleanup() is called after the handler completes (success or error)
+      cleanup() { span.end(); },
+      // wrap(fn) runs the handler inside the desired async context
+      // call fn() wherever you need it in the context scope
+      wrap(fn) { return runWithSpanActive(span, fn); },
+    };
+  },
+
   onConsumeError(envelope, error) { /* record error metric */ },
 };
 ```
+
+The legacy `() => void` form is still fully supported — return a function directly if you only need cleanup:
+
+```typescript
+beforeConsume(envelope) {
+  const timer = startTimer();
+  return () => timer.end(); // cleanup only, no context wrapping
+},
+```
+
+`BeforeConsumeResult` is a union:
+
+```typescript
+type BeforeConsumeResult =
+  | (() => void)                     // legacy: cleanup only
+  | { cleanup?(): void;              // called after handler (success or error)
+      wrap?(fn: () => Promise<void>): Promise<void>; // wraps handler execution
+    };
+```
+
+When multiple instrumentations each provide a `wrap`, they compose in declaration order — the first instrumentation's `wrap` is the outermost.
 
 ## Options reference
 
@@ -713,7 +765,7 @@ Options for `sendMessage()` — the third argument:
 | `retry.backoffMs` | `1000` | Base delay for exponential backoff in ms |
 | `retry.maxBackoffMs` | `30000` | Maximum delay cap for exponential backoff in ms |
 | `dlq` | `false` | Send to `{topic}.dlq` after all retries exhausted — message carries `x-dlq-*` metadata headers |
-| `retryTopics` | `false` | Route failed messages through per-level topics (`{topic}.retry.1`, `{topic}.retry.2`, …) instead of sleeping in-process; at-least-once semantics; requires `retry` (see [Retry topic chain](#retry-topic-chain)) |
+| `retryTopics` | `false` | Route failed messages through per-level topics (`{topic}.retry.1`, `{topic}.retry.2`, …) instead of sleeping in-process; exactly-once routing semantics within the retry chain; requires `retry` (see [Retry topic chain](#retry-topic-chain)) |
 | `interceptors` | `[]` | Array of before/after/onError hooks |
 | `retryTopicAssignmentTimeoutMs` | `10000` | Timeout (ms) to wait for each retry level consumer to receive partition assignments after connecting; increase for slow brokers |
 | `handlerTimeoutMs` | — | Log a warning if the handler hasn't resolved within this window (ms) — does not cancel the handler |
@@ -827,11 +879,29 @@ const interceptor: ConsumerInterceptor<MyTopics> = {
 
 ## Retry topic chain
 
+> **tl;dr — recommended production setup:**
+>
+> ```typescript
+> await kafka.startConsumer(['orders.created'], handler, {
+>   retry: { maxRetries: 3, backoffMs: 1_000, maxBackoffMs: 30_000 },
+>   dlq: true,          // ← messages never silently disappear
+>   retryTopics: true,  // ← retries survive restarts; routing is exactly-once
+> });
+> ```
+>
+> Just `retry` + `dlq: true` is already safe for most workloads — failed messages land in `{topic}.dlq` after all retries and are never silently dropped. Add `retryTopics: true` for crash-durable retries and exactly-once routing guarantees within the retry chain.
+>
+> | Configuration | What happens to a message that always fails | Process crash mid-retry |
+> | --- | --- | --- |
+> | `retry` only | Dropped — `onMessageLost` fires | Lost if crash between attempts |
+> | `retry` + `dlq` | Lands in `{topic}.dlq` after all attempts | DLQ write may duplicate (rare) |
+> | `retry` + `dlq` + `retryTopics` | Lands in `{topic}.dlq` after all attempts | Retries survive restarts; routing is exactly-once |
+
 By default, retry is handled in-process: the consumer sleeps between attempts while holding the partition. With `retryTopics: true`, failed messages are routed through a chain of Kafka topics instead — one topic per retry level. A companion consumer auto-starts per level, waits for the scheduled delay using partition pause/resume, then calls the same handler.
 
 Benefits over in-process retry:
 
-- **Durable** — retry messages survive a consumer restart (at-least-once semantics)
+- **Durable** — retry messages survive a consumer restart; routing between levels and to DLQ is exactly-once via Kafka transactions
 - **Non-blocking** — the original consumer is free immediately; each level consumer only pauses its specific partition during the delay window, so other partitions continue processing
 - **Isolated** — each retry level has its own consumer group, so a slow level 3 consumer never blocks a level 1 consumer
 
@@ -863,9 +933,11 @@ Each level consumer uses `consumer.pause → sleep(remaining) → consumer.resum
 
 The retry topic messages carry scheduling headers (`x-retry-attempt`, `x-retry-after`, `x-retry-original-topic`, `x-retry-max-retries`) that each level consumer reads automatically — no manual configuration needed.
 
-> **Delivery guarantee:** retry messages are at-least-once. A duplicate can occur in the rare case where a process crashes after routing to the next level but before committing the offset — the message appears twice in the next level topic. Design handlers to be idempotent if duplicates are unacceptable.
+> **Delivery guarantee:** routing within the retry chain (retry.N → retry.N+1 and retry.N → DLQ) is **exactly-once** — each routing step is wrapped in a Kafka transaction via `sendOffsetsToTransaction`, so the produce and the consumer offset commit happen atomically. A crash at any point rolls back the transaction: the message is redelivered and the routing is retried, with no duplicate in the next level. If the EOS transaction itself fails (broker unavailable), the offset is not committed and the message stays safely in the retry topic until the broker recovers.
 >
-> **Note:** `retryTopics` requires `retry` to be set — an error is thrown at startup if `retry` is missing. Currently only applies to `startConsumer`; batch consumers (`startBatchConsumer`) use in-process retry regardless.
+> The remaining at-least-once window is at the **main consumer → retry.1** boundary: the main consumer uses `autoCommit: true` by default, so if it crashes after routing to `retry.1` but before autoCommit fires, the message may appear twice in `retry.1`. This is the standard Kafka at-least-once trade-off for any consumer using autoCommit. Design handlers to be idempotent if this edge case is unacceptable.
+>
+> **Startup validation:** `retryTopics` requires `retry` to be set — an error is thrown at startup if `retry` is missing. When `autoCreateTopics: false`, all `{topic}.retry.N` topics are validated to exist at startup and a clear error lists any missing ones. With `autoCreateTopics: true` the check is skipped — topics are created automatically by the `ensureTopic` path. Supported by both `startConsumer` and `startBatchConsumer`.
 
 `stopConsumer(groupId)` automatically stops all companion retry level consumers started for that group.
 
@@ -882,6 +954,36 @@ await kafka.stopConsumer();
 ```
 
 `stopConsumer(groupId)` disconnects and removes only that group's consumer, leaving other groups running. Useful when you want to pause processing for a specific topic without restarting the whole client.
+
+## Graceful shutdown
+
+`disconnect()` now drains in-flight handlers before tearing down connections — no messages are silently cut off mid-processing.
+
+**NestJS** apps get this automatically: `onModuleDestroy` calls `disconnect()`, which waits for all running `eachMessage` / `eachBatch` callbacks to settle first. Enable NestJS shutdown hooks in your bootstrap:
+
+```typescript
+// main.ts
+const app = await NestFactory.create(AppModule);
+app.enableShutdownHooks(); // lets NestJS call onModuleDestroy on SIGTERM
+await app.listen(3000);
+```
+
+**Standalone** apps call `enableGracefulShutdown()` to register SIGTERM / SIGINT handlers:
+
+```typescript
+const kafka = new KafkaClient('my-app', 'my-group', brokers);
+await kafka.connectProducer();
+
+kafka.enableGracefulShutdown();
+// or with custom signals and timeout:
+kafka.enableGracefulShutdown(['SIGTERM', 'SIGINT'], 60_000);
+```
+
+`disconnect()` accepts an optional `drainTimeoutMs` (default `30_000` ms). If handlers haven't settled within the window, a warning is logged and the client disconnects anyway:
+
+```typescript
+await kafka.disconnect(10_000); // wait up to 10 s, then force disconnect
+```
 
 ## Consumer handles
 
@@ -916,12 +1018,13 @@ const kafka = new KafkaClient('my-app', 'my-group', ['localhost:9092'], {
 });
 ```
 
-`onMessageLost` fires in two cases:
+`onMessageLost` fires in three cases:
 
 1. **Handler error** — handler threw after all retries and `dlq: false`
 2. **Validation error** — schema rejected the message and `dlq: false` (attempt is `0`)
+3. **DLQ send failure** — `dlq: true` but `producer.send()` to `{topic}.dlq` itself threw (broker down, topic missing); the error passed to `onMessageLost` is the send error, not the original handler error
 
-It does NOT fire when `dlq: true` — in that case the message is preserved in `{topic}.dlq`.
+In the normal case (`dlq: true`, DLQ send succeeds), `onMessageLost` does NOT fire — the message is preserved in `{topic}.dlq`.
 
 ## onRebalance
 
@@ -1063,6 +1166,38 @@ const asyncValidator: SchemaLike<{ id: string }> = {
 
 const MyTopic = topic('my.topic').schema(customValidator);
 ```
+
+### Context-aware validators (`SchemaParseContext`)
+
+`parse()` receives an optional second argument `ctx: SchemaParseContext` on both the consume and send paths. Use it for schema-registry lookups, version-aware migration, or header-driven parsing:
+
+```typescript
+import { SchemaLike, SchemaParseContext } from '@drarzter/kafka-client';
+
+const versionedValidator: SchemaLike<MyPayload> = {
+  parse(data: unknown, ctx?: SchemaParseContext) {
+    const version = ctx?.version ?? 1;
+    // version comes from the x-schema-version header (send: schemaVersion option)
+    if (version >= 2) return migrateV1toV2(data);
+    return validateV1(data);
+  },
+};
+
+// On consume: ctx = { topic: 'orders.created', headers: { ... }, version: 2 }
+// On send:    ctx = { topic: 'orders.created', headers: { ... }, version: schemaVersion ?? 1 }
+```
+
+`SchemaParseContext` shape:
+
+```typescript
+interface SchemaParseContext {
+  topic: string;           // topic the message was produced to / consumed from
+  headers: MessageHeaders; // decoded headers (envelope headers included)
+  version: number;         // x-schema-version header value, defaults to 1
+}
+```
+
+Existing validators (Zod, Valibot, ArkType, custom) that only use the first argument continue to work unchanged — the second argument is silently ignored.
 
 ## Health check
 

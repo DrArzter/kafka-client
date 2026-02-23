@@ -110,4 +110,9 @@ describe("createMockKafkaClient", () => {
     expect(mock.sendMessage).toHaveBeenCalledTimes(2);
     expect(mock.sendBatch).toHaveBeenCalledTimes(1);
   });
+
+  it("enableGracefulShutdown is defined and callable without throwing", () => {
+    expect(mock.enableGracefulShutdown).toBeDefined();
+    expect(() => mock.enableGracefulShutdown()).not.toThrow();
+  });
 });

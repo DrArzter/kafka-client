@@ -121,9 +121,10 @@ export function decodeHeaders(
   for (const [key, value] of Object.entries(raw)) {
     if (value === undefined) continue;
     if (Array.isArray(value)) {
-      result[key] = value
-        .map((v) => (Buffer.isBuffer(v) ? v.toString() : v))
-        .join(",");
+      // Kafka allows multiple headers with the same key — take the last one (last-wins),
+      // consistent with HTTP semantics. Joining would corrupt values that contain commas.
+      const items = value.map((v) => (Buffer.isBuffer(v) ? v.toString() : v));
+      result[key] = items[items.length - 1] ?? "";
     } else {
       result[key] = Buffer.isBuffer(value) ? value.toString() : value;
     }

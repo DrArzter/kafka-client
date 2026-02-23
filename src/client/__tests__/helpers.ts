@@ -15,6 +15,8 @@ import {
   mockTxSend,
   mockTxCommit,
   mockTxAbort,
+  mockSendOffsets,
+  mockCommitOffsets,
 } from "../../__mocks__/@confluentinc/kafka-javascript";
 
 export interface TestTopicMap extends TTopicMessageMap {
@@ -60,6 +62,8 @@ export {
   mockTxSend,
   mockTxCommit,
   mockTxAbort,
+  mockSendOffsets,
+  mockCommitOffsets,
 };
 
 export { KafkaClient } from "../kafka.client";

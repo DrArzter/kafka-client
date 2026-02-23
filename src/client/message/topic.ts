@@ -1,15 +1,47 @@
+import type { MessageHeaders } from "../types";
+
+/**
+ * Context passed as the second argument to `SchemaLike.parse()`.
+ * Enables schema-registry adapters, version-aware migration, and
+ * header-driven parsing without coupling validators to Kafka internals.
+ *
+ * All fields are optional-friendly — validators that don't need the context
+ * can simply ignore the second argument.
+ */
+export interface SchemaParseContext {
+  /** Topic the message was produced to / consumed from. */
+  topic: string;
+  /** Decoded message headers (envelope headers included). */
+  headers: MessageHeaders;
+  /** Value of the `x-schema-version` header, defaults to `1`. */
+  version: number;
+}
+
 /**
  * Any validation library with a `.parse()` method.
  * Works with Zod, Valibot, ArkType, or any custom validator.
+ *
+ * The optional `ctx` argument carries topic/header/version metadata so
+ * validators can perform schema-registry lookups or version-aware migrations.
+ * Existing validators that only use the first argument continue to work
+ * unchanged — the second argument is silently ignored.
  *
  * @example
  * ```ts
  * import { z } from 'zod';
  * const schema: SchemaLike<{ id: string }> = z.object({ id: z.string() });
+ *
+ * // Context-aware validator:
+ * const schema: SchemaLike<MyType> = {
+ *   parse(data, ctx) {
+ *     const version = ctx?.version ?? 1;
+ *     return version >= 2 ? migrateV1toV2(data) : validateV1(data);
+ *   }
+ * };
  * ```
  */
 export interface SchemaLike<T = any> {
-  parse(data: unknown): T | Promise<T>;
+  parse(data: unknown, ctx?: SchemaParseContext): T | Promise<T>;
 }
 
 /** Infer the output type from a SchemaLike. */

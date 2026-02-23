@@ -18,10 +18,11 @@ export async function subscribeWithRetry(
     } catch (error) {
       if (attempt === maxAttempts) throw error;
       const msg = toError(error).message;
+      const delay = Math.floor(Math.random() * backoffMs);
       logger.warn(
-        `Failed to subscribe to [${topics.join(", ")}] (attempt ${attempt}/${maxAttempts}): ${msg}. Retrying in ${backoffMs}ms...`,
+        `Failed to subscribe to [${topics.join(", ")}] (attempt ${attempt}/${maxAttempts}): ${msg}. Retrying in ${delay}ms...`,
       );
-      await sleep(backoffMs);
+      await sleep(delay);
     }
   }
 }

@@ -1,9 +1,10 @@
 import { buildEnvelopeHeaders } from "../message/envelope";
 import { KafkaValidationError } from "../errors";
-import type { SchemaLike } from "../message/topic";
+import type { SchemaLike, SchemaParseContext } from "../message/topic";
 import type {
   BatchMessageItem,
   KafkaInstrumentation,
+  KafkaLogger,
   MessageHeaders,
 } from "../types";
 
@@ -22,9 +23,17 @@ export function resolveTopicName(topicOrDescriptor: unknown): string {
 export function registerSchema(
   topicOrDesc: any,
   schemaRegistry: Map<string, SchemaLike>,
+  logger?: KafkaLogger,
 ): void {
   if (topicOrDesc?.__schema) {
     const topic = resolveTopicName(topicOrDesc);
+    const existing = schemaRegistry.get(topic);
+    if (existing && existing !== topicOrDesc.__schema) {
+      logger?.warn(
+        `Schema conflict for topic "${topic}": a different schema is already registered. ` +
+          `Using the new schema — ensure consistent schemas to avoid silent validation mismatches.`,
+      );
+    }
     schemaRegistry.set(topic, topicOrDesc.__schema);
   }
 }
@@ -36,11 +45,12 @@ export async function validateMessage(
     schemaRegistry: Map<string, SchemaLike>;
     strictSchemasEnabled: boolean;
   },
+  ctx?: SchemaParseContext,
 ): Promise<any> {
   const topicName = resolveTopicName(topicOrDesc);
   if (topicOrDesc?.__schema) {
     try {
-      return await topicOrDesc.__schema.parse(message);
+      return await topicOrDesc.__schema.parse(message, ctx);
     } catch (error) {
       throw new KafkaValidationError(topicName, message, {
         cause: error instanceof Error ? error : new Error(String(error)),
@@ -51,7 +61,7 @@ export async function validateMessage(
     const schema = deps.schemaRegistry.get(topicOrDesc);
     if (schema) {
       try {
-        return await schema.parse(message);
+        return await schema.parse(message, ctx);
       } catch (error) {
         throw new KafkaValidationError(topicName, message, {
           cause: error instanceof Error ? error : new Error(String(error)),
@@ -66,6 +76,7 @@ export type BuildSendPayloadDeps = {
   schemaRegistry: Map<string, SchemaLike>;
   strictSchemasEnabled: boolean;
   instrumentation: KafkaInstrumentation[];
+  logger: KafkaLogger;
 };
 
 export async function buildSendPayload(
@@ -95,9 +106,15 @@ export async function buildSendPayload(
         inst.beforeSend?.(topic, envelopeHeaders);
       }
 
+      const sendCtx: SchemaParseContext = {
+        topic,
+        headers: envelopeHeaders,
+        version: m.schemaVersion ?? 1,
+      };
+
       return {
         value: JSON.stringify(
-          await validateMessage(topicOrDesc, m.value, deps),
+          await validateMessage(topicOrDesc, m.value, deps, sendCtx),
         ),
         key: m.key ?? null,
         headers: envelopeHeaders,

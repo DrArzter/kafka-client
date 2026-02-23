@@ -150,6 +150,21 @@ export interface ConsumerInterceptor<
 }
 
 /**
+ * Return value of `KafkaInstrumentation.beforeConsume`.
+ *
+ * - `() => void` — legacy form: a cleanup function called after the handler.
+ * - Object form:
+ *   - `cleanup?()` — called after the handler (same as the legacy function form).
+ *   - `wrap?(fn)` — wraps the handler execution; call `fn()` inside the desired
+ *     async context (e.g. `context.with(spanCtx, fn)` for OpenTelemetry). Multiple
+ *     wraps from different instrumentations are composed in declaration order,
+ *     so the first instrumentation's wrap is the outermost.
+ */
+export type BeforeConsumeResult =
+  | (() => void)
+  | { cleanup?(): void; wrap?(fn: () => Promise<void>): Promise<void> };
+
+/**
  * Client-wide instrumentation hooks for both send and consume paths.
  * Use this for cross-cutting concerns like tracing and metrics.
  *
@@ -160,8 +175,13 @@ export interface KafkaInstrumentation {
   beforeSend?(topic: string, headers: MessageHeaders): void;
   /** Called after a successful send. */
   afterSend?(topic: string): void;
-  /** Called before the consumer handler. Return a cleanup function called after the handler. */
-  beforeConsume?(envelope: EventEnvelope<any>): (() => void) | void;
+  /**
+   * Called before the consumer handler.
+   * Return a cleanup function (legacy) or a `BeforeConsumeResult` object with
+   * optional `cleanup` and `wrap`. Use `wrap` to run the handler inside a
+   * specific async context (e.g. an active OpenTelemetry span).
+   */
+  beforeConsume?(envelope: EventEnvelope<any>): BeforeConsumeResult | void;
   /** Called when the consumer handler throws. */
   onConsumeError?(envelope: EventEnvelope<any>, error: Error): void;
 }
@@ -270,9 +290,23 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
 
   transaction(fn: (ctx: TransactionContext<T>) => Promise<void>): Promise<void>;
 
-  getClientId: () => ClientId;
+  getClientId(): ClientId;
 
-  disconnect(): Promise<void>;
+  /**
+   * Drain in-flight handlers, then disconnect all producers, consumers, and admin.
+   * @param drainTimeoutMs Max ms to wait for in-flight handlers (default 30 000).
+   */
+  disconnect(drainTimeoutMs?: number): Promise<void>;
+
+  /**
+   * Register SIGTERM / SIGINT signal handlers that drain in-flight messages before
+   * disconnecting. Call once after constructing the client in non-NestJS apps.
+   * NestJS apps get drain automatically via `onModuleDestroy` → `disconnect()`.
+   */
+  enableGracefulShutdown(
+    signals?: NodeJS.Signals[],
+    drainTimeoutMs?: number,
+  ): void;
 }
 
 /**

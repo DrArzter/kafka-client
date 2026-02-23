@@ -10,7 +10,9 @@ import {
   KafkaClient,
   KafkaValidationError,
   ConsumerInterceptor,
+  SchemaParseContext,
 } from "./helpers";
+import { topic } from "../client/message/topic";
 
 describe("Integration — Schema Validation", () => {
   it("should validate and deliver valid messages with schema descriptor", async () => {
@@ -134,6 +136,75 @@ describe("Integration — Schema Validation", () => {
         age: "bad" as any,
       }),
     ).rejects.toThrow(KafkaValidationError);
+
+    await client.disconnect();
+  });
+});
+
+describe("Integration — SchemaParseContext", () => {
+  it("should pass topic, headers and version to parse() on consume", async () => {
+    const capturedCtxes: SchemaParseContext[] = [];
+    const ctxSchema = {
+      parse(data: unknown, ctx?: SchemaParseContext) {
+        if (ctx) capturedCtxes.push(ctx);
+        const d = data as any;
+        if (typeof d?.name !== "string") throw new Error("bad name");
+        return { name: d.name };
+      },
+    };
+    const CtxTopic = topic("test.schema-ctx").schema(ctxSchema);
+
+    const client = createClient("schema-ctx-consume");
+    await client.connectProducer();
+
+    const { messages, promise } =
+      waitForMessages<TestTopics["test.schema-ctx"]>(1);
+
+    await client.startConsumer(
+      [CtxTopic] as any,
+      async (envelope) => {
+        messages.push(envelope.payload);
+      },
+      { fromBeginning: true },
+    );
+
+    await client.sendMessage(CtxTopic as any, { name: "Bob" }, { schemaVersion: 3 });
+    await promise;
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toEqual({ name: "Bob" });
+
+    // At least one ctx was captured (consume path)
+    const consumeCtx = capturedCtxes.find((c) => c.topic === "test.schema-ctx");
+    expect(consumeCtx).toBeDefined();
+    expect(consumeCtx!.topic).toBe("test.schema-ctx");
+    expect(typeof consumeCtx!.headers).toBe("object");
+    expect(consumeCtx!.version).toBe(3);
+
+    await client.disconnect();
+  });
+
+  it("should pass topic, headers and version to parse() on send", async () => {
+    const capturedCtxes: SchemaParseContext[] = [];
+    const ctxSchema = {
+      parse(data: unknown, ctx?: SchemaParseContext) {
+        if (ctx) capturedCtxes.push(ctx);
+        return data as { name: string };
+      },
+    };
+    const CtxSendTopic = topic("test.schema-ctx-send").schema(ctxSchema);
+
+    const client = createClient("schema-ctx-send");
+    await client.connectProducer();
+
+    await client.sendMessage(CtxSendTopic as any, { name: "Alice" }, { schemaVersion: 7 });
+
+    // Send-path ctx captured
+    expect(capturedCtxes.length).toBeGreaterThanOrEqual(1);
+    const sendCtx = capturedCtxes[0];
+    expect(sendCtx.topic).toBe("test.schema-ctx-send");
+    expect(sendCtx.version).toBe(7);
+    expect(typeof sendCtx.headers).toBe("object");
 
     await client.disconnect();
   });

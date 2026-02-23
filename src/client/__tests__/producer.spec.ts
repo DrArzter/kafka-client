@@ -4,9 +4,11 @@ import {
   mockSend,
   mockConnect,
   mockProducer,
+  mockTxSend,
   KafkaClient,
   topic,
 } from "./helpers";
+import type { KafkaInstrumentation } from "../../client/types";
 
 describe("KafkaClient — Producer", () => {
   let client: KafkaClient<TestTopicMap>;
@@ -177,6 +179,50 @@ describe("KafkaClient — Producer", () => {
           },
         ],
       });
+    });
+  });
+
+  describe("instrumentation — afterSend in transaction", () => {
+    it("should call afterSend for each tx.send call", async () => {
+      const afterSend = jest.fn();
+      const inst: KafkaInstrumentation = { afterSend };
+      const instrClient = new KafkaClient<TestTopicMap>(
+        "test-client",
+        "test-group",
+        ["localhost:9092"],
+        { instrumentation: [inst] },
+      );
+
+      await instrClient.transaction(async (tx) => {
+        await tx.send("test.topic", { id: "1", value: 10 });
+        await tx.sendBatch("test.other", [{ value: { name: "hello" } }]);
+      });
+
+      expect(afterSend).toHaveBeenCalledTimes(2);
+      expect(afterSend).toHaveBeenCalledWith("test.topic");
+      expect(afterSend).toHaveBeenCalledWith("test.other");
+    });
+
+    it("should NOT call afterSend when transaction aborts", async () => {
+      const afterSend = jest.fn();
+      const inst: KafkaInstrumentation = { afterSend };
+      const instrClient = new KafkaClient<TestTopicMap>(
+        "test-client",
+        "test-group",
+        ["localhost:9092"],
+        { instrumentation: [inst] },
+      );
+
+      mockTxSend.mockRejectedValueOnce(new Error("send failed"));
+
+      await expect(
+        instrClient.transaction(async (tx) => {
+          await tx.send("test.topic", { id: "1", value: 10 });
+        }),
+      ).rejects.toThrow("send failed");
+
+      // afterSend must not fire — the tx.send threw before it could be called
+      expect(afterSend).not.toHaveBeenCalled();
     });
   });
 });

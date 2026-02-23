@@ -5,7 +5,7 @@ import {
   SpanKind,
   SpanStatusCode,
 } from "@opentelemetry/api";
-import type { KafkaInstrumentation } from "./client/types";
+import type { BeforeConsumeResult, KafkaInstrumentation } from "./client/types";
 import type { EventEnvelope } from "./client/message/envelope";
 
 /**
@@ -32,8 +32,6 @@ import type { EventEnvelope } from "./client/message/envelope";
  */
 export function otelInstrumentation(): KafkaInstrumentation {
   const tracer = trace.getTracer("@drarzter/kafka-client");
-  // Keyed by eventId so beforeConsume/onConsumeError can share the span reference
-  // without requiring the span to be set as the active context.
   const activeSpans = new Map<string, ReturnType<typeof tracer.startSpan>>();
 
   return {
@@ -47,7 +45,7 @@ export function otelInstrumentation(): KafkaInstrumentation {
       // inaccurate since buildSendPayload runs synchronously per-message.
     },
 
-    beforeConsume(envelope: EventEnvelope<any>) {
+    beforeConsume(envelope: EventEnvelope<any>): BeforeConsumeResult {
       const parentCtx = propagation.extract(context.active(), envelope.headers);
       const span = tracer.startSpan(
         `kafka.consume ${envelope.topic}`,
@@ -63,10 +61,16 @@ export function otelInstrumentation(): KafkaInstrumentation {
         },
         parentCtx,
       );
+      const spanCtx = trace.setSpan(parentCtx, span);
       activeSpans.set(envelope.eventId, span);
-      return () => {
-        span.end();
-        activeSpans.delete(envelope.eventId);
+      return {
+        cleanup() {
+          span.end();
+          activeSpans.delete(envelope.eventId);
+        },
+        wrap(fn) {
+          return context.with(spanCtx, fn);
+        },
       };
     },
 

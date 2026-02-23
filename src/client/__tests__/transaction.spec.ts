@@ -1,6 +1,7 @@
 import {
   TestTopicMap,
   createClient,
+  mockConnect,
   mockTransaction,
   mockTxSend,
   mockTxCommit,
@@ -149,6 +150,26 @@ describe("KafkaClient — Transaction", () => {
 
       expect(mockTxAbort).toHaveBeenCalled();
       expect(mockTxCommit).not.toHaveBeenCalled();
+    });
+
+    it("should retry txProducer connection on the next call if connect fails", async () => {
+      // Bug: txProducer was assigned before connect() — a failed connect left
+      // this.txProducer pointing to a disconnected producer, so the next call
+      // skipped if (!this.txProducer) and tried to transaction() on a dead producer.
+      // Fix: assign only after connect() succeeds, so this.txProducer stays null
+      // on failure and the next call retries the full connect flow.
+      mockConnect.mockRejectedValueOnce(new Error("connect failed"));
+
+      // First call: connect throws → txProducer stays null → rethrows
+      await expect(client.transaction(async () => {})).rejects.toThrow(
+        "connect failed",
+      );
+      expect(mockTransaction).not.toHaveBeenCalled();
+
+      // Second call: connect succeeds → txProducer assigned → transaction runs
+      await client.transaction(async () => {});
+      expect(mockTransaction).toHaveBeenCalledTimes(1);
+      expect(mockTxCommit).toHaveBeenCalled();
     });
 
     it("should throw original error when tx.abort() also fails", async () => {

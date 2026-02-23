@@ -143,6 +143,116 @@ describe("Integration — Chaos: rebalance", () => {
   }, 60_000);
 });
 
+// ── Batch consumer with retryTopics ───────────────────────────────────────────
+
+describe("Integration — Batch consumer retryTopics", () => {
+  it("should throw if retryTopics is set without retry on startBatchConsumer", async () => {
+    const client = createClient("batch-retryTopics-no-retry");
+    await expect(
+      client.startBatchConsumer(
+        ["test.batch-retry-topic" as keyof TestTopics],
+        async () => {},
+        { retryTopics: true }, // retry not set — must throw
+      ),
+    ).rejects.toThrow("retryTopics requires retry");
+    await client.disconnect();
+  }, 10_000);
+
+  it("should route failed batch messages through retry topics and to DLQ", async () => {
+    const TOPIC = "test.batch-retry-topic" as keyof TestTopics;
+
+    const client = createClient("batch-retry-main");
+    await client.connectProducer();
+
+    let attempts = 0;
+    const dlqCaptures: Array<{ payload: any; headers: Record<string, string> }> =
+      [];
+
+    // DLQ consumer — reads individual messages routed there
+    const dlqClient = createClient("batch-retry-dlq");
+    await dlqClient.connectProducer();
+    await dlqClient.startConsumer(
+      ["test.batch-retry-topic.dlq" as keyof TestTopics],
+      async (env) => {
+        dlqCaptures.push({ payload: env.payload, headers: env.headers });
+      },
+      { fromBeginning: true },
+    );
+
+    // Batch consumer with retryTopics: true — always fails
+    await client.startBatchConsumer(
+      [TOPIC],
+      async () => {
+        attempts++;
+        throw new Error("batch always fails");
+      },
+      {
+        fromBeginning: true,
+        retry: { maxRetries: 2, backoffMs: 200, maxBackoffMs: 500 },
+        dlq: true,
+        retryTopics: true,
+      },
+    );
+
+    await client.sendMessage(TOPIC, { value: "batch-route-me" });
+
+    // 1 main attempt + 2 retry hops, then DLQ
+    await new Promise<void>((resolve, reject) => {
+      const deadline = Date.now() + 45_000;
+      const poll = setInterval(() => {
+        if (dlqCaptures.length >= 1) { clearInterval(poll); resolve(); }
+        if (Date.now() >= deadline) { clearInterval(poll); reject(new Error("DLQ timeout")); }
+      }, 500);
+    });
+
+    expect(attempts).toBe(3); // main + 2 retry levels
+    expect(dlqCaptures.length).toBe(1);
+    expect(dlqCaptures[0].payload).toEqual({ value: "batch-route-me" });
+    expect(dlqCaptures[0].headers["x-dlq-original-topic"]).toBe(TOPIC);
+
+    await client.disconnect();
+    await dlqClient.disconnect();
+  }, 90_000);
+
+  it("should deliver batch successfully without retry when handler succeeds", async () => {
+    const TOPIC = "test.batch-retry-topic" as keyof TestTopics;
+
+    const client = createClient("batch-retry-success");
+    await client.connectProducer();
+
+    const received: any[] = [];
+    await client.startBatchConsumer(
+      [TOPIC],
+      async (envelopes) => {
+        for (const env of envelopes) received.push(env.payload);
+      },
+      {
+        fromBeginning: false,
+        retry: { maxRetries: 2, backoffMs: 100 },
+        retryTopics: true,
+      },
+    );
+
+    // Wait for consumer + companion retry consumers to join
+    await new Promise((r) => setTimeout(r, 8_000));
+
+    await client.sendMessage(TOPIC, { value: "batch-success" });
+
+    await new Promise<void>((resolve, reject) => {
+      const deadline = Date.now() + 15_000;
+      const poll = setInterval(() => {
+        if (received.length >= 1) { clearInterval(poll); resolve(); }
+        if (Date.now() >= deadline) { clearInterval(poll); reject(new Error("timeout")); }
+      }, 200);
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual({ value: "batch-success" });
+
+    await client.disconnect();
+  }, 60_000);
+});
+
 // ── Retry topic chain ─────────────────────────────────────────────────────────
 
 describe("Integration — Retry topic chain (retryTopics: true)", () => {

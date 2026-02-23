@@ -101,5 +101,6 @@ export function createMockKafkaClient<T extends TopicMapConstraint<T>>(
     }),
     stopConsumer: resolved(undefined),
     disconnect: resolved(undefined),
+    enableGracefulShutdown: mock(),
   } as unknown as MockKafkaClient<T>;
 }

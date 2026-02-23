@@ -150,6 +150,7 @@ export type EachBatchOpts = {
   interceptors: ConsumerInterceptor<any>[];
   dlq: boolean;
   retry: RetryOptions | undefined;
+  retryTopics: boolean | undefined;
   timeoutMs: number | undefined;
   wrapWithTimeout: <R>(
     fn: () => Promise<R>,
@@ -184,6 +185,7 @@ export async function handleEachBatch(
     interceptors,
     dlq,
     retry,
+    retryTopics,
     timeoutMs,
     wrapWithTimeout,
   } = opts;
@@ -223,13 +225,12 @@ export async function handleEachBatch(
     },
     {
       envelope: envelopes,
-      rawMessages: batch.messages
-        .filter((m) => m.value)
-        .map((m) => m.value!.toString()),
+      rawMessages,
       interceptors,
       dlq,
       retry,
       isBatch: true,
+      retryTopics,
     },
     deps,
   );

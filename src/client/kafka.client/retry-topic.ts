@@ -12,9 +12,10 @@ import {
   validateWithSchema,
   runHandlerWithPipeline,
   notifyInterceptorsOnError,
-  sendToDlq,
-  sendToRetryTopic,
+  buildDlqPayload,
+  buildRetryTopicPayload,
   sleep,
+  toError,
   RETRY_HEADER_AFTER,
   RETRY_HEADER_MAX_RETRIES,
   RETRY_HEADER_ORIGINAL_TOPIC,
@@ -41,6 +42,8 @@ export type RetryTopicDeps = {
     autoCommit: boolean,
   ) => Consumer;
   runningConsumers: Map<string, "eachMessage" | "eachBatch">;
+  /** Factory that creates and connects a transactional producer for EOS routing. */
+  createRetryTxProducer: (transactionalId: string) => Promise<Producer>;
 };
 
 /**
@@ -75,22 +78,26 @@ export async function waitForPartitionAssignment(
 /**
  * Start a single retry level consumer on `<topic>.retry.<level>`.
  *
- * At-least-once guarantee:
+ * Exactly-once routing guarantee (EOS):
  *   - The partition is paused while waiting for the scheduled delay window.
  *     The offset is NOT committed during this window, so a process crash
  *     causes the message to be redelivered on restart.
- *   - The offset is committed only after the handler succeeds OR after the
- *     message has been safely routed to the next level / DLQ.
+ *   - On success: offset committed directly via `consumer.commitOffsets`.
+ *   - On failure (routing to next level or DLQ): produce + offset-commit are
+ *     wrapped in a single Kafka transaction via `sendOffsetsToTransaction`.
+ *     A crash at any point rolls back the transaction — no duplicate is
+ *     produced in the next level or DLQ.
+ *   - If the EOS transaction itself fails (broker unavailable), the offset is
+ *     NOT committed and the message is redelivered, retrying the transaction.
  *
  * Flow per message:
  *   1. If `x-retry-after` is in the future: pause partition → sleep → resume.
  *   2. Validate and call the original handler.
  *   3. On success: commit offset.
  *   4. On failure:
- *      - Not exhausted → route to `<topic>.retry.<level+1>`
- *      - Exhausted + dlq → send to `<topic>.dlq`
- *      - Exhausted, no dlq → call `onMessageLost`
- *   5. Commit offset after routing (message safely in next destination).
+ *      - Not exhausted → EOS tx: produce to `<topic>.retry.<level+1>` + commit offset
+ *      - Exhausted + dlq → EOS tx: produce to `<topic>.dlq` + commit offset
+ *      - Exhausted, no dlq → call `onMessageLost` + commit offset directly
  */
 async function startLevelConsumer(
   level: number,
@@ -113,6 +120,7 @@ async function startLevelConsumer(
     ensureTopic,
     getOrCreateConsumer,
     runningConsumers,
+    createRetryTxProducer,
   } = deps;
 
   const backoffMs = retry.backoffMs ?? 1_000;
@@ -122,6 +130,10 @@ async function startLevelConsumer(
   for (const lt of levelTopics) {
     await ensureTopic(lt);
   }
+
+  // One transactional producer per level — routes messages to the next level or DLQ
+  // atomically with the consumer offset commit (EOS).
+  const levelTxProducer = await createRetryTxProducer(`${levelGroupId}-tx`);
 
   // autoCommit: false — offsets are committed manually after processing.
   const consumer = getOrCreateConsumer(levelGroupId, false, false);
@@ -236,36 +248,80 @@ async function startLevelConsumer(
         // Exponent = current level: level 1 → delay cap = backoffMs * 2^1, etc.
         const cap = Math.min(backoffMs * 2 ** level, maxBackoffMs);
         const delay = Math.floor(Math.random() * cap);
-        await sendToRetryTopic(
+        const { topic: rtTopic, messages: rtMsgs } = buildRetryTopicPayload(
           originalTopic,
           [raw],
           nextLevel,
           currentMaxRetries,
           delay,
           headers,
-          pipelineDeps,
         );
+        // EOS: produce to next retry level + commit source offset atomically.
+        // A crash at any point rolls back the transaction — no duplicate.
+        const tx = await levelTxProducer.transaction();
+        try {
+          await tx.send({ topic: rtTopic, messages: rtMsgs });
+          await tx.sendOffsets({
+            consumer,
+            topics: [{ topic: nextOffset.topic, partitions: [{ partition: nextOffset.partition, offset: nextOffset.offset }] }],
+          });
+          await tx.commit();
+          logger.warn(
+            `Message routed to ${rtTopic} (EOS, level ${nextLevel}/${currentMaxRetries})`,
+          );
+        } catch (txErr) {
+          try {
+            await tx.abort();
+          } catch {}
+          logger.error(
+            `EOS routing to ${rtTopic} failed — message will be redelivered:`,
+            toError(txErr).stack,
+          );
+          // Don't commit offset — message is redelivered and the tx is retried.
+          return;
+        }
       } else if (dlq) {
-        await sendToDlq(originalTopic, raw, pipelineDeps, {
-          error,
-          // +1 to account for the main consumer's initial attempt before routing.
-          attempt: level + 1,
-          originalHeaders: headers,
-        });
+        const { topic: dTopic, messages: dMsgs } = buildDlqPayload(
+          originalTopic,
+          raw,
+          {
+            error,
+            // +1 to account for the main consumer's initial attempt before routing.
+            attempt: level + 1,
+            originalHeaders: headers,
+          },
+        );
+        // EOS: produce to DLQ + commit source offset atomically.
+        const tx = await levelTxProducer.transaction();
+        try {
+          await tx.send({ topic: dTopic, messages: dMsgs });
+          await tx.sendOffsets({
+            consumer,
+            topics: [{ topic: nextOffset.topic, partitions: [{ partition: nextOffset.partition, offset: nextOffset.offset }] }],
+          });
+          await tx.commit();
+          logger.warn(`Message sent to DLQ: ${dTopic} (EOS)`);
+        } catch (txErr) {
+          try {
+            await tx.abort();
+          } catch {}
+          logger.error(
+            `EOS DLQ routing to ${dTopic} failed — message will be redelivered:`,
+            toError(txErr).stack,
+          );
+          // Don't commit offset — message stays in retry chain, DLQ tx retried on next delivery.
+          return;
+        }
       } else {
+        // No DLQ — notify caller and commit offset directly (no routing produce, no EOS needed).
         await onMessageLost?.({
           topic: originalTopic,
           error,
           attempt: level,
           headers,
         });
+        await consumer.commitOffsets([nextOffset]);
       }
-
-      // Commit after routing — the message is safely in the next destination.
-      // If we crash between routing and this commit, the message is redelivered
-      // and routed again (duplicate in the next level), which is acceptable for
-      // at-least-once semantics.
-      await consumer.commitOffsets([nextOffset]);
     },
   });
 
@@ -288,8 +344,10 @@ async function startLevelConsumer(
  *   - `${groupId}-retry.N` → `<topic>.retry.N`
  *
  * Each level consumer uses pause/sleep/resume to honour the scheduled delay
- * without committing the offset early, guaranteeing at-least-once delivery
- * of retry messages even across process restarts.
+ * without committing the offset early. Failed message routing (to the next
+ * level or DLQ) is wrapped in a Kafka transaction via `sendOffsetsToTransaction`
+ * for exactly-once routing semantics — no duplicates even if the process
+ * crashes between the produce and the offset commit.
  *
  * Returns the list of started consumer group IDs so the caller can stop
  * them selectively via `stopConsumer`.

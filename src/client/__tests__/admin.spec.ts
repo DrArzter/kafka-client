@@ -5,6 +5,7 @@ import {
   mockConsumer,
   mockProducer,
   mockCreateTopics,
+  mockListTopics,
   mockSend,
   KafkaClient,
 } from "./helpers";
@@ -21,11 +22,12 @@ describe("KafkaClient — Admin & Lifecycle", () => {
     it("should return topics list", async () => {
       const result = await client.checkStatus();
       expect(mockAdmin.connect).toHaveBeenCalled();
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         status: "up",
         clientId: "test-client",
-        topics: ["topic1", "topic2"],
       });
+      expect((result as any).topics).toContain("topic1");
+      expect((result as any).topics).toContain("topic2");
     });
 
     it("should not reconnect admin on subsequent calls", async () => {
@@ -33,6 +35,19 @@ describe("KafkaClient — Admin & Lifecycle", () => {
       mockAdmin.connect.mockClear();
       await client.checkStatus();
       expect(mockAdmin.connect).not.toHaveBeenCalled();
+    });
+
+    it("should retry admin connect after previous connect failure", async () => {
+      mockAdmin.connect.mockRejectedValueOnce(new Error("broker down"));
+
+      const first = await client.checkStatus();
+      expect(first).toMatchObject({ status: "down" });
+
+      // Second call must attempt connect again (flag was not set to true)
+      mockAdmin.connect.mockResolvedValueOnce(undefined);
+      const second = await client.checkStatus();
+      expect(second).toMatchObject({ status: "up" });
+      expect(mockAdmin.connect).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -166,6 +181,39 @@ describe("KafkaClient — Admin & Lifecycle", () => {
       expect(mockCreateTopics).toHaveBeenCalledWith({
         topics: [{ topic: "test.topic", numPartitions: 3 }],
       });
+    });
+  });
+
+  describe("DLQ topic validation (autoCreateTopics: false)", () => {
+    it("should throw at startup when dlq: true and DLQ topic does not exist", async () => {
+      mockListTopics.mockResolvedValueOnce(["test.topic"]); // no DLQ topic
+      await expect(
+        client.startConsumer(["test.topic"], jest.fn(), { dlq: true }),
+      ).rejects.toThrow(
+        "dlq: true but the following DLQ topics do not exist: test.topic.dlq",
+      );
+    });
+
+    it("should not throw when dlq: true and DLQ topic exists", async () => {
+      mockListTopics.mockResolvedValue(["test.topic", "test.topic.dlq"]);
+
+      await expect(
+        client.startConsumer(["test.topic"], jest.fn(), { dlq: true }),
+      ).resolves.toBeDefined();
+    });
+
+    it("should NOT validate DLQ topics when autoCreateTopics: true", async () => {
+      const autoClient = new KafkaClient<TestTopicMap>(
+        "auto-client",
+        "auto-group",
+        ["localhost:9092"],
+        { autoCreateTopics: true },
+      );
+
+      // autoCreate creates the DLQ topic — no validation / no throw
+      await expect(
+        autoClient.startConsumer(["test.topic"], jest.fn(), { dlq: true }),
+      ).resolves.toBeDefined();
     });
   });
 });

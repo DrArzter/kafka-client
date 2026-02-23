@@ -75,19 +75,30 @@ export function buildSchemaMap(
   topics: any[],
   schemaRegistry: Map<string, SchemaLike>,
   optionSchemas?: Map<string, SchemaLike>,
+  logger?: KafkaLogger,
 ): Map<string, SchemaLike> {
   const schemaMap = new Map<string, SchemaLike>();
+
+  const registerChecked = (name: string, schema: SchemaLike) => {
+    const existing = schemaRegistry.get(name);
+    if (existing && existing !== schema) {
+      logger?.warn(
+        `Schema conflict for topic "${name}": a different schema is already registered. ` +
+          `Using the new schema — ensure consistent schemas to avoid silent validation mismatches.`,
+      );
+    }
+    schemaMap.set(name, schema);
+    schemaRegistry.set(name, schema);
+  };
+
   for (const t of topics) {
     if (t?.__schema) {
-      const name = resolveTopicName(t);
-      schemaMap.set(name, t.__schema);
-      schemaRegistry.set(name, t.__schema);
+      registerChecked(resolveTopicName(t), t.__schema);
     }
   }
   if (optionSchemas) {
     for (const [k, v] of optionSchemas) {
-      schemaMap.set(k, v);
-      schemaRegistry.set(k, v);
+      registerChecked(k, v);
     }
   }
   return schemaMap;

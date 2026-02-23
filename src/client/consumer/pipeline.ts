@@ -3,8 +3,9 @@ type Producer = KafkaJS.Producer;
 import type { EventEnvelope } from "../message/envelope";
 import { extractEnvelope } from "../message/envelope";
 import { KafkaRetryExhaustedError, KafkaValidationError } from "../errors";
-import type { SchemaLike } from "../message/topic";
+import type { SchemaLike, SchemaParseContext } from "../message/topic";
 import type {
+  BeforeConsumeResult,
   ConsumerInterceptor,
   KafkaInstrumentation,
   KafkaLogger,
@@ -67,8 +68,14 @@ export async function validateWithSchema<T extends TopicMapConstraint<T>>(
   const schema = schemaMap.get(topic);
   if (!schema) return message;
 
+  const ctx: SchemaParseContext = {
+    topic,
+    headers: deps.originalHeaders ?? {},
+    version: Number(deps.originalHeaders?.["x-schema-version"] ?? 1),
+  };
+
   try {
-    return await schema.parse(message);
+    return await schema.parse(message, ctx);
   } catch (error) {
     const err = toError(error);
     const validationError = new KafkaValidationError(topic, message, {
@@ -116,12 +123,12 @@ export interface DlqMetadata {
   originalHeaders?: MessageHeaders;
 }
 
-export async function sendToDlq(
+/** Build the DLQ send payload without sending it. Used by sendToDlq and EOS routing. */
+export function buildDlqPayload(
   topic: string,
   rawMessage: string,
-  deps: { logger: KafkaLogger; producer: Producer },
   meta?: DlqMetadata,
-): Promise<void> {
+): { topic: string; messages: Array<{ value: string; headers: MessageHeaders }> } {
   const dlqTopic = `${topic}.dlq`;
   const headers: MessageHeaders = {
     ...(meta?.originalHeaders ?? {}),
@@ -131,17 +138,32 @@ export async function sendToDlq(
     "x-dlq-error-stack": meta?.error.stack?.slice(0, 2000) ?? "",
     "x-dlq-attempt-count": String(meta?.attempt ?? 0),
   };
+  return { topic: dlqTopic, messages: [{ value: rawMessage, headers }] };
+}
+
+export async function sendToDlq(
+  topic: string,
+  rawMessage: string,
+  deps: {
+    logger: KafkaLogger;
+    producer: Producer;
+    onMessageLost?: (ctx: MessageLostContext) => void | Promise<void>;
+  },
+  meta?: DlqMetadata,
+): Promise<void> {
+  const payload = buildDlqPayload(topic, rawMessage, meta);
   try {
-    await deps.producer.send({
-      topic: dlqTopic,
-      messages: [{ value: rawMessage, headers }],
-    });
-    deps.logger.warn(`Message sent to DLQ: ${dlqTopic}`);
+    await deps.producer.send(payload);
+    deps.logger.warn(`Message sent to DLQ: ${payload.topic}`);
   } catch (error) {
-    deps.logger.error(
-      `Failed to send message to DLQ ${dlqTopic}:`,
-      toError(error).stack,
-    );
+    const err = toError(error);
+    deps.logger.error(`Failed to send message to DLQ ${payload.topic}:`, err.stack);
+    await deps.onMessageLost?.({
+      topic,
+      error: err,
+      attempt: meta?.attempt ?? 0,
+      headers: meta?.originalHeaders ?? {},
+    });
   }
 }
 
@@ -153,6 +175,45 @@ export const RETRY_HEADER_AFTER = "x-retry-after";
 export const RETRY_HEADER_MAX_RETRIES = "x-retry-max-retries";
 export const RETRY_HEADER_ORIGINAL_TOPIC = "x-retry-original-topic";
 
+/** Build the retry topic send payload without sending it. Used by sendToRetryTopic and EOS routing. */
+export function buildRetryTopicPayload(
+  originalTopic: string,
+  rawMessages: string[],
+  attempt: number,
+  maxRetries: number,
+  delayMs: number,
+  /** Per-message headers (array) or a single object applied to all messages. */
+  originalHeaders: MessageHeaders | MessageHeaders[],
+): { topic: string; messages: Array<{ value: string; headers: MessageHeaders }> } {
+  const retryTopic = `${originalTopic}.retry.${attempt}`;
+  function buildHeaders(hdr: MessageHeaders): MessageHeaders {
+    // Strip any stale retry headers from a previous hop so they don't leak through.
+    const {
+      [RETRY_HEADER_ATTEMPT]: _a,
+      [RETRY_HEADER_AFTER]: _b,
+      [RETRY_HEADER_MAX_RETRIES]: _c,
+      [RETRY_HEADER_ORIGINAL_TOPIC]: _d,
+      ...userHeaders
+    } = hdr;
+    return {
+      ...userHeaders,
+      [RETRY_HEADER_ATTEMPT]: String(attempt),
+      [RETRY_HEADER_AFTER]: String(Date.now() + delayMs),
+      [RETRY_HEADER_MAX_RETRIES]: String(maxRetries),
+      [RETRY_HEADER_ORIGINAL_TOPIC]: originalTopic,
+    };
+  }
+  return {
+    topic: retryTopic,
+    messages: rawMessages.map((value, i) => ({
+      value,
+      headers: buildHeaders(
+        Array.isArray(originalHeaders) ? (originalHeaders[i] ?? {}) : originalHeaders,
+      ),
+    })),
+  };
+}
+
 /**
  * Send raw messages to the retry topic `<originalTopic>.retry`.
  * Stamps scheduling headers so the retry consumer knows when and how many times to retry.
@@ -163,40 +224,39 @@ export async function sendToRetryTopic(
   attempt: number,
   maxRetries: number,
   delayMs: number,
-  originalHeaders: MessageHeaders,
-  deps: { logger: KafkaLogger; producer: Producer },
+  /** Per-message headers (array) or a single object applied to all messages. */
+  originalHeaders: MessageHeaders | MessageHeaders[],
+  deps: {
+    logger: KafkaLogger;
+    producer: Producer;
+    onMessageLost?: (ctx: MessageLostContext) => void | Promise<void>;
+  },
 ): Promise<void> {
-  const retryTopic = `${originalTopic}.retry.${attempt}`;
-  // Strip any stale retry headers from a previous hop so they don't leak through.
-  const {
-    [RETRY_HEADER_ATTEMPT]: _a,
-    [RETRY_HEADER_AFTER]: _b,
-    [RETRY_HEADER_MAX_RETRIES]: _c,
-    [RETRY_HEADER_ORIGINAL_TOPIC]: _d,
-    ...userHeaders
-  } = originalHeaders;
-  const headers: MessageHeaders = {
-    ...userHeaders,
-    [RETRY_HEADER_ATTEMPT]: String(attempt),
-    [RETRY_HEADER_AFTER]: String(Date.now() + delayMs),
-    [RETRY_HEADER_MAX_RETRIES]: String(maxRetries),
-    [RETRY_HEADER_ORIGINAL_TOPIC]: originalTopic,
-  };
+  const payload = buildRetryTopicPayload(
+    originalTopic,
+    rawMessages,
+    attempt,
+    maxRetries,
+    delayMs,
+    originalHeaders,
+  );
   try {
-    for (const raw of rawMessages) {
-      await deps.producer.send({
-        topic: retryTopic,
-        messages: [{ value: raw, headers }],
-      });
-    }
+    await deps.producer.send(payload);
     deps.logger.warn(
-      `Message queued in retry topic ${retryTopic} (attempt ${attempt}/${maxRetries})`,
+      `Message queued in retry topic ${payload.topic} (attempt ${attempt}/${maxRetries})`,
     );
   } catch (error) {
+    const err = toError(error);
     deps.logger.error(
-      `Failed to send message to retry topic ${retryTopic}:`,
-      toError(error).stack,
+      `Failed to send message to retry topic ${payload.topic}:`,
+      err.stack,
     );
+    await deps.onMessageLost?.({
+      topic: originalTopic,
+      error: err,
+      attempt,
+      headers: Array.isArray(originalHeaders) ? (originalHeaders[0] ?? {}) : originalHeaders,
+    });
   }
 }
 
@@ -234,12 +294,18 @@ export async function runHandlerWithPipeline<T extends TopicMapConstraint<T>>(
   instrumentation: KafkaInstrumentation[],
 ): Promise<Error | null> {
   const cleanups: (() => void)[] = [];
+  const wraps: Array<(fn: () => Promise<void>) => Promise<void>> = [];
 
   try {
     for (const env of envelopes) {
       for (const inst of instrumentation) {
-        const cleanup = inst.beforeConsume?.(env);
-        if (typeof cleanup === "function") cleanups.push(cleanup);
+        const result: BeforeConsumeResult | void = inst.beforeConsume?.(env);
+        if (typeof result === "function") {
+          cleanups.push(result);
+        } else if (result) {
+          if (result.cleanup) cleanups.push(result.cleanup);
+          if (result.wrap) wraps.push(result.wrap);
+        }
       }
     }
     for (const env of envelopes) {
@@ -248,7 +314,14 @@ export async function runHandlerWithPipeline<T extends TopicMapConstraint<T>>(
       }
     }
 
-    await fn();
+    // Compose wraps: first instrumentation is outermost, last is innermost.
+    let runFn: () => Promise<void> = fn;
+    for (let i = wraps.length - 1; i >= 0; i--) {
+      const wrap = wraps[i];
+      const inner = runFn;
+      runFn = () => wrap(inner);
+    }
+    await runFn();
 
     for (const env of envelopes) {
       for (const interceptor of interceptors) {
@@ -372,7 +445,7 @@ export async function executeWithRetry<T extends TopicMapConstraint<T>>(
         1,
         retry.maxRetries,
         delay,
-        envelopes[0]?.headers ?? {},
+        isBatch ? envelopes.map((e) => e.headers) : (envelopes[0]?.headers ?? {}),
         deps,
       );
     } else if (isLastAttempt) {

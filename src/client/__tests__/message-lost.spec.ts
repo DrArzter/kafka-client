@@ -3,6 +3,8 @@ import {
   createClient,
   setupMessage,
   mockRun,
+  mockSend,
+  mockListTopics,
   KafkaClient,
   MessageLostContext,
   topic,
@@ -145,5 +147,56 @@ describe("KafkaClient — onMessageLost hook", () => {
     await client.startConsumer(["test.topic"], handler);
 
     expect(onMessageLost).not.toHaveBeenCalled();
+  });
+
+  it("should call onMessageLost when routing to retry topic fails", async () => {
+    // retryTopics: true routes failed messages via producer.send() to <topic>.retry.1.
+    // If that send throws, onMessageLost must fire (parity with DLQ send failure).
+    mockListTopics.mockResolvedValueOnce(["test.topic", "test.topic.retry.1"]);
+    mockRun
+      .mockImplementationOnce(async ({ eachMessage }: any) => {
+        await eachMessage({
+          topic: "test.topic",
+          partition: 0,
+          message: { value: Buffer.from(JSON.stringify({ id: "1", value: 1 })) },
+        });
+      })
+      .mockImplementationOnce(async () => {}); // retry.1 consumer — no messages
+    mockSend.mockRejectedValueOnce(new Error("retry topic send failed"));
+
+    const client = createClientWithHook();
+    const handler = jest.fn().mockRejectedValue(new Error("handler error"));
+
+    await client.startConsumer(["test.topic"], handler, {
+      retry: { maxRetries: 1, backoffMs: 1 },
+      retryTopics: true,
+      retryTopicAssignmentTimeoutMs: 0,
+    });
+
+    expect(onMessageLost).toHaveBeenCalledTimes(1);
+    expect(onMessageLost).toHaveBeenCalledWith(
+      expect.objectContaining({
+        topic: "test.topic",
+        error: expect.objectContaining({ message: "retry topic send failed" }),
+      }),
+    );
+  });
+
+  it("should call onMessageLost when DLQ send itself fails", async () => {
+    mockSend.mockRejectedValueOnce(new Error("broker unavailable"));
+
+    setupMessage();
+    const client = createClientWithHook();
+    const handler = jest.fn().mockRejectedValue(new Error("handler error"));
+
+    await client.startConsumer(["test.topic"], handler, { dlq: true });
+
+    expect(onMessageLost).toHaveBeenCalledTimes(1);
+    expect(onMessageLost).toHaveBeenCalledWith(
+      expect.objectContaining({
+        topic: "test.topic",
+        error: expect.objectContaining({ message: "broker unavailable" }),
+      }),
+    );
   });
 });

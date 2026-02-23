@@ -7,22 +7,56 @@
 ### Larger features
 
 - **DLQ replay** — `client.replayDlq(topic, options?)` reads `{topic}.dlq`, strips DLQ metadata headers, and re-publishes messages to the original topic; supports `from` / `to` time-range filters and a dry-run mode
-- **Graceful shutdown with drain** — on `SIGTERM` / `SIGINT`: pause all consumers, wait for in-flight handlers to complete, commit offsets, then disconnect; currently `disconnect()` tears down immediately
-- **`SchemaContext` in `parse()`** — extend `SchemaLike.parse(data, ctx?: { topic, headers, version })` so validators can inspect message metadata; enables schema-registry adapters, version-aware migration, and header-driven parsing
 - **Metrics hooks** — dedicated `metricsHook` in `KafkaClientOptions` for numeric observability (consumer lag, retry count, DLQ count, handler duration histogram); separate from OTel spans, targets Prometheus / Datadog / StatsD
 - **Benchmarks** — compare throughput / latency: raw `@confluentinc/kafka-javascript` → `@drarzter/kafka-client` → `@nestjs/microservices` Kafka transport; quantify abstraction overhead
-- **`retryTopics` for batch consumer** — `startBatchConsumer` currently does not support `retryTopics`; routing individual failed messages from a batch needs per-message retry topic dispatch
 - **Circuit breaker** — stop retrying when downstream is consistently unavailable
 - **Transport abstraction** — `KafkaTransport` interface to decouple `KafkaClient` from `@confluentinc/kafka-javascript`; swap transports without touching business code
-- **Exactly-once retry routing** — wrap `sendToRetryTopic` / `sendToDlq` + `commitOffsets` in a Kafka transaction via `sendOffsetsToTransaction`; eliminates the crash-between-route-and-commit duplicate window present in the current at-least-once implementation; requires a transactional producer on each retry level consumer
-
-### Fixes & small improvements
-
-- **OTel span not activated** — `KafkaInstrumentation.beforeConsume` returns a cleanup function but no context scope; `otelInstrumentation()` starts a span via `tracer.startSpan()` which is not set as active, so `trace.getActiveSpan()` in `onConsumeError` returns `null` and span status/exception recording silently no-ops; fixing this requires extending the interface to carry a context scope (semver major)
 
 ---
 
 ## Done
+
+### 0.6.3
+
+- [x] **`transaction()` missing `afterSend` notification** — `sendMessage` and `sendBatch` call `instrumentation.afterSend` after each send, but the `send`/`sendBatch` closures inside `transaction()` did not; `afterSend` was never fired for messages sent within a transaction; fixed by extracting `payload` into a variable and calling `notifyAfterSend` after each `tx.send()`
+- [x] **Batch + `retryTopics: true` headers lost for messages 2..N** — `executeWithRetry` passed only `envelopes[0].headers` to `sendToRetryTopic` for all messages in the batch; messages 2..N ended up with the first message's `x-correlation-id`, `traceparent`, and custom headers in the retry topic; fixed by passing `envelopes.map(e => e.headers)` (array) when `isBatch`; `buildRetryTopicPayload` and `sendToRetryTopic` now accept `MessageHeaders | MessageHeaders[]` and zip each message with its own headers
+- [x] **`startBatchConsumer` autoCommit diagnostic downgraded to `debug`** — the warning fired on every batch consumer start even for users who never use manual offset management (`resolveOffset` / `commitOffsetsIfNecessary`); changed to `this.logger.debug?.()` so it appears only when debug logging is explicitly enabled; default logger now includes `debug: console.debug`
+- [x] **DLQ topic validated at startup when `autoCreateTopics: false`** — `dlq: true` would silently succeed at startup even if `{topic}.dlq` didn't exist; the missing topic was only discovered on the first handler failure, too late to be actionable; added `validateDlqTopicsExist` (symmetrical with `validateRetryTopicsExist`) that throws a clear error listing all missing DLQ topics at consumer start time
+- [x] **`highWatermark` stub in batch-retry path documented** — retry consumers use `eachMessage`, so no real batch context is available; the stub `BatchMeta` used `env.offset` as `highWatermark`; this is semantically incorrect (offset of the current message ≠ partition high-watermark); added a comment explaining the architectural limitation
+
+### 0.6.2
+
+- [x] **`handleEachBatch` rawMessages mismatch** — `rawMessages` passed to `executeWithRetry` was rebuilt from `batch.messages.filter(m => m.value)`, including messages that had already been skipped and sent to DLQ by `validateWithSchema`; on batch handler failure those schema-invalid messages would be sent to DLQ a second time; fixed by using the `rawMessages` array built in sync with `envelopes` during the parse loop, so only messages that actually passed validation are included
+- [x] **`KafkaHealthIndicator.check()` accepts `IKafkaClient` instead of `KafkaClient`** — the parameter type was the concrete class, making the health check incompatible with mocks and any alternative `IKafkaClient` implementation; changed to `IKafkaClient<T>` which is the correct abstraction since only `checkStatus()` is called
+- [x] **`createMockKafkaClient` missing `enableGracefulShutdown`** — `IKafkaClient` declares `enableGracefulShutdown`, but the mock factory omitted it; calling `kafka.enableGracefulShutdown()` in a test would crash at runtime; the `as unknown as MockKafkaClient<T>` cast suppressed the TypeScript error; now included as a no-op mock
+- [x] **`subscribeWithRetry` fixed backoff without jitter** — all subscribe retry attempts waited a fixed `backoffMs` (default 5 s); parallel consumer starts would hit the broker simultaneously on each retry wave; changed to full jitter (`Math.random() * backoffMs`) consistent with `executeWithRetry`
+
+### 0.6.1
+
+- [x] **`txProducer` assigned only after successful connect** — `this.txProducer` is now set only after `p.connect()` resolves; previously, assigning before `await` left a disconnected producer in the field, causing the next `transaction()` call to skip the `if (!this.txProducer)` guard and throw on a dead producer; now `txProducer` stays `null` on connect failure and the next call retries the full connect flow
+- [x] **`sendToRetryTopic` calls `onMessageLost` on send failure** — if `producer.send()` to `<topic>.retry.N` throws (broker down, topic missing), `onMessageLost` is now called with the send error; previously the error was logged and the message was silently dropped (parity fix with `sendToDlq` which already called `onMessageLost` on failure)
+- [x] **`getConsumerLag` uses `Promise.all` for broker offset fetches** — `fetchTopicOffsets` calls are now issued in parallel across all topics; previously N sequential round-trips to the broker; no behavior change, latency improvement proportional to topic count
+- [x] **`IKafkaClient.getClientId` declared as method** — changed from property style (`getClientId: () => ClientId`) to method style (`getClientId(): ClientId`) for consistency with all other interface members
+- [x] **`decodeHeaders` uses last-wins for multi-value headers** — Kafka allows duplicate header keys; the previous `join(",")` produced unparseable strings for values containing commas; now takes the last element of the array, consistent with HTTP semantics
+
+### 0.6.0
+
+- [x] **Exactly-once retry routing (EOS)** — routing from retry level consumers (retry.N → retry.N+1 and retry.N → DLQ) is now wrapped in a Kafka transaction via `producer.sendOffsets({ consumer, topics })`; the produce and the consumer offset commit happen atomically, eliminating the crash-between-route-and-commit duplicate window; each retry level consumer creates its own transactional producer (`${levelGroupId}-tx`) tracked in `KafkaClient.retryTxProducers` for cleanup on `disconnect()`; if the EOS transaction fails (broker unavailable), the offset is not committed and the message is redelivered — the message stays safe in the retry chain until the broker recovers; `buildRetryTopicPayload` / `buildDlqPayload` extracted as pure payload builders for use by both the EOS path and the existing non-transactional `sendToRetryTopic` / `sendToDlq` helpers; enabled automatically when `retryTopics: true` is set — no extra configuration needed
+
+### 0.5.9
+
+- [x] **`retryTopics` for batch consumer** — `startBatchConsumer` now supports `retryTopics: true`; on handler failure, each envelope in the batch is routed individually to `<topic>.retry.1`; retry consumers call the batch handler with a single-element batch and a stub `BatchMeta` (no-op heartbeat/resolveOffset/commitOffsetsIfNecessary); same validation and companion-consumer lifecycle as the single-message path
+- [x] **`SchemaContext` in `parse()`** — `SchemaLike.parse(data, ctx?: SchemaParseContext)` now receives `{ topic, headers, version }` as a second argument on both the consume path (`validateWithSchema`) and the send path (`buildSendPayload`); fully backward-compatible — existing Zod/Valibot/ArkType validators ignore the extra argument; enables schema-registry adapters, version-aware migration, and header-driven parsing; `SchemaParseContext` exported from all entrypoints
+- [x] **Graceful shutdown with drain** — `disconnect(drainTimeoutMs?)` now waits for all in-flight `eachMessage` / `eachBatch` handlers to settle before tearing down connections; in-flight handlers are tracked via a counter incremented at the `consumer.run()` callback level; drain resolves immediately if no handlers are running, otherwise waits up to `drainTimeoutMs` (default 30 s) and logs a warning on timeout; `enableGracefulShutdown(signals?, drainTimeoutMs?)` registers SIGTERM / SIGINT handlers for non-NestJS apps; NestJS apps get drain automatically via `onModuleDestroy` → `disconnect()`
+- [x] **`onMessageLost` fired on DLQ send failure** — if `producer.send()` to `{topic}.dlq` throws (broker down, topic missing), `onMessageLost` is now called with the send error so the message is never silently dropped; `sendToDlq` accepts an optional `onMessageLost` in its deps, all call sites already supplied it
+- [x] **`isAdminConnected` reset on connect failure** — admin connect logic extracted to `ensureAdminConnected()`; the flag is explicitly set to `false` in the catch block, guaranteeing that a failed `admin.connect()` leaves the flag `false` and the next call will retry the connection rather than skipping it with a misleading error
+- [x] **Retry topic existence validated at startup** — with `retryTopics: true` and `autoCreateTopics: false`, `startConsumer` / `startBatchConsumer` now call `admin.listTopics()` before starting retry consumers and throw a clear error listing every missing `{topic}.retry.N` topic; with `autoCreateTopics: true` the check is skipped (topics are created by the existing `ensureTopic` path)
+- [x] **Schema registry conflict warning** — `registerSchema` (send path) and `buildSchemaMap` (consume path) now compare the incoming schema against the already-registered one by reference; if they differ, a `logger.warn` is emitted at startup so mismatches surface before runtime validation failures
+- [x] **`autoCommit: true` + manual batch offsets warning** — `startBatchConsumer` logs a `warn` at consumer-start time when `autoCommit` is not explicitly `false`, reminding callers that mixing autoCommit with `resolveOffset()` / `commitOffsetsIfNecessary()` causes offset conflicts
+
+### 0.5.8
+
+- [x] **OTel span activated via `context.with`** — `BeforeConsumeResult` type added to `KafkaInstrumentation.beforeConsume`; object form supports `cleanup?()` and `wrap?(fn)` alongside the legacy `() => void` form; `otelInstrumentation()` now returns `{ cleanup, wrap }` where `wrap` calls `context.with(trace.setSpan(parentCtx, span), fn)` — the consume span is set as the active span for the handler's duration, so `trace.getActiveSpan()` works inside handlers and child spans are automatically parented; multiple wraps from different instrumentations are composed (first instrumentation = outermost)
 
 ### 0.5.7
 

@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { KafkaClient } from "../client/kafka.client";
-import { topic, SchemaLike } from "../client/message/topic";
+import { topic, SchemaLike, SchemaParseContext } from "../client/message/topic";
 
 // ── Topic types ─────────────────────────────────────────────────────
 
@@ -37,6 +37,18 @@ export type TestTopics = {
   // consumer handle / lag tests
   "test.handle": { seq: number };
   "test.lag": { seq: number };
+  // instrumentation / OTel wrap tests
+  "test.otel": { value: string };
+  // batch retryTopics tests
+  "test.batch-retry-topic": { value: string };
+  "test.batch-retry-topic.retry.1": { value: string };
+  "test.batch-retry-topic.retry.2": { value: string };
+  "test.batch-retry-topic.dlq": { value: string };
+  // SchemaContext tests
+  "test.schema-ctx": { name: string };
+  "test.schema-ctx-send": { name: string };
+  // graceful shutdown tests
+  "test.graceful": { seq: number };
 };
 
 // ── Descriptors ─────────────────────────────────────────────────────
@@ -110,3 +122,4 @@ export {
   KafkaValidationError,
 } from "../client/errors";
 export type { ConsumerInterceptor } from "../client/kafka.client";
+export type { SchemaParseContext } from "../client/message/topic";

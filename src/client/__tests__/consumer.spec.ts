@@ -75,6 +75,28 @@ describe("KafkaClient — Consumer", () => {
       );
     });
 
+    it("should use last value when a header has multiple values (last-wins)", async () => {
+      const handler = jest.fn();
+      mockRun.mockImplementation(async ({ eachMessage }: any) => {
+        await eachMessage({
+          topic: "test.topic",
+          partition: 0,
+          message: {
+            value: Buffer.from(JSON.stringify({ id: "1", value: 1 })),
+            // Kafka allows multiple headers with the same key — simulate via array.
+            // Old behavior: joined to "first-corr,last-corr".
+            // New behavior: last-wins → "last-corr".
+            headers: { "x-correlation-id": ["first-corr", "last-corr"] },
+          },
+        });
+      });
+
+      await client.startConsumer(["test.topic"], handler);
+
+      const envelope = handler.mock.calls[0][0];
+      expect(envelope.correlationId).toBe("last-corr");
+    });
+
     it("should skip empty messages", async () => {
       const handler = jest.fn();
       mockRun.mockImplementation(async ({ eachMessage }: any) => {

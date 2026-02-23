@@ -55,6 +55,7 @@ export class KafkaClient<
   private readonly kafka: Kafka;
   private readonly producer: Producer;
   private txProducer: Producer | undefined;
+  private readonly retryTxProducers = new Set<Producer>();
   private readonly consumers = new Map<string, Consumer>();
   private readonly admin: Admin;
   private readonly logger: KafkaLogger;
@@ -79,6 +80,8 @@ export class KafkaClient<
   private readonly onRebalance: KafkaClientOptions["onRebalance"];
 
   private isAdminConnected = false;
+  private inFlightTotal = 0;
+  private readonly drainResolvers: Array<() => void> = [];
   public readonly clientId: ClientId;
 
   constructor(
@@ -95,6 +98,8 @@ export class KafkaClient<
         console.warn(`[KafkaClient:${clientId}] ${msg}`, ...args),
       error: (msg, ...args) =>
         console.error(`[KafkaClient:${clientId}] ${msg}`, ...args),
+      debug: (msg, ...args) =>
+        console.debug(`[KafkaClient:${clientId}] ${msg}`, ...args),
     };
     this.autoCreateTopicsEnabled = options?.autoCreateTopics ?? false;
     this.strictSchemasEnabled = options?.strictSchemas ?? true;
@@ -177,7 +182,7 @@ export class KafkaClient<
       // Two KafkaClient instances sharing the same clientId will share this id,
       // causing Kafka to fence one of the producers. Use distinct clientIds when
       // running multiple instances of the same service.
-      this.txProducer = this.kafka.producer({
+      const p = this.kafka.producer({
         kafkaJS: {
           acks: -1,
           idempotent: true,
@@ -185,7 +190,8 @@ export class KafkaClient<
           maxInFlightRequests: 1,
         },
       });
-      await this.txProducer.connect();
+      await p.connect();
+      this.txProducer = p;
     }
     const tx = await this.txProducer.transaction();
     try {
@@ -206,12 +212,15 @@ export class KafkaClient<
             },
           ]);
           await tx.send(payload);
+          this.notifyAfterSend(payload.topic, payload.messages.length);
         },
         sendBatch: async (
           topicOrDesc: any,
           messages: BatchMessageItem<any>[],
         ) => {
-          await tx.send(await this.preparePayload(topicOrDesc, messages));
+          const payload = await this.preparePayload(topicOrDesc, messages);
+          await tx.send(payload);
+          this.notifyAfterSend(payload.topic, payload.messages.length);
         },
       };
       await fn(ctx);
@@ -276,25 +285,30 @@ export class KafkaClient<
 
     await consumer.run({
       eachMessage: (payload) =>
-        handleEachMessage(
-          payload,
-          {
-            schemaMap,
-            handleMessage,
-            interceptors,
-            dlq,
-            retry,
-            retryTopics: options.retryTopics,
-            timeoutMs,
-            wrapWithTimeout: this.wrapWithTimeoutWarning.bind(this),
-          },
-          deps,
+        this.trackInFlight(() =>
+          handleEachMessage(
+            payload,
+            {
+              schemaMap,
+              handleMessage,
+              interceptors,
+              dlq,
+              retry,
+              retryTopics: options.retryTopics,
+              timeoutMs,
+              wrapWithTimeout: this.wrapWithTimeoutWarning.bind(this),
+            },
+            deps,
+          ),
         ),
     });
 
     this.runningConsumers.set(gid, "eachMessage");
 
     if (options.retryTopics && retry) {
+      if (!this.autoCreateTopicsEnabled) {
+        await this.validateRetryTopicsExist(topicNames, retry.maxRetries);
+      }
       const companions = await startRetryTopicConsumers(
         topicNames,
         gid,
@@ -341,7 +355,20 @@ export class KafkaClient<
     ) => Promise<void>,
     options: ConsumerOptions<T> = {},
   ): Promise<ConsumerHandle> {
-    const { consumer, schemaMap, gid, dlq, interceptors, retry } =
+    if (options.retryTopics && !options.retry) {
+      throw new Error(
+        "retryTopics requires retry to be configured — set retry.maxRetries to enable the retry topic chain",
+      );
+    }
+
+    if (options.autoCommit !== false) {
+      this.logger.debug?.(
+        `startBatchConsumer: autoCommit is enabled (default true). ` +
+          `If your handler calls resolveOffset() or commitOffsetsIfNecessary(), set autoCommit: false to avoid offset conflicts.`,
+      );
+    }
+
+    const { consumer, schemaMap, topicNames, gid, dlq, interceptors, retry } =
       await this.setupConsumer(topics, "eachBatch", options);
 
     const deps = this.messageDeps;
@@ -349,22 +376,56 @@ export class KafkaClient<
 
     await consumer.run({
       eachBatch: (payload) =>
-        handleEachBatch(
-          payload,
-          {
-            schemaMap,
-            handleBatch,
-            interceptors,
-            dlq,
-            retry,
-            timeoutMs,
-            wrapWithTimeout: this.wrapWithTimeoutWarning.bind(this),
-          },
-          deps,
+        this.trackInFlight(() =>
+          handleEachBatch(
+            payload,
+            {
+              schemaMap,
+              handleBatch,
+              interceptors,
+              dlq,
+              retry,
+              retryTopics: options.retryTopics,
+              timeoutMs,
+              wrapWithTimeout: this.wrapWithTimeoutWarning.bind(this),
+            },
+            deps,
+          ),
         ),
     });
 
     this.runningConsumers.set(gid, "eachBatch");
+
+    if (options.retryTopics && retry) {
+      if (!this.autoCreateTopicsEnabled) {
+        await this.validateRetryTopicsExist(topicNames, retry.maxRetries);
+      }
+      // Wrap batch handler as single-message handler for retry consumers.
+      // Retry consumers use eachMessage (not eachBatch), so real batch context is unavailable.
+      // highWatermark is set to env.offset as a stub — it is the current message's offset,
+      // not the partition's high-watermark. Handlers relying on highWatermark for lag
+      // calculation will see an incorrect value in the retry path.
+      const handleMessageForRetry = (env: EventEnvelope<any>) =>
+        handleBatch([env], {
+          partition: env.partition,
+          highWatermark: env.offset,
+          heartbeat: async () => {},
+          resolveOffset: () => {},
+          commitOffsetsIfNecessary: async () => {},
+        });
+      const companions = await startRetryTopicConsumers(
+        topicNames,
+        gid,
+        handleMessageForRetry,
+        retry,
+        dlq,
+        interceptors,
+        schemaMap,
+        this.retryTopicDeps,
+        options.retryTopicAssignmentTimeoutMs,
+      );
+      this.companionGroupIds.set(gid, companions);
+    }
 
     return { groupId: gid, stop: () => this.stopConsumer(gid) };
   }
@@ -421,16 +482,19 @@ export class KafkaClient<
     groupId?: string,
   ): Promise<Array<{ topic: string; partition: number; lag: number }>> {
     const gid = groupId ?? this.defaultGroupId;
-    if (!this.isAdminConnected) {
-      await this.admin.connect();
-      this.isAdminConnected = true;
-    }
+    await this.ensureAdminConnected();
 
     const committedByTopic = await this.admin.fetchOffsets({ groupId: gid });
+
+    const brokerOffsetsAll = await Promise.all(
+      committedByTopic.map(({ topic }) => this.admin.fetchTopicOffsets(topic)),
+    );
+
     const result: Array<{ topic: string; partition: number; lag: number }> = [];
 
-    for (const { topic, partitions } of committedByTopic) {
-      const brokerOffsets = await this.admin.fetchTopicOffsets(topic);
+    for (let i = 0; i < committedByTopic.length; i++) {
+      const { topic, partitions } = committedByTopic[i];
+      const brokerOffsets = brokerOffsetsAll[i];
 
       for (const { partition, offset } of partitions) {
         const broker = brokerOffsets.find((o) => o.partition === partition);
@@ -450,10 +514,7 @@ export class KafkaClient<
   /** Check broker connectivity. Never throws — returns a discriminated union. */
   public async checkStatus(): Promise<import("../types").KafkaHealthResult> {
     try {
-      if (!this.isAdminConnected) {
-        await this.admin.connect();
-        this.isAdminConnected = true;
-      }
+      await this.ensureAdminConnected();
       const topics = await this.admin.listTopics();
       return { status: "up", clientId: this.clientId, topics };
     } catch (error) {
@@ -470,12 +531,17 @@ export class KafkaClient<
   }
 
   /** Gracefully disconnect producer, all consumers, and admin. */
-  public async disconnect(): Promise<void> {
+  public async disconnect(drainTimeoutMs = 30_000): Promise<void> {
+    await this.waitForDrain(drainTimeoutMs);
     const tasks: Promise<void>[] = [this.producer.disconnect()];
     if (this.txProducer) {
       tasks.push(this.txProducer.disconnect());
       this.txProducer = undefined;
     }
+    for (const p of this.retryTxProducers) {
+      tasks.push(p.disconnect());
+    }
+    this.retryTxProducers.clear();
     for (const consumer of this.consumers.values()) {
       tasks.push(consumer.disconnect());
     }
@@ -491,13 +557,70 @@ export class KafkaClient<
     this.logger.log("All connections closed");
   }
 
+  // ── Graceful shutdown ────────────────────────────────────────────
+
+  /**
+   * Register SIGTERM / SIGINT handlers that drain in-flight messages before
+   * disconnecting. Call this once after constructing the client in non-NestJS apps.
+   * NestJS apps get drain for free via `onModuleDestroy` → `disconnect()`.
+   */
+  public enableGracefulShutdown(
+    signals: NodeJS.Signals[] = ["SIGTERM", "SIGINT"],
+    drainTimeoutMs = 30_000,
+  ): void {
+    const handler = () => {
+      this.logger.log(
+        "Shutdown signal received — draining in-flight handlers...",
+      );
+      this.disconnect(drainTimeoutMs).catch((err) =>
+        this.logger.error(
+          "Error during graceful shutdown:",
+          toError(err).message,
+        ),
+      );
+    };
+    for (const signal of signals) {
+      process.once(signal, handler);
+    }
+  }
+
+  private trackInFlight<R>(fn: () => Promise<R>): Promise<R> {
+    this.inFlightTotal++;
+    return fn().finally(() => {
+      this.inFlightTotal--;
+      if (this.inFlightTotal === 0) {
+        this.drainResolvers.splice(0).forEach((r) => r());
+      }
+    });
+  }
+
+  private waitForDrain(timeoutMs: number): Promise<void> {
+    if (this.inFlightTotal === 0) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      let handle: ReturnType<typeof setTimeout>;
+      const onDrain = () => {
+        clearTimeout(handle);
+        resolve();
+      };
+      this.drainResolvers.push(onDrain);
+      handle = setTimeout(() => {
+        const idx = this.drainResolvers.indexOf(onDrain);
+        if (idx !== -1) this.drainResolvers.splice(idx, 1);
+        this.logger.warn(
+          `Drain timed out after ${timeoutMs}ms — ${this.inFlightTotal} handler(s) still in flight`,
+        );
+        resolve();
+      }, timeoutMs);
+    });
+  }
+
   // ── Private helpers ──────────────────────────────────────────────
 
   private async preparePayload(
     topicOrDesc: any,
     messages: Array<BatchMessageItem<any>>,
   ) {
-    registerSchema(topicOrDesc, this.schemaRegistry);
+    registerSchema(topicOrDesc, this.schemaRegistry, this.logger);
     const payload = await buildSendPayload(
       topicOrDesc,
       messages,
@@ -537,12 +660,89 @@ export class KafkaClient<
     return promise;
   }
 
-  private async ensureTopic(topic: string): Promise<void> {
-    if (!this.autoCreateTopicsEnabled || this.ensuredTopics.has(topic)) return;
-    if (!this.isAdminConnected) {
+  /**
+   * When `retryTopics: true` and `autoCreateTopics: false`, verify that every
+   * `<topic>.retry.<level>` topic already exists. Throws a clear error at startup
+   * rather than silently discovering missing topics on the first handler failure.
+   */
+  private async validateRetryTopicsExist(
+    topicNames: string[],
+    maxRetries: number,
+  ): Promise<void> {
+    await this.ensureAdminConnected();
+    const existing = new Set(await this.admin.listTopics());
+    const missing: string[] = [];
+    for (const t of topicNames) {
+      for (let level = 1; level <= maxRetries; level++) {
+        const retryTopic = `${t}.retry.${level}`;
+        if (!existing.has(retryTopic)) missing.push(retryTopic);
+      }
+    }
+    if (missing.length > 0) {
+      throw new Error(
+        `retryTopics: true but the following retry topics do not exist: ${missing.join(", ")}. ` +
+          `Create them manually or set autoCreateTopics: true.`,
+      );
+    }
+  }
+
+  /**
+   * When `autoCreateTopics` is disabled, verify that `<topic>.dlq` exists for every
+   * consumed topic. Throws a clear error at startup rather than silently discovering
+   * missing DLQ topics on the first handler failure.
+   */
+  private async validateDlqTopicsExist(topicNames: string[]): Promise<void> {
+    await this.ensureAdminConnected();
+    const existing = new Set(await this.admin.listTopics());
+    const missing = topicNames
+      .filter((t) => !existing.has(`${t}.dlq`))
+      .map((t) => `${t}.dlq`);
+    if (missing.length > 0) {
+      throw new Error(
+        `dlq: true but the following DLQ topics do not exist: ${missing.join(", ")}. ` +
+          `Create them manually or set autoCreateTopics: true.`,
+      );
+    }
+  }
+
+  /**
+   * Connect the admin client if not already connected.
+   * The flag is only set to `true` after a successful connect — if `admin.connect()`
+   * throws the flag remains `false` so the next call will retry the connection.
+   */
+  private async ensureAdminConnected(): Promise<void> {
+    if (this.isAdminConnected) return;
+    try {
       await this.admin.connect();
       this.isAdminConnected = true;
+    } catch (err) {
+      this.isAdminConnected = false;
+      throw err;
     }
+  }
+
+  /**
+   * Create and connect a transactional producer for EOS retry routing.
+   * Each retry level consumer gets its own producer with a unique `transactionalId`
+   * so Kafka can fence stale producers on restart without affecting other levels.
+   */
+  private async createRetryTxProducer(transactionalId: string): Promise<Producer> {
+    const p = this.kafka.producer({
+      kafkaJS: {
+        acks: -1,
+        idempotent: true,
+        transactionalId,
+        maxInFlightRequests: 1,
+      },
+    });
+    await p.connect();
+    this.retryTxProducers.add(p);
+    return p;
+  }
+
+  private async ensureTopic(topic: string): Promise<void> {
+    if (!this.autoCreateTopicsEnabled || this.ensuredTopics.has(topic)) return;
+    await this.ensureAdminConnected();
     await this.admin.createTopics({
       topics: [{ topic, numPartitions: this.numPartitions }],
     });
@@ -584,6 +784,7 @@ export class KafkaClient<
       topics,
       this.schemaRegistry,
       optionSchemas,
+      this.logger,
     );
 
     const topicNames = (topics as any[]).map((t: any) => resolveTopicName(t));
@@ -595,6 +796,9 @@ export class KafkaClient<
     if (dlq) {
       for (const t of topicNames) {
         await this.ensureTopic(`${t}.dlq`);
+      }
+      if (!this.autoCreateTopicsEnabled) {
+        await this.validateDlqTopicsExist(topicNames);
       }
     }
 
@@ -620,6 +824,7 @@ export class KafkaClient<
       schemaRegistry: this.schemaRegistry,
       strictSchemasEnabled: this.strictSchemasEnabled,
       instrumentation: this.instrumentation,
+      logger: this.logger,
     };
   }
 
@@ -652,6 +857,7 @@ export class KafkaClient<
       getOrCreateConsumer: (gid: string, fb: boolean, ac: boolean) =>
         getOrCreateConsumer(gid, fb, ac, this.consumerOpsDeps),
       runningConsumers: this.runningConsumers,
+      createRetryTxProducer: (txId: string) => this.createRetryTxProducer(txId),
     };
   }
 }

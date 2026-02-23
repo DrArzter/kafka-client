@@ -34,6 +34,18 @@ const ALL_TOPICS = [
   // consumer handle / lag tests
   "test.handle",
   "test.lag",
+  // instrumentation / OTel wrap tests
+  "test.otel",
+  // batch retryTopics tests
+  "test.batch-retry-topic",
+  "test.batch-retry-topic.retry.1",
+  "test.batch-retry-topic.retry.2",
+  "test.batch-retry-topic.dlq",
+  // SchemaContext tests
+  "test.schema-ctx",
+  "test.schema-ctx-send",
+  // graceful shutdown tests
+  "test.graceful",
 ];
 
 // Topics that need more than 1 partition (for rebalance tests)
