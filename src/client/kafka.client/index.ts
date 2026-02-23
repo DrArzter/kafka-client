@@ -55,7 +55,8 @@ export class KafkaClient<
   private readonly kafka: Kafka;
   private readonly producer: Producer;
   private txProducer: Producer | undefined;
-  private readonly retryTxProducers = new Set<Producer>();
+  /** Maps transactionalId → Producer for each active retry level consumer. */
+  private readonly retryTxProducers = new Map<string, Producer>();
   private readonly consumers = new Map<string, Consumer>();
   private readonly admin: Admin;
   private readonly logger: KafkaLogger;
@@ -447,7 +448,7 @@ export class KafkaClient<
       this.consumerCreationOptions.delete(groupId);
       this.logger.log(`Consumer disconnected: group "${groupId}"`);
 
-      // Stop all companion retry level consumers started for this group
+      // Stop all companion retry level consumers and their tx producers
       const companions = this.companionGroupIds.get(groupId) ?? [];
       for (const cGroupId of companions) {
         const cConsumer = this.consumers.get(cGroupId);
@@ -458,17 +459,30 @@ export class KafkaClient<
           this.consumerCreationOptions.delete(cGroupId);
           this.logger.log(`Retry consumer disconnected: group "${cGroupId}"`);
         }
+        // Disconnect the EOS tx producer for this retry level
+        const txId = `${cGroupId}-tx`;
+        const txProducer = this.retryTxProducers.get(txId);
+        if (txProducer) {
+          await txProducer.disconnect().catch(() => {});
+          this.retryTxProducers.delete(txId);
+        }
       }
       this.companionGroupIds.delete(groupId);
     } else {
-      const tasks = Array.from(this.consumers.values()).map((c) =>
-        c.disconnect().catch(() => {}),
-      );
+      const tasks: Promise<void>[] = [
+        ...Array.from(this.consumers.values()).map((c) =>
+          c.disconnect().catch(() => {}),
+        ),
+        ...Array.from(this.retryTxProducers.values()).map((p) =>
+          p.disconnect().catch(() => {}),
+        ),
+      ];
       await Promise.allSettled(tasks);
       this.consumers.clear();
       this.runningConsumers.clear();
       this.consumerCreationOptions.clear();
       this.companionGroupIds.clear();
+      this.retryTxProducers.clear();
       this.logger.log("All consumers disconnected");
     }
   }
@@ -477,6 +491,12 @@ export class KafkaClient<
    * Query consumer group lag per partition.
    * Lag = broker high-watermark − last committed offset.
    * A committed offset of -1 (nothing committed yet) counts as full lag.
+   *
+   * Returns an empty array when the consumer group has never committed any
+   * offsets (freshly created group, `autoCommit: false` with no manual commits,
+   * or group not yet assigned). This is a Kafka protocol limitation:
+   * `fetchOffsets` only returns data for topic-partitions that have at least one
+   * committed offset. Use `checkStatus()` to verify broker connectivity in that case.
    */
   public async getConsumerLag(
     groupId?: string,
@@ -538,7 +558,7 @@ export class KafkaClient<
       tasks.push(this.txProducer.disconnect());
       this.txProducer = undefined;
     }
-    for (const p of this.retryTxProducers) {
+    for (const p of this.retryTxProducers.values()) {
       tasks.push(p.disconnect());
     }
     this.retryTxProducers.clear();
@@ -558,6 +578,15 @@ export class KafkaClient<
   }
 
   // ── Graceful shutdown ────────────────────────────────────────────
+
+  /**
+   * NestJS lifecycle hook — called automatically when the host module is torn down.
+   * Drains in-flight handlers and disconnects all producers, consumers, and admin.
+   * `KafkaModule` relies on this method; no separate destroy provider is needed.
+   */
+  public async onModuleDestroy(): Promise<void> {
+    await this.disconnect();
+  }
 
   /**
    * Register SIGTERM / SIGINT handlers that drain in-flight messages before
@@ -736,7 +765,7 @@ export class KafkaClient<
       },
     });
     await p.connect();
-    this.retryTxProducers.add(p);
+    this.retryTxProducers.set(transactionalId, p);
     return p;
   }
 
@@ -771,6 +800,14 @@ export class KafkaClient<
       throw new Error(
         `Cannot use ${mode} on consumer group "${gid}" — it is already running with ${oppositeMode}. ` +
           `Use a different groupId for this consumer.`,
+      );
+    }
+    if (existingMode === mode) {
+      const callerName =
+        mode === "eachMessage" ? "startConsumer" : "startBatchConsumer";
+      throw new Error(
+        `${callerName}("${gid}") called twice — this group is already consuming. ` +
+          `Call stopConsumer("${gid}") first or pass a different groupId.`,
       );
     }
 

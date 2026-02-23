@@ -16,6 +16,14 @@
 
 ## Done
 
+### 0.6.4
+
+- [x] **`retryTxProducers` memory leak on `stopConsumer`** — the EOS transactional producers created per retry level were tracked in a `Set<Producer>` and only disconnected during full `disconnect()`; calling `stopConsumer(groupId)` left them alive, accumulating on repeated start/stop cycles; changed to `Map<string, Producer>` keyed by transactionalId so each producer can be looked up and disconnected when its companion consumer is stopped
+- [x] **`${token}_DESTROY` pattern replaced by `onModuleDestroy()` on `KafkaClient`** — `KafkaModule` used a separate `${token}_DESTROY` factory provider to hook the NestJS lifecycle; this created a non-standard invisible provider that confused module introspection; `KafkaClient` now exposes `onModuleDestroy()` directly, which NestJS calls on any factory-provided value that has the method; `buildDestroyProvider` removed
+- [x] **Duplicate `startConsumer` / `startBatchConsumer` on same groupId now throws** — calling `startConsumer` twice with the same groupId would invoke `consumer.run()` on an already-running consumer, which is invalid in librdkafka; the existing guard only caught cross-mode conflicts (eachMessage vs eachBatch); a same-mode duplicate now throws `"startConsumer("gid") called twice"` so the mistake is caught at startup rather than producing undefined behavior
+- [x] **`getConsumerLag` empty-result behavior documented** — `fetchOffsets` returns an empty array for groups that have never committed; the JSDoc now explains this is a Kafka protocol limitation (not a bug) and points users to `checkStatus()` for connectivity verification
+- [x] **`Math.floor` inconsistency in in-process retry backoff** — the retry-topic and `subscribeWithRetry` paths all used `Math.floor(Math.random() * cap)` for integer-millisecond delays, but the in-process retry `sleep()` used `Math.random() * cap` (float); aligned to `Math.floor` throughout
+
 ### 0.6.3
 
 - [x] **`transaction()` missing `afterSend` notification** — `sendMessage` and `sendBatch` call `instrumentation.afterSend` after each send, but the `send`/`sendBatch` closures inside `transaction()` did not; `afterSend` was never fired for messages sent within a transaction; fixed by extracting `payload` into a variable and calling `notifyAfterSend` after each `tx.send()`

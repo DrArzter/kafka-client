@@ -469,7 +469,7 @@ export async function executeWithRetry<T extends TopicMapConstraint<T>>(
     } else {
       // Exponential backoff with full jitter to avoid thundering herd
       const cap = Math.min(backoffMs * 2 ** (attempt - 1), maxBackoffMs);
-      await sleep(Math.random() * cap);
+      await sleep(Math.floor(Math.random() * cap));
     }
   }
 }

@@ -71,11 +71,7 @@ export class KafkaModule {
       global: options.isGlobal ?? false,
       module: KafkaModule,
       imports: [DiscoveryModule],
-      providers: [
-        kafkaClientProvider,
-        KafkaModule.buildDestroyProvider(token),
-        KafkaExplorer,
-      ],
+      providers: [kafkaClientProvider, KafkaExplorer],
       exports: [kafkaClientProvider],
     };
   }
@@ -97,11 +93,7 @@ export class KafkaModule {
       global: asyncOptions.isGlobal ?? false,
       module: KafkaModule,
       imports: [...(asyncOptions.imports || []), DiscoveryModule],
-      providers: [
-        kafkaClientProvider,
-        KafkaModule.buildDestroyProvider(token),
-        KafkaExplorer,
-      ],
+      providers: [kafkaClientProvider, KafkaExplorer],
       exports: [kafkaClientProvider],
     };
   }
@@ -127,15 +119,4 @@ export class KafkaModule {
     return client;
   }
 
-  private static buildDestroyProvider<T extends TopicMapConstraint<T>>(
-    token: string,
-  ): Provider {
-    return {
-      provide: `${token}_DESTROY`,
-      useFactory: (client: KafkaClient<T>) => ({
-        onModuleDestroy: () => client.disconnect(),
-      }),
-      inject: [token],
-    };
-  }
 }

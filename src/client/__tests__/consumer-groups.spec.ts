@@ -2,8 +2,10 @@ import {
   TestTopicMap,
   createClient,
   mockConsumer,
+  mockDisconnect,
   mockSubscribe,
   mockRun,
+  mockListTopics,
   KafkaClient,
 } from "./helpers";
 
@@ -39,20 +41,14 @@ describe("KafkaClient — Consumer Groups", () => {
       });
     });
 
-    it("should reuse consumer for same groupId", async () => {
-      const handler = jest.fn();
-
-      await client.startConsumer(["test.topic"], handler, {
-        groupId: "group-a",
-      });
-      await client.startConsumer(["test.other"], handler, {
+    it("should throw when startConsumer is called twice with the same groupId", async () => {
+      await client.startConsumer(["test.topic"], jest.fn(), {
         groupId: "group-a",
       });
 
-      const kafkaInstance = (require("@confluentinc/kafka-javascript") as any)
-        .KafkaJS.Kafka.mock.results[0].value;
-      // Should only create one consumer for group-a
-      expect(kafkaInstance.consumer).toHaveBeenCalledTimes(1);
+      await expect(
+        client.startConsumer(["test.other"], jest.fn(), { groupId: "group-a" }),
+      ).rejects.toThrow('startConsumer("group-a") called twice');
     });
 
     it("should use default groupId when none specified", async () => {
@@ -120,6 +116,18 @@ describe("KafkaClient — Consumer Groups", () => {
       ).rejects.toThrow(
         'Cannot use eachBatch on consumer group "shared-group"',
       );
+    });
+
+    it("should throw when startBatchConsumer is called twice with the same groupId", async () => {
+      await client.startBatchConsumer(["test.topic"], jest.fn(), {
+        groupId: "shared-group",
+      });
+
+      await expect(
+        client.startBatchConsumer(["test.other"], jest.fn(), {
+          groupId: "shared-group",
+        }),
+      ).rejects.toThrow('startBatchConsumer("shared-group") called twice');
     });
 
     it("should throw when eachMessage is used after eachBatch on same groupId", async () => {
@@ -198,6 +206,44 @@ describe("KafkaClient — Consumer Groups", () => {
       });
 
       expect(mockSubscribe).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("retryTxProducer lifecycle", () => {
+    it("should disconnect retryTxProducers when stopConsumer(groupId) is called", async () => {
+      mockListTopics.mockResolvedValueOnce([
+        "test.topic",
+        "test.topic.retry.1",
+        "test.topic.retry.2",
+      ]);
+      const handle = await client.startConsumer(["test.topic"], jest.fn(), {
+        retry: { maxRetries: 2, backoffMs: 1 },
+        retryTopics: true,
+        retryTopicAssignmentTimeoutMs: 0,
+      });
+
+      mockDisconnect.mockClear();
+      await handle.stop();
+
+      // One disconnect per retry level tx producer (retry.1 and retry.2)
+      expect(mockDisconnect).toHaveBeenCalledTimes(2);
+    });
+
+    it("should disconnect retryTxProducers when stopConsumer() (all) is called", async () => {
+      mockListTopics.mockResolvedValueOnce([
+        "test.topic",
+        "test.topic.retry.1",
+      ]);
+      await client.startConsumer(["test.topic"], jest.fn(), {
+        retry: { maxRetries: 1, backoffMs: 1 },
+        retryTopics: true,
+        retryTopicAssignmentTimeoutMs: 0,
+      });
+
+      mockDisconnect.mockClear();
+      await client.stopConsumer(); // no groupId — stop all
+
+      expect(mockDisconnect).toHaveBeenCalledTimes(1);
     });
   });
 });

@@ -441,11 +441,14 @@ await kafka.startConsumer(['orders'], auditHandler, { groupId: 'orders-audit' })
 async auditOrders(envelope) { ... }
 ```
 
-**Important:** You cannot mix `eachMessage` and `eachBatch` consumers on the same `groupId`. The library throws a clear error if you try:
+**Important:** You cannot mix `eachMessage` and `eachBatch` consumers on the same `groupId`, and you cannot call `startConsumer` (or `startBatchConsumer`) twice on the same `groupId` without stopping it first. The library throws a clear error in both cases:
 
 ```text
 Cannot use eachBatch on consumer group "my-group" — it is already running with eachMessage.
 Use a different groupId for this consumer.
+
+startConsumer("my-group") called twice — this group is already consuming.
+Call stopConsumer("my-group") first or pass a different groupId.
 ```
 
 ### Named clients
@@ -583,7 +586,7 @@ await this.kafka.startBatchConsumer(
 );
 ```
 
-> **Note:** If your handler calls `resolveOffset()` or `commitOffsetsIfNecessary()` without setting `autoCommit: false`, a `warn` is logged at consumer-start time — mixing autoCommit with manual offset control causes offset conflicts. Set `autoCommit: false` to suppress the warning and take full control of offset management.
+> **Note:** If your handler calls `resolveOffset()` or `commitOffsetsIfNecessary()` without setting `autoCommit: false`, a `debug` message is logged at consumer-start time — mixing autoCommit with manual offset control causes offset conflicts. Set `autoCommit: false` to suppress the message and take full control of offset management.
 
 With `@SubscribeTo()`:
 

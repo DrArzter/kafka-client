@@ -182,6 +182,19 @@ describe("KafkaClient — Producer", () => {
     });
   });
 
+  describe("onModuleDestroy", () => {
+    it("should call disconnect when onModuleDestroy is called", async () => {
+      const disconnectSpy = jest
+        .spyOn(client, "disconnect")
+        .mockResolvedValue(undefined);
+
+      await client.onModuleDestroy();
+
+      expect(disconnectSpy).toHaveBeenCalledTimes(1);
+      disconnectSpy.mockRestore();
+    });
+  });
+
   describe("instrumentation — afterSend in transaction", () => {
     it("should call afterSend for each tx.send call", async () => {
       const afterSend = jest.fn();

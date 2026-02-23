@@ -4,6 +4,7 @@ import { KafkaClient, TTopicMessageMap } from "../kafka.client";
 import {
   mockSend,
   mockConnect,
+  mockDisconnect,
   mockConsumer,
   mockSubscribe,
   mockRun,
@@ -51,6 +52,7 @@ export function createClient() {
 export {
   mockSend,
   mockConnect,
+  mockDisconnect,
   mockConsumer,
   mockSubscribe,
   mockRun,
