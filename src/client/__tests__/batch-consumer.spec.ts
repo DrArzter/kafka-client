@@ -366,8 +366,12 @@ describe("KafkaClient — Batch Consumer", () => {
       expect.objectContaining({
         topic: "test.topic.retry.1",
         messages: [
-          expect.objectContaining({ headers: expect.objectContaining({ "x-correlation-id": "corr-A" }) }),
-          expect.objectContaining({ headers: expect.objectContaining({ "x-correlation-id": "corr-B" }) }),
+          expect.objectContaining({
+            headers: expect.objectContaining({ "x-correlation-id": "corr-A" }),
+          }),
+          expect.objectContaining({
+            headers: expect.objectContaining({ "x-correlation-id": "corr-B" }),
+          }),
         ],
       }),
     );

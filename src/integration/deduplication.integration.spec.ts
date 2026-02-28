@@ -158,8 +158,9 @@ describe("Integration — Deduplication (Lamport Clock)", () => {
 
     const { messages: freshMessages, promise: freshPromise } =
       waitForMessages<TestTopics["test.dedup"]>(3);
-    const { messages: dupMessages, promise: dupPromise } =
-      waitForMessages<TestTopics["test.dedup.duplicates"]>(3, 20_000);
+    const { messages: dupMessages, promise: dupPromise } = waitForMessages<
+      TestTopics["test.dedup.duplicates"]
+    >(3, 20_000);
 
     await consumerClient.startConsumer(
       ["test.dedup"],
@@ -226,12 +227,16 @@ describe("Integration — Deduplication (Lamport Clock)", () => {
     await dlqWatcher.connectProducer();
 
     const received: string[] = [];
-    const dlqPayloads: Array<{ value: string; headers: Record<string, string> }> = [];
+    const dlqPayloads: Array<{
+      value: string;
+      headers: Record<string, string>;
+    }> = [];
 
     const { messages: freshMessages, promise: freshPromise } =
       waitForMessages<TestTopics["test.dedup"]>(2);
-    const { messages: dlqMessages, promise: dlqPromise } =
-      waitForMessages<TestTopics["test.dedup.dlq"]>(2, 20_000);
+    const { messages: dlqMessages, promise: dlqPromise } = waitForMessages<
+      TestTopics["test.dedup.dlq"]
+    >(2, 20_000);
 
     await consumerClient.startConsumer(
       ["test.dedup"],

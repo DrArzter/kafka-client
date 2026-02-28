@@ -57,7 +57,10 @@ describe("KafkaClient — Schema Validation", () => {
     });
 
     it("should skip validation when descriptor has no schema", async () => {
-      const NoSchema = topic("test.topic").type<{ id: string; value: number }>();
+      const NoSchema = topic("test.topic").type<{
+        id: string;
+        value: number;
+      }>();
       await client.sendMessage(NoSchema as any, invalidMessage as any);
       expect(mockSend).toHaveBeenCalled();
     });
@@ -198,7 +201,10 @@ describe("KafkaClient — Schema Validation", () => {
 
     it("should pass through without schema as envelope", async () => {
       const handler = jest.fn();
-      const NoSchema = topic("test.topic").type<{ id: string; value: number }>();
+      const NoSchema = topic("test.topic").type<{
+        id: string;
+        value: number;
+      }>();
 
       mockRun.mockImplementation(async ({ eachMessage }: any) => {
         await eachMessage({

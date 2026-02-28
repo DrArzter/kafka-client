@@ -168,7 +168,11 @@ describe("Integration — SchemaParseContext", () => {
       { fromBeginning: true },
     );
 
-    await client.sendMessage(CtxTopic as any, { name: "Bob" }, { schemaVersion: 3 });
+    await client.sendMessage(
+      CtxTopic as any,
+      { name: "Bob" },
+      { schemaVersion: 3 },
+    );
     await promise;
 
     expect(messages).toHaveLength(1);
@@ -197,7 +201,11 @@ describe("Integration — SchemaParseContext", () => {
     const client = createClient("schema-ctx-send");
     await client.connectProducer();
 
-    await client.sendMessage(CtxSendTopic as any, { name: "Alice" }, { schemaVersion: 7 });
+    await client.sendMessage(
+      CtxSendTopic as any,
+      { name: "Alice" },
+      { schemaVersion: 7 },
+    );
 
     // Send-path ctx captured
     expect(capturedCtxes.length).toBeGreaterThanOrEqual(1);

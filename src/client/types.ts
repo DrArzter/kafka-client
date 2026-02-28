@@ -62,8 +62,13 @@ export interface BatchMessageItem<V> {
 export interface BatchMeta {
   /** Partition number for this batch. */
   partition: number;
-  /** Highest offset available on the broker for this partition. */
-  highWatermark: string;
+  /**
+   * Highest offset available on the broker for this partition.
+   * `null` when the message is being replayed via a retry topic consumer —
+   * in that path the broker high-watermark is not accessible without an admin
+   * call. Do not use this for lag calculation in the retry path.
+   */
+  highWatermark: string | null;
   /** Send a heartbeat to the broker to prevent session timeout. */
   heartbeat(): Promise<void>;
   /** Mark an offset as processed (for manual offset management). */
@@ -207,6 +212,33 @@ export type BeforeConsumeResult =
   | { cleanup?(): void; wrap?(fn: () => Promise<void>): Promise<void> };
 
 /**
+ * Reason a message was sent to the DLQ.
+ * - `'handler-error'` — the consumer handler threw after all retry attempts.
+ * - `'validation-error'` — schema validation failed before the handler ran.
+ * - `'lamport-clock-duplicate'` — message was identified as a Lamport-clock duplicate
+ *   and `deduplication.strategy` is `'dlq'`.
+ */
+export type DlqReason =
+  | "handler-error"
+  | "validation-error"
+  | "lamport-clock-duplicate";
+
+/**
+ * Snapshot of internal event counters accumulated since client creation
+ * (or since the last `resetMetrics()` call).
+ */
+export interface KafkaMetrics {
+  /** Total messages successfully processed by the consumer handler. */
+  processedCount: number;
+  /** Total retry attempts routed — covers both in-process retries and retry-topic hops. */
+  retryCount: number;
+  /** Total messages sent to a DLQ topic. */
+  dlqCount: number;
+  /** Total duplicate messages detected by the Lamport clock. */
+  dedupCount: number;
+}
+
+/**
  * Client-wide instrumentation hooks for both send and consume paths.
  * Use this for cross-cutting concerns like tracing and metrics.
  *
@@ -226,6 +258,32 @@ export interface KafkaInstrumentation {
   beforeConsume?(envelope: EventEnvelope<any>): BeforeConsumeResult | void;
   /** Called when the consumer handler throws. */
   onConsumeError?(envelope: EventEnvelope<any>, error: Error): void;
+  /**
+   * Called when a message is queued for retry.
+   * Fires for both in-process retries (before the backoff sleep) and
+   * retry-topic routing (EOS and non-EOS paths).
+   */
+  onRetry?(
+    envelope: EventEnvelope<any>,
+    attempt: number,
+    maxRetries: number,
+  ): void;
+  /** Called when a message is routed to a DLQ topic. */
+  onDlq?(envelope: EventEnvelope<any>, reason: DlqReason): void;
+  /**
+   * Called when a duplicate message is detected via the Lamport clock.
+   * Fires regardless of the configured `deduplication.strategy`.
+   */
+  onDuplicate?(
+    envelope: EventEnvelope<any>,
+    strategy: "drop" | "dlq" | "topic",
+  ): void;
+  /**
+   * Called after the consumer handler successfully processes a message.
+   * Use this as a success counter for error-rate calculations.
+   * Fires for both single-message and batch consumers (once per envelope).
+   */
+  onMessage?(envelope: EventEnvelope<any>): void;
 }
 
 /** Context passed to the `transaction()` callback with type-safe send methods. */
@@ -335,6 +393,15 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
   getClientId(): ClientId;
 
   /**
+   * Return a snapshot of internal event counters (retry / DLQ / dedup).
+   * Counters accumulate since client creation or the last `resetMetrics()` call.
+   */
+  getMetrics(): Readonly<KafkaMetrics>;
+
+  /** Reset all internal event counters to zero. */
+  resetMetrics(): void;
+
+  /**
    * Drain in-flight handlers, then disconnect all producers, consumers, and admin.
    * @param drainTimeoutMs Max ms to wait for in-flight handlers (default 30 000).
    */
@@ -391,6 +458,17 @@ export interface KafkaClientOptions {
   numPartitions?: number;
   /** Client-wide instrumentation hooks (e.g. OTel). Applied to both send and consume paths. */
   instrumentation?: KafkaInstrumentation[];
+  /**
+   * Override the transactional producer ID used by `transaction()`.
+   * Defaults to `${clientId}-tx`.
+   *
+   * The transactional ID must be **unique per producer instance** across the
+   * entire Kafka cluster. Two `KafkaClient` instances with the same ID will
+   * cause Kafka to fence one of the producers — the fenced producer will fail
+   * on the next `transaction()` call. Set a distinct value per replica when
+   * running multiple instances of the same service.
+   */
+  transactionalId?: string;
   /**
    * Called when a message is dropped without being sent to a DLQ.
    * Fires when the handler throws after all retries, or schema validation fails — and `dlq` is not enabled.

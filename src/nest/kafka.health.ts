@@ -1,5 +1,9 @@
 import { Injectable } from "@nestjs/common";
-import type { IKafkaClient, KafkaHealthResult, TopicMapConstraint } from "../client/types";
+import type {
+  IKafkaClient,
+  KafkaHealthResult,
+  TopicMapConstraint,
+} from "../client/types";
 export type { KafkaHealthResult } from "../client/types";
 
 /** Health check service. Call `check(client)` to verify broker connectivity. */

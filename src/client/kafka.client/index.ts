@@ -19,8 +19,18 @@ import type {
   KafkaClientOptions,
   KafkaInstrumentation,
   KafkaLogger,
+  KafkaMetrics,
+  DlqReason,
   BatchMeta,
 } from "../types";
+
+/**
+ * Process-level registry of active transactional producer IDs.
+ * Used to detect same-process `transactionalId` conflicts before Kafka silently
+ * fences one of the producers. Cross-process conflicts cannot be detected here —
+ * they surface as fencing errors from the broker.
+ */
+const _activeTransactionalIds = new Set<string>();
 
 // Re-export all types so existing `import { ... } from './kafka.client'` keeps working
 export * from "../types";
@@ -37,7 +47,10 @@ import {
   type ConsumerOpsDeps,
 } from "./consumer-ops";
 import { handleEachMessage, handleEachBatch } from "./message-handler";
-import type { MessageHandlerDeps, DeduplicationContext } from "./message-handler";
+import type {
+  MessageHandlerDeps,
+  DeduplicationContext,
+} from "./message-handler";
 import { startRetryTopicConsumers } from "./retry-topic";
 import { subscribeWithRetry } from "../consumer/subscribe-retry";
 import { toError } from "../consumer/pipeline";
@@ -82,6 +95,15 @@ export class KafkaClient<
   private readonly instrumentation: KafkaInstrumentation[];
   private readonly onMessageLost: KafkaClientOptions["onMessageLost"];
   private readonly onRebalance: KafkaClientOptions["onRebalance"];
+  /** Transactional producer ID — configurable via `KafkaClientOptions.transactionalId`. */
+  private readonly txId: string;
+  /** Internal event counters exposed via `getMetrics()`. */
+  private readonly _metrics: KafkaMetrics = {
+    processedCount: 0,
+    retryCount: 0,
+    dlqCount: 0,
+    dedupCount: 0,
+  };
 
   /** Monotonically increasing Lamport clock stamped on every outgoing message. */
   private _lamportClock = 0;
@@ -116,6 +138,7 @@ export class KafkaClient<
     this.instrumentation = options?.instrumentation ?? [];
     this.onMessageLost = options?.onMessageLost;
     this.onRebalance = options?.onRebalance;
+    this.txId = options?.transactionalId ?? `${clientId}-tx`;
 
     this.kafka = new KafkaClass({
       kafkaJS: {
@@ -187,25 +210,28 @@ export class KafkaClient<
     fn: (ctx: TransactionContext<T>) => Promise<void>,
   ): Promise<void> {
     if (!this.txProducerInitPromise) {
-      // transactionalId must be unique per producer instance across the cluster.
-      // Two KafkaClient instances sharing the same clientId will share this id,
-      // causing Kafka to fence one of the producers. Use distinct clientIds when
-      // running multiple instances of the same service.
-      //
       // Guarded by a promise (not just a flag) so that concurrent transaction()
       // calls do not each create their own producer — only the first call creates
       // the promise; subsequent concurrent calls await the same promise.
       // On connect failure the promise is cleared so the next call can retry.
+      if (_activeTransactionalIds.has(this.txId)) {
+        this.logger.warn(
+          `transactionalId "${this.txId}" is already in use by another KafkaClient in this process. ` +
+            `Kafka will fence one of the producers. ` +
+            `Set a unique \`transactionalId\` (or distinct \`clientId\`) per instance.`,
+        );
+      }
       const initPromise: Promise<Producer> = (async () => {
         const p = this.kafka.producer({
           kafkaJS: {
             acks: -1,
             idempotent: true,
-            transactionalId: `${this.clientId}-tx`,
+            transactionalId: this.txId,
             maxInFlightRequests: 1,
           },
         });
         await p.connect();
+        _activeTransactionalIds.add(this.txId);
         return p;
       })();
       this.txProducerInitPromise = initPromise.catch((err) => {
@@ -309,7 +335,10 @@ export class KafkaClient<
 
     const deps = this.messageDeps;
     const timeoutMs = options.handlerTimeoutMs;
-    const deduplication = this.resolveDeduplicationContext(gid, options.deduplication);
+    const deduplication = this.resolveDeduplicationContext(
+      gid,
+      options.deduplication,
+    );
 
     await consumer.run({
       eachMessage: (payload) =>
@@ -402,7 +431,10 @@ export class KafkaClient<
 
     const deps = this.messageDeps;
     const timeoutMs = options.handlerTimeoutMs;
-    const deduplication = this.resolveDeduplicationContext(gid, options.deduplication);
+    const deduplication = this.resolveDeduplicationContext(
+      gid,
+      options.deduplication,
+    );
 
     await consumer.run({
       eachBatch: (payload) =>
@@ -432,14 +464,13 @@ export class KafkaClient<
         await this.validateRetryTopicsExist(topicNames, retry.maxRetries);
       }
       // Wrap batch handler as single-message handler for retry consumers.
-      // Retry consumers use eachMessage (not eachBatch), so real batch context is unavailable.
-      // highWatermark is set to env.offset as a stub — it is the current message's offset,
-      // not the partition's high-watermark. Handlers relying on highWatermark for lag
-      // calculation will see an incorrect value in the retry path.
+      // Retry consumers use eachMessage (not eachBatch), so the broker
+      // high-watermark is not available. `highWatermark` is set to `null` —
+      // handlers must guard against null before doing lag calculations.
       const handleMessageForRetry = (env: EventEnvelope<any>) =>
         handleBatch([env], {
           partition: env.partition,
-          highWatermark: env.offset,
+          highWatermark: null,
           heartbeat: async () => {},
           resolveOffset: () => {},
           commitOffsetsIfNecessary: async () => {},
@@ -516,6 +547,7 @@ export class KafkaClient<
                 toError(e).message,
               ),
             );
+          _activeTransactionalIds.delete(txId);
           this.retryTxProducers.delete(txId);
         }
       }
@@ -603,14 +635,29 @@ export class KafkaClient<
     return this.clientId;
   }
 
+  public getMetrics(): Readonly<KafkaMetrics> {
+    return { ...this._metrics };
+  }
+
+  public resetMetrics(): void {
+    this._metrics.processedCount = 0;
+    this._metrics.retryCount = 0;
+    this._metrics.dlqCount = 0;
+    this._metrics.dedupCount = 0;
+  }
+
   /** Gracefully disconnect producer, all consumers, and admin. */
   public async disconnect(drainTimeoutMs = 30_000): Promise<void> {
     await this.waitForDrain(drainTimeoutMs);
     const tasks: Promise<void>[] = [this.producer.disconnect()];
     if (this.txProducer) {
       tasks.push(this.txProducer.disconnect());
+      _activeTransactionalIds.delete(this.txId);
       this.txProducer = undefined;
       this.txProducerInitPromise = undefined;
+    }
+    for (const txId of this.retryTxProducers.keys()) {
+      _activeTransactionalIds.delete(txId);
     }
     for (const p of this.retryTxProducers.values()) {
       tasks.push(p.disconnect());
@@ -719,6 +766,46 @@ export class KafkaClient<
       for (const inst of this.instrumentation) {
         inst.afterSend?.(topic);
       }
+    }
+  }
+
+  private notifyRetry(
+    envelope: import("../message/envelope").EventEnvelope<any>,
+    attempt: number,
+    maxRetries: number,
+  ): void {
+    this._metrics.retryCount++;
+    for (const inst of this.instrumentation) {
+      inst.onRetry?.(envelope, attempt, maxRetries);
+    }
+  }
+
+  private notifyDlq(
+    envelope: import("../message/envelope").EventEnvelope<any>,
+    reason: DlqReason,
+  ): void {
+    this._metrics.dlqCount++;
+    for (const inst of this.instrumentation) {
+      inst.onDlq?.(envelope, reason);
+    }
+  }
+
+  private notifyDuplicate(
+    envelope: import("../message/envelope").EventEnvelope<any>,
+    strategy: "drop" | "dlq" | "topic",
+  ): void {
+    this._metrics.dedupCount++;
+    for (const inst of this.instrumentation) {
+      inst.onDuplicate?.(envelope, strategy);
+    }
+  }
+
+  private notifyMessage(
+    envelope: import("../message/envelope").EventEnvelope<any>,
+  ): void {
+    this._metrics.processedCount++;
+    for (const inst of this.instrumentation) {
+      inst.onMessage?.(envelope);
     }
   }
 
@@ -832,7 +919,16 @@ export class KafkaClient<
    * Each retry level consumer gets its own producer with a unique `transactionalId`
    * so Kafka can fence stale producers on restart without affecting other levels.
    */
-  private async createRetryTxProducer(transactionalId: string): Promise<Producer> {
+  private async createRetryTxProducer(
+    transactionalId: string,
+  ): Promise<Producer> {
+    if (_activeTransactionalIds.has(transactionalId)) {
+      this.logger.warn(
+        `transactionalId "${transactionalId}" is already in use by another KafkaClient in this process. ` +
+          `Kafka will fence one of the producers. ` +
+          `Set a unique \`transactionalId\` (or distinct \`clientId\`) per instance.`,
+      );
+    }
     const p = this.kafka.producer({
       kafkaJS: {
         acks: -1,
@@ -842,6 +938,7 @@ export class KafkaClient<
       },
     });
     await p.connect();
+    _activeTransactionalIds.add(transactionalId);
     this.retryTxProducers.set(transactionalId, p);
     return p;
   }
@@ -991,6 +1088,10 @@ export class KafkaClient<
       producer: this.producer,
       instrumentation: this.instrumentation,
       onMessageLost: this.onMessageLost,
+      onRetry: this.notifyRetry.bind(this),
+      onDlq: this.notifyDlq.bind(this),
+      onDuplicate: this.notifyDuplicate.bind(this),
+      onMessage: this.notifyMessage.bind(this),
     };
   }
 
@@ -1000,6 +1101,9 @@ export class KafkaClient<
       producer: this.producer,
       instrumentation: this.instrumentation,
       onMessageLost: this.onMessageLost,
+      onRetry: this.notifyRetry.bind(this),
+      onDlq: this.notifyDlq.bind(this),
+      onMessage: this.notifyMessage.bind(this),
       ensureTopic: (t: string) => this.ensureTopic(t),
       getOrCreateConsumer: (gid: string, fb: boolean, ac: boolean) =>
         getOrCreateConsumer(gid, fb, ac, this.consumerOpsDeps),

@@ -20,6 +20,7 @@ import type {
   BatchMeta,
   ConsumerInterceptor,
   DeduplicationOptions,
+  DlqReason,
   KafkaClientOptions,
   KafkaInstrumentation,
   KafkaLogger,
@@ -31,6 +32,17 @@ export type MessageHandlerDeps = {
   producer: Producer;
   instrumentation: KafkaInstrumentation[];
   onMessageLost: KafkaClientOptions["onMessageLost"];
+  onRetry?: (
+    envelope: EventEnvelope<any>,
+    attempt: number,
+    maxRetries: number,
+  ) => void;
+  onDlq?: (envelope: EventEnvelope<any>, reason: DlqReason) => void;
+  onDuplicate?: (
+    envelope: EventEnvelope<any>,
+    strategy: "drop" | "dlq" | "topic",
+  ) => void;
+  onMessage?: (envelope: EventEnvelope<any>) => void;
 };
 
 /** Active deduplication context passed from KafkaClient to the message handler. */
@@ -88,6 +100,8 @@ async function applyDeduplication(
       `Duplicate message on ${envelope.topic}[${envelope.partition}]: ` +
         `clock=${incomingClock} <= last=${lastProcessedClock} — strategy=${strategy}`,
     );
+
+    deps.onDuplicate?.(envelope, strategy);
 
     if (strategy === "dlq" && dlq) {
       const augmentedHeaders = {

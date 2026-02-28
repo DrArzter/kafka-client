@@ -165,8 +165,10 @@ describe("Integration — Batch consumer retryTopics", () => {
     await client.connectProducer();
 
     let attempts = 0;
-    const dlqCaptures: Array<{ payload: any; headers: Record<string, string> }> =
-      [];
+    const dlqCaptures: Array<{
+      payload: any;
+      headers: Record<string, string>;
+    }> = [];
 
     // DLQ consumer — reads individual messages routed there
     const dlqClient = createClient("batch-retry-dlq");
@@ -200,8 +202,14 @@ describe("Integration — Batch consumer retryTopics", () => {
     await new Promise<void>((resolve, reject) => {
       const deadline = Date.now() + 45_000;
       const poll = setInterval(() => {
-        if (dlqCaptures.length >= 1) { clearInterval(poll); resolve(); }
-        if (Date.now() >= deadline) { clearInterval(poll); reject(new Error("DLQ timeout")); }
+        if (dlqCaptures.length >= 1) {
+          clearInterval(poll);
+          resolve();
+        }
+        if (Date.now() >= deadline) {
+          clearInterval(poll);
+          reject(new Error("DLQ timeout"));
+        }
       }, 500);
     });
 
@@ -241,8 +249,14 @@ describe("Integration — Batch consumer retryTopics", () => {
     await new Promise<void>((resolve, reject) => {
       const deadline = Date.now() + 15_000;
       const poll = setInterval(() => {
-        if (received.length >= 1) { clearInterval(poll); resolve(); }
-        if (Date.now() >= deadline) { clearInterval(poll); reject(new Error("timeout")); }
+        if (received.length >= 1) {
+          clearInterval(poll);
+          resolve();
+        }
+        if (Date.now() >= deadline) {
+          clearInterval(poll);
+          reject(new Error("timeout"));
+        }
       }, 200);
     });
 

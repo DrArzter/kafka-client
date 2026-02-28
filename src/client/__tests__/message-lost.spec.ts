@@ -158,7 +158,9 @@ describe("KafkaClient — onMessageLost hook", () => {
         await eachMessage({
           topic: "test.topic",
           partition: 0,
-          message: { value: Buffer.from(JSON.stringify({ id: "1", value: 1 })) },
+          message: {
+            value: Buffer.from(JSON.stringify({ id: "1", value: 1 })),
+          },
         });
       })
       .mockImplementationOnce(async () => {}); // retry.1 consumer — no messages

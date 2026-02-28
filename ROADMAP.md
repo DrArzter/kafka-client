@@ -7,7 +7,6 @@
 ### Larger features
 
 - **DLQ replay** — `client.replayDlq(topic, options?)` reads `{topic}.dlq`, strips DLQ metadata headers, and re-publishes messages to the original topic; supports `from` / `to` time-range filters and a dry-run mode
-- **Metrics hooks** — dedicated `metricsHook` in `KafkaClientOptions` for numeric observability (consumer lag, retry count, DLQ count, handler duration histogram); separate from OTel spans, targets Prometheus / Datadog / StatsD
 - **Benchmarks** — compare throughput / latency: raw `@confluentinc/kafka-javascript` → `@drarzter/kafka-client` → `@nestjs/microservices` Kafka transport; quantify abstraction overhead
 - **Circuit breaker** — stop retrying when downstream is consistently unavailable
 - **Transport abstraction** — `KafkaTransport` interface to decouple `KafkaClient` from `@confluentinc/kafka-javascript`; swap transports without touching business code
@@ -15,6 +14,14 @@
 ---
 
 ## Done
+
+### 0.6.7
+
+- [x] **Configurable `transactionalId`** — `KafkaClientOptions.transactionalId` lets callers override the transactional producer ID (default: `${clientId}-tx`); useful when running multiple replicas that must have distinct IDs to avoid Kafka producer fencing
+- [x] **Duplicate `transactionalId` warning** — the client tracks all active transactional IDs in a module-level registry and logs a `warn` when the same ID is registered twice within one process; cross-process conflicts are still detected by the broker (fencing)
+- [x] **`highWatermark: null` in batch-retry path** — the stub `BatchMeta` passed to batch handlers during retry topic replay now sets `highWatermark: null` instead of the incorrect `env.offset`; `BatchMeta.highWatermark` is now typed `string | null`, forcing callers to guard against `null` before computing lag — a compile-time breaking change that surfaces a previously silent semantic bug
+- [x] **Built-in metrics** — `getMetrics()` returns a `KafkaMetrics` snapshot (`{ processedCount, retryCount, dlqCount, dedupCount }`); `resetMetrics()` resets all counters to zero; counters are always active regardless of whether any instrumentation is configured
+- [x] **`KafkaInstrumentation` lifecycle hooks** — `onMessage(envelope)`, `onRetry(envelope, attempt, maxRetries)`, `onDlq(envelope, reason)`, and `onDuplicate(envelope, strategy)` added to `KafkaInstrumentation`; fire for both in-process retries and retry topic routing; `DlqReason` type exported; `onMessage` fires on every successful handler completion (use for error-rate calculations alongside `onDlq`)
 
 ### 0.6.6
 
@@ -44,7 +51,7 @@
 - [x] **Batch + `retryTopics: true` headers lost for messages 2..N** — `executeWithRetry` passed only `envelopes[0].headers` to `sendToRetryTopic` for all messages in the batch; messages 2..N ended up with the first message's `x-correlation-id`, `traceparent`, and custom headers in the retry topic; fixed by passing `envelopes.map(e => e.headers)` (array) when `isBatch`; `buildRetryTopicPayload` and `sendToRetryTopic` now accept `MessageHeaders | MessageHeaders[]` and zip each message with its own headers
 - [x] **`startBatchConsumer` autoCommit diagnostic downgraded to `debug`** — the warning fired on every batch consumer start even for users who never use manual offset management (`resolveOffset` / `commitOffsetsIfNecessary`); changed to `this.logger.debug?.()` so it appears only when debug logging is explicitly enabled; default logger now includes `debug: console.debug`
 - [x] **DLQ topic validated at startup when `autoCreateTopics: false`** — `dlq: true` would silently succeed at startup even if `{topic}.dlq` didn't exist; the missing topic was only discovered on the first handler failure, too late to be actionable; added `validateDlqTopicsExist` (symmetrical with `validateRetryTopicsExist`) that throws a clear error listing all missing DLQ topics at consumer start time
-- [x] **`highWatermark` stub in batch-retry path documented** — retry consumers use `eachMessage`, so no real batch context is available; the stub `BatchMeta` used `env.offset` as `highWatermark`; this is semantically incorrect (offset of the current message ≠ partition high-watermark); added a comment explaining the architectural limitation
+- [x] **`highWatermark` stub in batch-retry path documented** — retry consumers use `eachMessage`, so no real batch context is available; the stub `BatchMeta` used `env.offset` as `highWatermark`; this is semantically incorrect (offset of the current message ≠ partition high-watermark); added a comment explaining the architectural limitation (properly fixed in 0.6.7 — changed to `null` with updated type)
 
 ### 0.6.2
 

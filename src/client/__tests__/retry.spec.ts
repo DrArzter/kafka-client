@@ -383,7 +383,11 @@ describe("KafkaClient — EOS retry routing (Exactly-Once)", () => {
       { autoCreateTopics: false },
     );
 
-    mockListTopics.mockResolvedValue(["test.topic", "test.topic.retry.1", "test.topic.dlq"]);
+    mockListTopics.mockResolvedValue([
+      "test.topic",
+      "test.topic.retry.1",
+      "test.topic.dlq",
+    ]);
 
     // Call 1: main consumer — no messages fired.
     // Call 2: level-1 retry consumer — fires a failing message at maxRetries=1 (exhausted).

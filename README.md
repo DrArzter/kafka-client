@@ -620,7 +620,7 @@ await kafka.startBatchConsumer(
 | Property/Method | Description |
 | --------------- | ----------- |
 | `partition` | Partition number for this batch |
-| `highWatermark` | Latest offset in the partition (lag indicator) |
+| `highWatermark` | Latest offset in the partition (`string`). `null` when the message is replayed via a retry topic consumer — in that path the broker high-watermark is not available. Guard against `null` before computing lag |
 | `heartbeat()` | Send a heartbeat to keep the consumer session alive — call during long processing loops |
 | `resolveOffset(offset)` | Mark offset as processed (required before `commitOffsetsIfNecessary`) |
 | `commitOffsetsIfNecessary()` | Commit resolved offsets; respects `autoCommit` setting |
@@ -743,6 +743,47 @@ type BeforeConsumeResult =
 
 When multiple instrumentations each provide a `wrap`, they compose in declaration order — the first instrumentation's `wrap` is the outermost.
 
+### Lifecycle event hooks
+
+Three additional hooks fire for specific events in the consume pipeline:
+
+| Hook | When called | Arguments |
+| ---- | ----------- | --------- |
+| `onMessage` | Handler successfully processed a message | `(envelope)` — use as a success counter for error-rate calculations |
+| `onRetry` | A message is queued for another attempt (in-process backoff or routed to a retry topic) | `(envelope, attempt, maxRetries)` |
+| `onDlq` | A message is routed to the dead letter queue | `(envelope, reason)` — reason is `'handler-error'`, `'validation-error'`, or `'lamport-clock-duplicate'` |
+| `onDuplicate` | A duplicate is detected via Lamport Clock | `(envelope, strategy)` — strategy is `'drop'`, `'dlq'`, or `'topic'` |
+
+```typescript
+const myInstrumentation: KafkaInstrumentation = {
+  onMessage(envelope) {
+    metrics.increment('kafka.processed', { topic: envelope.topic });
+  },
+  onRetry(envelope, attempt, maxRetries) {
+    console.warn(`Retrying ${envelope.topic} — attempt ${attempt}/${maxRetries}`);
+  },
+  onDlq(envelope, reason) {
+    alertingSystem.send({ topic: envelope.topic, reason });
+  },
+  onDuplicate(envelope, strategy) {
+    metrics.increment('kafka.duplicate', { topic: envelope.topic, strategy });
+  },
+};
+```
+
+### Built-in metrics
+
+`KafkaClient` maintains lightweight in-process event counters independently of any instrumentation:
+
+```typescript
+const snapshot = kafka.getMetrics();
+// { processedCount: number; retryCount: number; dlqCount: number; dedupCount: number }
+
+kafka.resetMetrics(); // reset all counters to zero
+```
+
+Counters are incremented in the same code paths that fire the corresponding hooks — they are always active regardless of whether any instrumentation is configured.
+
 ## Options reference
 
 ### Send options
@@ -795,6 +836,7 @@ Passed to `KafkaModule.register()` or returned from `registerAsync()` factory:
 | `numPartitions` | `1` | Number of partitions for auto-created topics |
 | `strictSchemas` | `true` | Validate string topic keys against schemas registered via TopicDescriptor |
 | `instrumentation` | `[]` | Client-wide instrumentation hooks (e.g. OTel). Applied to both send and consume paths |
+| `transactionalId` | `${clientId}-tx` | Transactional producer ID for `transaction()` calls. Must be unique per producer instance across the cluster — two instances sharing the same ID will be fenced by Kafka. The client logs a warning when the same ID is registered twice within one process |
 | `onMessageLost` | — | Called when a message is silently dropped without DLQ — use to alert, log to external systems, or trigger fallback logic |
 | `onRebalance` | — | Called on every partition assign/revoke event across all consumers created by this client |
 

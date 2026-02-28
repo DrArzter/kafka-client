@@ -31,8 +31,14 @@ describe("Integration — Graceful shutdown with drain", () => {
     await new Promise<void>((resolve, reject) => {
       const deadline = Date.now() + 10_000;
       const poll = setInterval(() => {
-        if (handlerStarted) { clearInterval(poll); resolve(); }
-        if (Date.now() >= deadline) { clearInterval(poll); reject(new Error("handler never started")); }
+        if (handlerStarted) {
+          clearInterval(poll);
+          resolve();
+        }
+        if (Date.now() >= deadline) {
+          clearInterval(poll);
+          reject(new Error("handler never started"));
+        }
       }, 50);
     });
 
@@ -90,8 +96,14 @@ describe("Integration — Graceful shutdown with drain", () => {
     await new Promise<void>((resolve, reject) => {
       const deadline = Date.now() + 10_000;
       const poll = setInterval(() => {
-        if (handlerStarted) { clearInterval(poll); resolve(); }
-        if (Date.now() >= deadline) { clearInterval(poll); reject(new Error("handler never started")); }
+        if (handlerStarted) {
+          clearInterval(poll);
+          resolve();
+        }
+        if (Date.now() >= deadline) {
+          clearInterval(poll);
+          reject(new Error("handler never started"));
+        }
       }, 50);
     });
 

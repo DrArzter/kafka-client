@@ -118,5 +118,4 @@ export class KafkaModule {
     await client.connectProducer();
     return client;
   }
-
 }

@@ -33,7 +33,9 @@ describe("runHandlerWithPipeline — BeforeConsumeResult", () => {
     cleanup.mockImplementation(() => order.push("cleanup"));
 
     await runHandlerWithPipeline(
-      async () => { order.push("handler"); },
+      async () => {
+        order.push("handler");
+      },
       [makeEnvelope()],
       [],
       [inst],
@@ -47,7 +49,9 @@ describe("runHandlerWithPipeline — BeforeConsumeResult", () => {
     const inst: KafkaInstrumentation = { beforeConsume: () => ({ cleanup }) };
 
     const err = await runHandlerWithPipeline(
-      async () => { throw new Error("boom"); },
+      async () => {
+        throw new Error("boom");
+      },
       [makeEnvelope()],
       [],
       [inst],
@@ -70,7 +74,9 @@ describe("runHandlerWithPipeline — BeforeConsumeResult", () => {
     };
 
     await runHandlerWithPipeline(
-      async () => { order.push("handler"); },
+      async () => {
+        order.push("handler");
+      },
       [makeEnvelope()],
       [],
       [inst],
@@ -92,18 +98,28 @@ describe("runHandlerWithPipeline — BeforeConsumeResult", () => {
     });
 
     await runHandlerWithPipeline(
-      async () => { order.push("handler"); },
+      async () => {
+        order.push("handler");
+      },
       [makeEnvelope()],
       [],
       [makeWrapInst("A"), makeWrapInst("B")],
     );
 
-    expect(order).toEqual(["A-enter", "B-enter", "handler", "B-exit", "A-exit"]);
+    expect(order).toEqual([
+      "A-enter",
+      "B-enter",
+      "handler",
+      "B-exit",
+      "A-exit",
+    ]);
   });
 
   it("object form with both cleanup and wrap: both are invoked", async () => {
     const cleanup = jest.fn();
-    const wrapFn = jest.fn().mockImplementation((fn: () => Promise<void>) => fn());
+    const wrapFn = jest
+      .fn()
+      .mockImplementation((fn: () => Promise<void>) => fn());
     const inst: KafkaInstrumentation = {
       beforeConsume: () => ({ cleanup, wrap: wrapFn }),
     };
@@ -119,7 +135,9 @@ describe("runHandlerWithPipeline — BeforeConsumeResult", () => {
     // before interceptors run, so if an interceptor throws, the handler never runs
     // but cleanup still fires.
     const cleanup = jest.fn();
-    const wrapFn = jest.fn().mockImplementation((fn: () => Promise<void>) => fn());
+    const wrapFn = jest
+      .fn()
+      .mockImplementation((fn: () => Promise<void>) => fn());
     const inst: KafkaInstrumentation = {
       beforeConsume: () => ({ cleanup, wrap: wrapFn }),
     };
@@ -127,7 +145,13 @@ describe("runHandlerWithPipeline — BeforeConsumeResult", () => {
     const err = await runHandlerWithPipeline(
       async () => {},
       [makeEnvelope()],
-      [{ before: async () => { throw new Error("interceptor fail"); } }],
+      [
+        {
+          before: async () => {
+            throw new Error("interceptor fail");
+          },
+        },
+      ],
       [inst],
     );
 

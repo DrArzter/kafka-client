@@ -59,7 +59,10 @@ describe("otelInstrumentation", () => {
 
       inst.beforeConsume!(env);
 
-      expect(propagation.extract).toHaveBeenCalledWith(mockParentCtx, env.headers);
+      expect(propagation.extract).toHaveBeenCalledWith(
+        mockParentCtx,
+        env.headers,
+      );
     });
 
     it("starts a CONSUMER span as child of extracted context", () => {

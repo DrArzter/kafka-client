@@ -3,15 +3,17 @@ const mockConnect = jest.fn().mockResolvedValue(undefined);
 const mockDisconnect = jest.fn().mockResolvedValue(undefined);
 const mockSubscribe = jest.fn().mockResolvedValue(undefined);
 const mockRun = jest.fn().mockResolvedValue(undefined);
-const mockListTopics = jest.fn().mockResolvedValue([
-  "topic1",
-  "topic2",
-  "test.topic",
-  "test.other",
-  "test.topic.dlq",
-  "test.other.dlq",
-  "test.topic.duplicates",
-]);
+const mockListTopics = jest
+  .fn()
+  .mockResolvedValue([
+    "topic1",
+    "topic2",
+    "test.topic",
+    "test.other",
+    "test.topic.dlq",
+    "test.other.dlq",
+    "test.topic.duplicates",
+  ]);
 
 const mockTxSend = jest.fn().mockResolvedValue(undefined);
 const mockTxCommit = jest.fn().mockResolvedValue(undefined);

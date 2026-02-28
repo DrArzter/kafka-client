@@ -233,7 +233,10 @@ describe("KafkaClient — Deduplication (Lamport Clock)", () => {
           partition: 0,
           message: {
             value: Buffer.from(JSON.stringify({ id: "1", value: 1 })),
-            headers: { "x-lamport-clock": ["5"], "x-correlation-id": ["corr-abc"] },
+            headers: {
+              "x-lamport-clock": ["5"],
+              "x-correlation-id": ["corr-abc"],
+            },
             offset: "0",
           },
         });
@@ -243,7 +246,10 @@ describe("KafkaClient — Deduplication (Lamport Clock)", () => {
           partition: 0,
           message: {
             value: Buffer.from(JSON.stringify({ id: "1", value: 1 })),
-            headers: { "x-lamport-clock": ["5"], "x-correlation-id": ["corr-abc"] },
+            headers: {
+              "x-lamport-clock": ["5"],
+              "x-correlation-id": ["corr-abc"],
+            },
             offset: "1",
           },
         });
@@ -318,7 +324,10 @@ describe("KafkaClient — Deduplication (Lamport Clock)", () => {
     it("routes duplicate to custom duplicatesTopic when specified", async () => {
       setupMessagesWithClocks([{ clock: 5 }, { clock: 5 }]);
       const handler = jest.fn().mockResolvedValue(undefined);
-      mockListTopics.mockResolvedValueOnce(["test.topic", "my-custom.duplicates"]);
+      mockListTopics.mockResolvedValueOnce([
+        "test.topic",
+        "my-custom.duplicates",
+      ]);
 
       await client.startConsumer(["test.topic"], handler, {
         deduplication: {

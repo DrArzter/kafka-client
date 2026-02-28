@@ -1,4 +1,7 @@
-import { buildEnvelopeHeaders, HEADER_LAMPORT_CLOCK } from "../message/envelope";
+import {
+  buildEnvelopeHeaders,
+  HEADER_LAMPORT_CLOCK,
+} from "../message/envelope";
 import { KafkaValidationError } from "../errors";
 import type { SchemaLike, SchemaParseContext } from "../message/topic";
 import type {

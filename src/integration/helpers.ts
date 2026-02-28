@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { KafkaClient } from "../client/kafka.client";
-import { topic, SchemaLike, SchemaParseContext } from "../client/message/topic";
+import { topic, SchemaLike } from "../client/message/topic";
 
 // ── Topic types ─────────────────────────────────────────────────────
 

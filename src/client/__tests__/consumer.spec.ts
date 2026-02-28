@@ -126,7 +126,10 @@ describe("KafkaClient — Consumer", () => {
     });
 
     it("should startConsumer with TopicDescriptor array", async () => {
-      const TestTopic = topic("test.topic").type<{ id: string; value: number }>();
+      const TestTopic = topic("test.topic").type<{
+        id: string;
+        value: number;
+      }>();
       const handler = jest.fn();
       await client.startConsumer([TestTopic] as any, handler);
 

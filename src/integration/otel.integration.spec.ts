@@ -34,7 +34,10 @@ import {
 } from "@opentelemetry/api";
 import { waitForMessages, getBrokers, KafkaClient } from "./helpers";
 import type { TestTopics } from "./helpers";
-import type { KafkaInstrumentation, BeforeConsumeResult } from "../client/types";
+import type {
+  KafkaInstrumentation,
+  BeforeConsumeResult,
+} from "../client/types";
 import { otelInstrumentation } from "../otel";
 
 // ── Minimal in-process OTel implementation ───────────────────────────────────
@@ -58,20 +61,41 @@ class SimpleSpan implements Span {
     };
   }
 
-  spanContext(): SpanContext { return this._ctx; }
-  setAttribute() { return this; }
-  setAttributes() { return this; }
-  addEvent() { return this; }
-  addLink() { return this; }
-  addLinks() { return this; }
+  spanContext(): SpanContext {
+    return this._ctx;
+  }
+  setAttribute() {
+    return this;
+  }
+  setAttributes() {
+    return this;
+  }
+  addEvent() {
+    return this;
+  }
+  addLink() {
+    return this;
+  }
+  addLinks() {
+    return this;
+  }
   setStatus(s: { code: SpanStatusCode }) {
     (this.status as any).code = s.code;
     return this;
   }
-  updateName() { return this; }
-  end() { this._ended = true; }
-  isRecording() { return !this._ended; }
-  recordException(e: Error) { this.recordedExceptions.push(e); return this; }
+  updateName() {
+    return this;
+  }
+  end() {
+    this._ended = true;
+  }
+  isRecording() {
+    return !this._ended;
+  }
+  recordException(e: Error) {
+    this.recordedExceptions.push(e);
+    return this;
+  }
 }
 
 class SimpleTracer implements Tracer {
@@ -93,7 +117,9 @@ class SimpleTracer implements Tracer {
 
 class SimpleTracerProvider implements TracerProvider {
   readonly tracer = new SimpleTracer();
-  getTracer() { return this.tracer; }
+  getTracer() {
+    return this.tracer;
+  }
 }
 
 // ── ALS-backed context manager ───────────────────────────────────────────────
@@ -105,15 +131,26 @@ class SimpleTracerProvider implements TracerProvider {
 const alsStorage = new AsyncLocalStorage<Context>();
 
 const alsContextManager = {
-  active(): Context { return alsStorage.getStore() ?? ROOT_CONTEXT; },
+  active(): Context {
+    return alsStorage.getStore() ?? ROOT_CONTEXT;
+  },
   with<A extends unknown[], F extends (...args: A) => ReturnType<F>>(
-    ctx: Context, fn: F, _thisArg?: unknown, ...args: A
+    ctx: Context,
+    fn: F,
+    _thisArg?: unknown,
+    ...args: A
   ): ReturnType<F> {
     return alsStorage.run(ctx, fn, ...args);
   },
-  bind<T>(_ctx: Context, fn: T): T { return fn; },
-  enable() { return this; },
-  disable() { return this; },
+  bind<T>(_ctx: Context, fn: T): T {
+    return fn;
+  },
+  enable() {
+    return this;
+  },
+  disable() {
+    return this;
+  },
 };
 
 // ── Suite ────────────────────────────────────────────────────────────────────

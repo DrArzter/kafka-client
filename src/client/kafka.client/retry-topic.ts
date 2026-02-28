@@ -25,6 +25,7 @@ import { subscribeWithRetry } from "../consumer/subscribe-retry";
 import type { SchemaLike } from "../message/topic";
 import type {
   ConsumerInterceptor,
+  DlqReason,
   KafkaClientOptions,
   KafkaInstrumentation,
   KafkaLogger,
@@ -35,6 +36,13 @@ export type RetryTopicDeps = {
   producer: Producer;
   instrumentation: KafkaInstrumentation[];
   onMessageLost: KafkaClientOptions["onMessageLost"];
+  onRetry?: (
+    envelope: EventEnvelope<any>,
+    attempt: number,
+    maxRetries: number,
+  ) => void;
+  onDlq?: (envelope: EventEnvelope<any>, reason: DlqReason) => void;
+  onMessage?: (envelope: EventEnvelope<any>) => void;
   ensureTopic: (topic: string) => Promise<void>;
   getOrCreateConsumer: (
     groupId: string,
@@ -117,6 +125,9 @@ async function startLevelConsumer(
     producer,
     instrumentation,
     onMessageLost,
+    onRetry,
+    onDlq,
+    onMessage,
     ensureTopic,
     getOrCreateConsumer,
     runningConsumers,
@@ -221,6 +232,7 @@ async function startLevelConsumer(
       );
 
       if (!error) {
+        onMessage?.(envelope);
         await consumer.commitOffsets([nextOffset]);
         return;
       }
@@ -263,12 +275,23 @@ async function startLevelConsumer(
           await tx.send({ topic: rtTopic, messages: rtMsgs });
           await tx.sendOffsets({
             consumer,
-            topics: [{ topic: nextOffset.topic, partitions: [{ partition: nextOffset.partition, offset: nextOffset.offset }] }],
+            topics: [
+              {
+                topic: nextOffset.topic,
+                partitions: [
+                  {
+                    partition: nextOffset.partition,
+                    offset: nextOffset.offset,
+                  },
+                ],
+              },
+            ],
           });
           await tx.commit();
           logger.warn(
             `Message routed to ${rtTopic} (EOS, level ${nextLevel}/${currentMaxRetries})`,
           );
+          onRetry?.(envelope, nextLevel, currentMaxRetries);
         } catch (txErr) {
           try {
             await tx.abort();
@@ -297,10 +320,21 @@ async function startLevelConsumer(
           await tx.send({ topic: dTopic, messages: dMsgs });
           await tx.sendOffsets({
             consumer,
-            topics: [{ topic: nextOffset.topic, partitions: [{ partition: nextOffset.partition, offset: nextOffset.offset }] }],
+            topics: [
+              {
+                topic: nextOffset.topic,
+                partitions: [
+                  {
+                    partition: nextOffset.partition,
+                    offset: nextOffset.offset,
+                  },
+                ],
+              },
+            ],
           });
           await tx.commit();
           logger.warn(`Message sent to DLQ: ${dTopic} (EOS)`);
+          onDlq?.(envelope, "handler-error");
         } catch (txErr) {
           try {
             await tx.abort();
@@ -327,7 +361,12 @@ async function startLevelConsumer(
 
   runningConsumers.set(levelGroupId, "eachMessage");
 
-  await waitForPartitionAssignment(consumer, levelTopics, logger, assignmentTimeoutMs);
+  await waitForPartitionAssignment(
+    consumer,
+    levelTopics,
+    logger,
+    assignmentTimeoutMs,
+  );
 
   logger.log(
     `Retry level ${level}/${retry.maxRetries} consumer started for: ${originalTopics.join(", ")} (group: ${levelGroupId})`,
