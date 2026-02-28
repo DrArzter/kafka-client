@@ -10,11 +10,16 @@ import {
   parseJsonMessage,
   validateWithSchema,
   executeWithRetry,
+  sendToDlq,
+  sendToDuplicatesTopic,
 } from "../consumer/pipeline";
+import type { DuplicateMetadata } from "../consumer/pipeline";
+import { HEADER_LAMPORT_CLOCK } from "../message/envelope";
 import type { SchemaLike } from "../message/topic";
 import type {
   BatchMeta,
   ConsumerInterceptor,
+  DeduplicationOptions,
   KafkaClientOptions,
   KafkaInstrumentation,
   KafkaLogger,
@@ -26,6 +31,13 @@ export type MessageHandlerDeps = {
   producer: Producer;
   instrumentation: KafkaInstrumentation[];
   onMessageLost: KafkaClientOptions["onMessageLost"];
+};
+
+/** Active deduplication context passed from KafkaClient to the message handler. */
+export type DeduplicationContext = {
+  options: DeduplicationOptions;
+  /** Mutable map: `"topic:partition"` → last processed Lamport clock value. */
+  state: Map<string, number>;
 };
 
 export type EachMessageOpts = {
@@ -41,7 +53,67 @@ export type EachMessageOpts = {
     ms: number,
     topic: string,
   ) => Promise<R>;
+  deduplication?: DeduplicationContext;
 };
+
+/**
+ * Check Lamport clock header against per-partition state.
+ * Returns `true` if the message is a duplicate and should be skipped.
+ * Updates the state map on a fresh message.
+ */
+async function applyDeduplication(
+  envelope: EventEnvelope<any>,
+  raw: string,
+  dedup: DeduplicationContext,
+  dlq: boolean,
+  deps: MessageHandlerDeps,
+): Promise<boolean> {
+  const clockRaw = envelope.headers[HEADER_LAMPORT_CLOCK];
+  if (clockRaw === undefined) return false; // no clock → pass through
+
+  const incomingClock = Number(clockRaw);
+  if (Number.isNaN(incomingClock)) return false; // malformed header → pass through
+
+  const stateKey = `${envelope.topic}:${envelope.partition}`;
+  const lastProcessedClock = dedup.state.get(stateKey) ?? -1;
+
+  if (incomingClock <= lastProcessedClock) {
+    const meta: DuplicateMetadata = {
+      incomingClock,
+      lastProcessedClock,
+      originalHeaders: envelope.headers,
+    };
+    const strategy = dedup.options.strategy ?? "drop";
+    deps.logger.warn(
+      `Duplicate message on ${envelope.topic}[${envelope.partition}]: ` +
+        `clock=${incomingClock} <= last=${lastProcessedClock} — strategy=${strategy}`,
+    );
+
+    if (strategy === "dlq" && dlq) {
+      const augmentedHeaders = {
+        ...envelope.headers,
+        "x-dlq-reason": "lamport-clock-duplicate",
+        "x-dlq-duplicate-incoming-clock": String(incomingClock),
+        "x-dlq-duplicate-last-processed-clock": String(lastProcessedClock),
+      };
+      await sendToDlq(envelope.topic, raw, deps, {
+        error: new Error("Lamport Clock duplicate detected"),
+        attempt: 0,
+        originalHeaders: augmentedHeaders,
+      });
+    } else if (strategy === "topic") {
+      const destination =
+        dedup.options.duplicatesTopic ?? `${envelope.topic}.duplicates`;
+      await sendToDuplicatesTopic(envelope.topic, raw, destination, deps, meta);
+    }
+    // strategy === 'drop': already logged, nothing more to do
+
+    return true; // signal: skip this message
+  }
+
+  dedup.state.set(stateKey, incomingClock);
+  return false;
+}
 
 /** Parse, validate and extract an envelope from a single raw Kafka message. Returns null to skip. */
 async function parseSingleMessage(
@@ -117,6 +189,17 @@ export async function handleEachMessage(
   );
   if (envelope === null) return;
 
+  if (opts.deduplication) {
+    const isDuplicate = await applyDeduplication(
+      envelope,
+      message.value!.toString(),
+      opts.deduplication,
+      dlq,
+      deps,
+    );
+    if (isDuplicate) return;
+  }
+
   await executeWithRetry(
     () => {
       const fn = () =>
@@ -157,6 +240,7 @@ export type EachBatchOpts = {
     ms: number,
     topic: string,
   ) => Promise<R>;
+  deduplication?: DeduplicationContext;
 };
 
 export async function handleEachBatch(
@@ -204,6 +288,19 @@ export async function handleEachBatch(
       deps,
     );
     if (envelope === null) continue;
+
+    if (opts.deduplication) {
+      const raw = message.value!.toString();
+      const isDuplicate = await applyDeduplication(
+        envelope,
+        raw,
+        opts.deduplication,
+        dlq,
+        deps,
+      );
+      if (isDuplicate) continue;
+    }
+
     envelopes.push(envelope);
     rawMessages.push(message.value!.toString());
   }

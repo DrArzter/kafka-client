@@ -1,4 +1,4 @@
-import { buildEnvelopeHeaders } from "../message/envelope";
+import { buildEnvelopeHeaders, HEADER_LAMPORT_CLOCK } from "../message/envelope";
 import { KafkaValidationError } from "../errors";
 import type { SchemaLike, SchemaParseContext } from "../message/topic";
 import type {
@@ -77,6 +77,8 @@ export type BuildSendPayloadDeps = {
   strictSchemasEnabled: boolean;
   instrumentation: KafkaInstrumentation[];
   logger: KafkaLogger;
+  /** Called once per message to get the next Lamport clock value. Omit to disable clock stamping. */
+  nextLamportClock?: () => number;
 };
 
 export async function buildSendPayload(
@@ -100,6 +102,11 @@ export async function buildSendPayload(
         eventId: m.eventId,
         headers: m.headers,
       });
+
+      // Stamp Lamport clock for consumer-side deduplication
+      if (deps.nextLamportClock) {
+        envelopeHeaders[HEADER_LAMPORT_CLOCK] = String(deps.nextLamportClock());
+      }
 
       // beforeSend: let instrumentation mutate headers (e.g. OTel injects traceparent)
       for (const inst of deps.instrumentation) {

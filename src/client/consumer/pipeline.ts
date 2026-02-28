@@ -63,6 +63,7 @@ export async function validateWithSchema<T extends TopicMapConstraint<T>>(
     producer: Producer;
     onMessageLost?: (ctx: MessageLostContext) => void | Promise<void>;
     originalHeaders?: MessageHeaders;
+    instrumentation?: KafkaInstrumentation[];
   },
 ): Promise<any | null> {
   const schema = schemaMap.get(topic);
@@ -99,7 +100,7 @@ export async function validateWithSchema<T extends TopicMapConstraint<T>>(
         headers: deps.originalHeaders ?? {},
       });
     }
-    // Validation errors don't have an envelope yet — call onError with a minimal envelope
+    // Validation errors don't have an envelope yet — call hooks with a minimal envelope
     const errorEnvelope = extractEnvelope(
       message,
       deps.originalHeaders ?? {},
@@ -107,6 +108,9 @@ export async function validateWithSchema<T extends TopicMapConstraint<T>>(
       -1,
       "",
     );
+    for (const inst of (deps.instrumentation ?? [])) {
+      inst.onConsumeError?.(errorEnvelope, validationError);
+    }
     for (const interceptor of interceptors) {
       await interceptor.onError?.(errorEnvelope, validationError);
     }
@@ -257,6 +261,58 @@ export async function sendToRetryTopic(
       attempt,
       headers: Array.isArray(originalHeaders) ? (originalHeaders[0] ?? {}) : originalHeaders,
     });
+  }
+}
+
+// ── Deduplication routing ────────────────────────────────────────────
+
+export interface DuplicateMetadata {
+  /** The `x-lamport-clock` value from the incoming (duplicate) message. */
+  incomingClock: number;
+  /** The last processed clock value for this topic/partition. */
+  lastProcessedClock: number;
+  /** Original Kafka message headers — forwarded to preserve correlationId, traceparent, etc. */
+  originalHeaders?: MessageHeaders;
+}
+
+/** Build the payload for a duplicate message forwarded to a custom topic. */
+export function buildDuplicateTopicPayload(
+  sourceTopic: string,
+  rawMessage: string,
+  destinationTopic: string,
+  meta?: DuplicateMetadata,
+): { topic: string; messages: Array<{ value: string; headers: MessageHeaders }> } {
+  const headers: MessageHeaders = {
+    ...(meta?.originalHeaders ?? {}),
+    "x-duplicate-original-topic": sourceTopic,
+    "x-duplicate-detected-at": new Date().toISOString(),
+    "x-duplicate-reason": "lamport-clock-duplicate",
+    "x-duplicate-incoming-clock": String(meta?.incomingClock ?? 0),
+    "x-duplicate-last-processed-clock": String(meta?.lastProcessedClock ?? 0),
+  };
+  return { topic: destinationTopic, messages: [{ value: rawMessage, headers }] };
+}
+
+/**
+ * Forward a duplicate message to a dedicated topic (e.g. `<topic>.duplicates`).
+ * Stamps reason metadata headers so consumers of that topic know why it landed there.
+ */
+export async function sendToDuplicatesTopic(
+  sourceTopic: string,
+  rawMessage: string,
+  destinationTopic: string,
+  deps: { logger: KafkaLogger; producer: Producer },
+  meta?: DuplicateMetadata,
+): Promise<void> {
+  const payload = buildDuplicateTopicPayload(sourceTopic, rawMessage, destinationTopic, meta);
+  try {
+    await deps.producer.send(payload);
+    deps.logger.warn(`Duplicate message forwarded to ${destinationTopic}`);
+  } catch (error) {
+    deps.logger.error(
+      `Failed to forward duplicate to ${destinationTopic}:`,
+      toError(error).stack,
+    );
   }
 }
 
@@ -437,6 +493,14 @@ export async function executeWithRetry<T extends TopicMapConstraint<T>>(
     if (retryTopics && retry) {
       // Route to retry topic — retry consumer handles backoff and further attempts.
       // Always use attempt 1 here (main consumer never retries in-process).
+      //
+      // NOTE: this send is NOT EOS. The main consumer routes to <topic>.retry.1
+      // via the regular (non-transactional) producer. If the process crashes after
+      // producer.send() but before the offset commit, the message will appear in
+      // retry.1 AND be redelivered to the main consumer — handled twice.
+      // EOS (read-process-write atomicity) is guaranteed only from retry.N onward
+      // (see startRetryTopicConsumers). This is a known limitation tracked in the
+      // roadmap under 0.5.6.
       const cap = Math.min(backoffMs, maxBackoffMs);
       const delay = Math.floor(Math.random() * cap);
       await sendToRetryTopic(
@@ -450,13 +514,15 @@ export async function executeWithRetry<T extends TopicMapConstraint<T>>(
       );
     } else if (isLastAttempt) {
       if (dlq) {
-        const dlqMeta: DlqMetadata = {
-          error,
-          attempt,
-          originalHeaders: envelopes[0]?.headers,
-        };
-        for (const raw of rawMessages) {
-          await sendToDlq(topic, raw, deps, dlqMeta);
+        // Use per-message headers so each DLQ message preserves its own
+        // correlationId / traceparent instead of copying envelopes[0]'s headers
+        // onto every message in the batch.
+        for (let i = 0; i < rawMessages.length; i++) {
+          await sendToDlq(topic, rawMessages[i], deps, {
+            error,
+            attempt,
+            originalHeaders: envelopes[i]?.headers,
+          });
         }
       } else {
         await deps.onMessageLost?.({

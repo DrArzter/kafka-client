@@ -30,6 +30,7 @@ Type-safe Kafka client for Node.js. Framework-agnostic core with a first-class N
 - [Instrumentation](#instrumentation)
 - [Options reference](#options-reference)
 - [Error classes](#error-classes)
+- [Deduplication (Lamport Clock)](#deduplication-lamport-clock)
 - [Retry topic chain](#retry-topic-chain)
 - [stopConsumer](#stopconsumer)
 - [Graceful shutdown](#graceful-shutdown)
@@ -65,6 +66,7 @@ Safe by default. Configurable when you need it. Escape hatches for when you know
 - **Topic descriptors** — `topic()` DX sugar lets you define topics as standalone typed objects instead of string keys
 - **Framework-agnostic** — use standalone or with NestJS (`register()` / `registerAsync()`, DI, lifecycle hooks)
 - **Idempotent producer** — `acks: -1`, `idempotent: true` by default
+- **Lamport Clock deduplication** — every outgoing message is stamped with a monotonically increasing `x-lamport-clock` header; the consumer tracks the last processed value per `topic:partition` and silently drops (or routes to DLQ / a dedicated topic) any message whose clock is not strictly greater than the last seen value
 - **Retry + DLQ** — exponential backoff with full jitter; dead letter queue with error metadata headers (original topic, error message, stack, attempt count)
 - **Batch sending** — send multiple messages in a single request
 - **Batch consuming** — `startBatchConsumer()` for high-throughput `eachBatch` processing
@@ -772,6 +774,8 @@ Options for `sendMessage()` — the third argument:
 | `interceptors` | `[]` | Array of before/after/onError hooks |
 | `retryTopicAssignmentTimeoutMs` | `10000` | Timeout (ms) to wait for each retry level consumer to receive partition assignments after connecting; increase for slow brokers |
 | `handlerTimeoutMs` | — | Log a warning if the handler hasn't resolved within this window (ms) — does not cancel the handler |
+| `deduplication.strategy` | `'drop'` | What to do with duplicate messages: `'drop'` silently discards, `'dlq'` forwards to `{topic}.dlq` (requires `dlq: true`), `'topic'` forwards to `{topic}.duplicates` |
+| `deduplication.duplicatesTopic` | `{topic}.duplicates` | Custom destination for `strategy: 'topic'` |
 | `batch` | `false` | (decorator only) Use `startBatchConsumer` instead of `startConsumer` |
 | `subscribeRetry.retries` | `5` | Max attempts for `consumer.subscribe()` when topic doesn't exist yet |
 | `subscribeRetry.backoffMs` | `5000` | Delay between subscribe retry attempts (ms) |
@@ -879,6 +883,81 @@ const interceptor: ConsumerInterceptor<MyTopics> = {
   },
 };
 ```
+
+## Deduplication (Lamport Clock)
+
+Every outgoing message produced by this library is stamped with a monotonically increasing logical clock — the `x-lamport-clock` header. The counter lives in the `KafkaClient` instance and increments by one per message (including individual messages inside `sendBatch` and `transaction`).
+
+On the consumer side, enable deduplication by passing `deduplication` to `startConsumer` or `startBatchConsumer`. The library checks the incoming clock against the last processed value for that `topic:partition` combination and skips any message whose clock is not strictly greater.
+
+```typescript
+await kafka.startConsumer(['orders.created'], handler, {
+  deduplication: {}, // 'drop' strategy — silently discard duplicates
+});
+```
+
+### How duplicates happen
+
+The most common scenario: a producer service restarts. Its in-memory clock resets to `0`. The consumer already processed messages with clocks `1…N`. All new messages from the restarted producer (clocks `1`, `2`, `3`, …) have clocks ≤ `N` and are treated as duplicates.
+
+```text
+Producer A (running): sends clock 1, 2, 3, 4, 5  → consumer processes all 5
+Producer A (restarts): sends clock 1, 2, 3         → consumer sees 1 ≤ 5 — duplicate!
+```
+
+### Strategies
+
+| Strategy | Behaviour |
+| -------- | --------- |
+| `'drop'` *(default)* | Log a warning and silently discard the message |
+| `'dlq'` | Forward to `{topic}.dlq` with reason metadata headers (`x-dlq-reason`, `x-dlq-duplicate-incoming-clock`, `x-dlq-duplicate-last-processed-clock`). Requires `dlq: true` |
+| `'topic'` | Forward to `{topic}.duplicates` (or `duplicatesTopic` if set) with reason metadata headers (`x-duplicate-reason`, `x-duplicate-incoming-clock`, `x-duplicate-last-processed-clock`, `x-duplicate-detected-at`) |
+
+```typescript
+// Strategy: drop (default)
+await kafka.startConsumer(['orders'], handler, {
+  deduplication: {},
+});
+
+// Strategy: DLQ — inspect duplicates from {topic}.dlq
+await kafka.startConsumer(['orders'], handler, {
+  dlq: true,
+  deduplication: { strategy: 'dlq' },
+});
+
+// Strategy: dedicated topic — consume from {topic}.duplicates
+await kafka.startConsumer(['orders'], handler, {
+  deduplication: { strategy: 'topic' },
+});
+
+// Strategy: custom topic name
+await kafka.startConsumer(['orders'], handler, {
+  deduplication: {
+    strategy: 'topic',
+    duplicatesTopic: 'ops.orders.duplicates',
+  },
+});
+```
+
+### Startup validation
+
+When `autoCreateTopics: false` and `strategy: 'topic'`, `startConsumer` / `startBatchConsumer` validates that the destination topic (`{topic}.duplicates` or `duplicatesTopic`) exists before starting the consumer. A clear error is thrown at startup listing every missing topic, rather than silently failing on the first duplicate.
+
+With `autoCreateTopics: true` the check is skipped — the topic is created automatically instead.
+
+### Backwards compatibility
+
+Messages without an `x-lamport-clock` header pass through unchanged. Producers not using this library are unaffected.
+
+### Limitations
+
+Deduplication state is **in-memory and per-consumer-instance**. Understand what that means:
+
+- **Consumer restart** — state is cleared on restart. The first batch of messages after restart is accepted regardless of their clock values, so duplicates spanning a restart window are not caught.
+- **Multiple consumer instances** (same group, different machines) — each instance tracks its own partition subset. Partitions are reassigned on rebalance, so a rebalance can reset the state for moved partitions.
+- **Cross-session duplicates** — this guards against duplicates from a **producer that restarted within the same consumer session**. For durable, cross-restart deduplication, persist the clock state externally (Redis, database) and implement idempotent handlers.
+
+Use this feature as a lightweight first line of defence — not as a substitute for idempotent business logic.
 
 ## Retry topic chain
 

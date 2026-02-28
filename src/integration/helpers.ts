@@ -49,6 +49,10 @@ export type TestTopics = {
   "test.schema-ctx-send": { name: string };
   // graceful shutdown tests
   "test.graceful": { seq: number };
+  // Lamport Clock deduplication tests
+  "test.dedup": { value: string };
+  "test.dedup.duplicates": { value: string };
+  "test.dedup.dlq": { value: string };
 };
 
 // ── Descriptors ─────────────────────────────────────────────────────

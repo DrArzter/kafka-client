@@ -10,6 +10,7 @@ const mockListTopics = jest.fn().mockResolvedValue([
   "test.other",
   "test.topic.dlq",
   "test.other.dlq",
+  "test.topic.duplicates",
 ]);
 
 const mockTxSend = jest.fn().mockResolvedValue(undefined);

@@ -9,6 +9,8 @@ export const HEADER_CORRELATION_ID = "x-correlation-id";
 export const HEADER_TIMESTAMP = "x-timestamp";
 export const HEADER_SCHEMA_VERSION = "x-schema-version";
 export const HEADER_TRACEPARENT = "traceparent";
+/** Monotonically increasing logical clock stamped by the producer for deduplication. */
+export const HEADER_LAMPORT_CLOCK = "x-lamport-clock";
 
 // ── EventEnvelope ────────────────────────────────────────────────────
 

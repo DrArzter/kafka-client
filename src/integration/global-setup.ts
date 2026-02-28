@@ -46,6 +46,10 @@ const ALL_TOPICS = [
   "test.schema-ctx-send",
   // graceful shutdown tests
   "test.graceful",
+  // Lamport Clock deduplication tests
+  "test.dedup",
+  "test.dedup.duplicates",
+  "test.dedup.dlq",
 ];
 
 // Topics that need more than 1 partition (for rebalance tests)

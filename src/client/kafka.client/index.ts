@@ -37,7 +37,7 @@ import {
   type ConsumerOpsDeps,
 } from "./consumer-ops";
 import { handleEachMessage, handleEachBatch } from "./message-handler";
-import type { MessageHandlerDeps } from "./message-handler";
+import type { MessageHandlerDeps, DeduplicationContext } from "./message-handler";
 import { startRetryTopicConsumers } from "./retry-topic";
 import { subscribeWithRetry } from "../consumer/subscribe-retry";
 import { toError } from "../consumer/pipeline";
@@ -55,6 +55,7 @@ export class KafkaClient<
   private readonly kafka: Kafka;
   private readonly producer: Producer;
   private txProducer: Producer | undefined;
+  private txProducerInitPromise: Promise<Producer> | undefined;
   /** Maps transactionalId → Producer for each active retry level consumer. */
   private readonly retryTxProducers = new Map<string, Producer>();
   private readonly consumers = new Map<string, Consumer>();
@@ -64,6 +65,8 @@ export class KafkaClient<
   private readonly strictSchemasEnabled: boolean;
   private readonly numPartitions: number;
   private readonly ensuredTopics = new Set<string>();
+  /** Pending topic-creation promises keyed by topic name. Prevents duplicate createTopics calls. */
+  private readonly ensureTopicPromises = new Map<string, Promise<void>>();
   private readonly defaultGroupId: string;
   private readonly schemaRegistry = new Map<string, SchemaLike>();
   private readonly runningConsumers = new Map<
@@ -79,6 +82,11 @@ export class KafkaClient<
   private readonly instrumentation: KafkaInstrumentation[];
   private readonly onMessageLost: KafkaClientOptions["onMessageLost"];
   private readonly onRebalance: KafkaClientOptions["onRebalance"];
+
+  /** Monotonically increasing Lamport clock stamped on every outgoing message. */
+  private _lamportClock = 0;
+  /** Per-groupId deduplication state: `"topic:partition"` → last processed clock. */
+  private readonly dedupStates = new Map<string, Map<string, number>>();
 
   private isAdminConnected = false;
   private inFlightTotal = 0;
@@ -178,22 +186,34 @@ export class KafkaClient<
   public async transaction(
     fn: (ctx: TransactionContext<T>) => Promise<void>,
   ): Promise<void> {
-    if (!this.txProducer) {
+    if (!this.txProducerInitPromise) {
       // transactionalId must be unique per producer instance across the cluster.
       // Two KafkaClient instances sharing the same clientId will share this id,
       // causing Kafka to fence one of the producers. Use distinct clientIds when
       // running multiple instances of the same service.
-      const p = this.kafka.producer({
-        kafkaJS: {
-          acks: -1,
-          idempotent: true,
-          transactionalId: `${this.clientId}-tx`,
-          maxInFlightRequests: 1,
-        },
+      //
+      // Guarded by a promise (not just a flag) so that concurrent transaction()
+      // calls do not each create their own producer — only the first call creates
+      // the promise; subsequent concurrent calls await the same promise.
+      // On connect failure the promise is cleared so the next call can retry.
+      const initPromise: Promise<Producer> = (async () => {
+        const p = this.kafka.producer({
+          kafkaJS: {
+            acks: -1,
+            idempotent: true,
+            transactionalId: `${this.clientId}-tx`,
+            maxInFlightRequests: 1,
+          },
+        });
+        await p.connect();
+        return p;
+      })();
+      this.txProducerInitPromise = initPromise.catch((err) => {
+        this.txProducerInitPromise = undefined;
+        throw err;
       });
-      await p.connect();
-      this.txProducer = p;
     }
+    this.txProducer = await this.txProducerInitPromise;
     const tx = await this.txProducer.transaction();
     try {
       const ctx: TransactionContext<T> = {
@@ -241,12 +261,18 @@ export class KafkaClient<
 
   // ── Producer lifecycle ───────────────────────────────────────────
 
-  /** Connect the idempotent producer. Called automatically by `KafkaModule.register()`. */
+  /**
+   * Connect the idempotent producer. Called automatically by `KafkaModule.register()`.
+   * @internal Not part of `IKafkaClient` — use `disconnect()` for full teardown.
+   */
   public async connectProducer(): Promise<void> {
     await this.producer.connect();
     this.logger.log("Producer connected");
   }
 
+  /**
+   * @internal Not part of `IKafkaClient` — use `disconnect()` for full teardown.
+   */
   public async disconnectProducer(): Promise<void> {
     await this.producer.disconnect();
     this.logger.log("Producer disconnected");
@@ -283,6 +309,7 @@ export class KafkaClient<
 
     const deps = this.messageDeps;
     const timeoutMs = options.handlerTimeoutMs;
+    const deduplication = this.resolveDeduplicationContext(gid, options.deduplication);
 
     await consumer.run({
       eachMessage: (payload) =>
@@ -298,6 +325,7 @@ export class KafkaClient<
               retryTopics: options.retryTopics,
               timeoutMs,
               wrapWithTimeout: this.wrapWithTimeoutWarning.bind(this),
+              deduplication,
             },
             deps,
           ),
@@ -374,6 +402,7 @@ export class KafkaClient<
 
     const deps = this.messageDeps;
     const timeoutMs = options.handlerTimeoutMs;
+    const deduplication = this.resolveDeduplicationContext(gid, options.deduplication);
 
     await consumer.run({
       eachBatch: (payload) =>
@@ -389,6 +418,7 @@ export class KafkaClient<
               retryTopics: options.retryTopics,
               timeoutMs,
               wrapWithTimeout: this.wrapWithTimeoutWarning.bind(this),
+              deduplication,
             },
             deps,
           ),
@@ -442,10 +472,18 @@ export class KafkaClient<
         );
         return;
       }
-      await consumer.disconnect().catch(() => {});
+      await consumer
+        .disconnect()
+        .catch((e) =>
+          this.logger.warn(
+            `Error disconnecting consumer "${groupId}":`,
+            toError(e).message,
+          ),
+        );
       this.consumers.delete(groupId);
       this.runningConsumers.delete(groupId);
       this.consumerCreationOptions.delete(groupId);
+      this.dedupStates.delete(groupId);
       this.logger.log(`Consumer disconnected: group "${groupId}"`);
 
       // Stop all companion retry level consumers and their tx producers
@@ -453,7 +491,14 @@ export class KafkaClient<
       for (const cGroupId of companions) {
         const cConsumer = this.consumers.get(cGroupId);
         if (cConsumer) {
-          await cConsumer.disconnect().catch(() => {});
+          await cConsumer
+            .disconnect()
+            .catch((e) =>
+              this.logger.warn(
+                `Error disconnecting retry consumer "${cGroupId}":`,
+                toError(e).message,
+              ),
+            );
           this.consumers.delete(cGroupId);
           this.runningConsumers.delete(cGroupId);
           this.consumerCreationOptions.delete(cGroupId);
@@ -463,7 +508,14 @@ export class KafkaClient<
         const txId = `${cGroupId}-tx`;
         const txProducer = this.retryTxProducers.get(txId);
         if (txProducer) {
-          await txProducer.disconnect().catch(() => {});
+          await txProducer
+            .disconnect()
+            .catch((e) =>
+              this.logger.warn(
+                `Error disconnecting retry tx producer "${txId}":`,
+                toError(e).message,
+              ),
+            );
           this.retryTxProducers.delete(txId);
         }
       }
@@ -483,6 +535,7 @@ export class KafkaClient<
       this.consumerCreationOptions.clear();
       this.companionGroupIds.clear();
       this.retryTxProducers.clear();
+      this.dedupStates.clear();
       this.logger.log("All consumers disconnected");
     }
   }
@@ -557,6 +610,7 @@ export class KafkaClient<
     if (this.txProducer) {
       tasks.push(this.txProducer.disconnect());
       this.txProducer = undefined;
+      this.txProducerInitPromise = undefined;
     }
     for (const p of this.retryTxProducers.values()) {
       tasks.push(p.disconnect());
@@ -735,6 +789,29 @@ export class KafkaClient<
   }
 
   /**
+   * When `deduplication.strategy: 'topic'` and `autoCreateTopics: false`, verify
+   * that every `<topic>.duplicates` destination topic already exists. Throws a
+   * clear error at startup rather than silently dropping duplicates on first hit.
+   */
+  private async validateDuplicatesTopicsExist(
+    topicNames: string[],
+    customDestination: string | undefined,
+  ): Promise<void> {
+    await this.ensureAdminConnected();
+    const existing = new Set(await this.admin.listTopics());
+    const toCheck = customDestination
+      ? [customDestination]
+      : topicNames.map((t) => `${t}.duplicates`);
+    const missing = toCheck.filter((t) => !existing.has(t));
+    if (missing.length > 0) {
+      throw new Error(
+        `deduplication.strategy: 'topic' but the following duplicate-routing topics do not exist: ${missing.join(", ")}. ` +
+          `Create them manually or set autoCreateTopics: true.`,
+      );
+    }
+  }
+
+  /**
    * Connect the admin client if not already connected.
    * The flag is only set to `true` after a successful connect — if `admin.connect()`
    * throws the flag remains `false` so the next call will retry the connection.
@@ -771,11 +848,20 @@ export class KafkaClient<
 
   private async ensureTopic(topic: string): Promise<void> {
     if (!this.autoCreateTopicsEnabled || this.ensuredTopics.has(topic)) return;
-    await this.ensureAdminConnected();
-    await this.admin.createTopics({
-      topics: [{ topic, numPartitions: this.numPartitions }],
-    });
-    this.ensuredTopics.add(topic);
+    // Deduplicate concurrent calls for the same topic so that parallel sends
+    // (or consumer setup + send) don't each race to call createTopics.
+    let p = this.ensureTopicPromises.get(topic);
+    if (!p) {
+      p = (async () => {
+        await this.ensureAdminConnected();
+        await this.admin.createTopics({
+          topics: [{ topic, numPartitions: this.numPartitions }],
+        });
+        this.ensuredTopics.add(topic);
+      })().finally(() => this.ensureTopicPromises.delete(topic));
+      this.ensureTopicPromises.set(topic, p);
+    }
+    await p;
   }
 
   /** Shared consumer setup: groupId check, schema map, connect, subscribe. */
@@ -839,6 +925,17 @@ export class KafkaClient<
       }
     }
 
+    if (options.deduplication?.strategy === "topic") {
+      const dest = options.deduplication.duplicatesTopic;
+      if (this.autoCreateTopicsEnabled) {
+        for (const t of topicNames) {
+          await this.ensureTopic(dest ?? `${t}.duplicates`);
+        }
+      } else {
+        await this.validateDuplicatesTopicsExist(topicNames, dest);
+      }
+    }
+
     await consumer.connect();
     await subscribeWithRetry(
       consumer,
@@ -854,6 +951,18 @@ export class KafkaClient<
     return { consumer, schemaMap, topicNames, gid, dlq, interceptors, retry };
   }
 
+  /** Create or retrieve the deduplication context for a consumer group. */
+  private resolveDeduplicationContext(
+    groupId: string,
+    options: import("../types").DeduplicationOptions | undefined,
+  ): DeduplicationContext | undefined {
+    if (!options) return undefined;
+    if (!this.dedupStates.has(groupId)) {
+      this.dedupStates.set(groupId, new Map());
+    }
+    return { options, state: this.dedupStates.get(groupId)! };
+  }
+
   // ── Deps object getters ──────────────────────────────────────────
 
   private get producerOpsDeps(): BuildSendPayloadDeps {
@@ -862,6 +971,7 @@ export class KafkaClient<
       strictSchemasEnabled: this.strictSchemasEnabled,
       instrumentation: this.instrumentation,
       logger: this.logger,
+      nextLamportClock: () => ++this._lamportClock,
     };
   }
 

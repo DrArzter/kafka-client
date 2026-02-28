@@ -72,6 +72,41 @@ export interface BatchMeta {
   commitOffsetsIfNecessary(): Promise<void>;
 }
 
+/**
+ * Options for Lamport Clock-based message deduplication.
+ *
+ * The producer stamps every outgoing message with a monotonically increasing
+ * `x-lamport-clock` header. The consumer tracks the last processed value per
+ * `topic:partition` and skips any message whose clock is not strictly greater
+ * than that value.
+ *
+ * Messages that arrive without the `x-lamport-clock` header are passed through
+ * unchanged (backwards-compatible with producers that don't use this library).
+ *
+ * **In-session limitation**: deduplication state lives in memory and is reset
+ * whenever the process restarts or `stopConsumer` is called. After a restart,
+ * previously processed messages with `clock ≤ N` will be re-processed until
+ * their offsets catch up to the high-watermark again. The same applies after a
+ * rebalance: the instance that receives the partition begins with empty state.
+ * This is a fundamental limitation of the in-memory Lamport clock approach —
+ * it provides deduplication only within a single process session.
+ */
+export interface DeduplicationOptions {
+  /**
+   * What to do with detected duplicate messages:
+   * - `'drop'`  — silently discard. No routing, no callback. **(default)**
+   * - `'dlq'`   — forward to `<topic>.dlq` with reason metadata headers.
+   *               Requires `dlq: true` on the consumer options.
+   * - `'topic'` — forward to `<topic>.duplicates` (or `duplicatesTopic` if set).
+   */
+  strategy?: "dlq" | "topic" | "drop";
+  /**
+   * Custom destination topic for `strategy: 'topic'`.
+   * Defaults to `<consumedTopic>.duplicates`.
+   */
+  duplicatesTopic?: string;
+}
+
 /** Options for configuring a Kafka consumer. */
 export interface ConsumerOptions<
   T extends TopicMapConstraint<T> = TTopicMessageMap,
@@ -116,6 +151,13 @@ export interface ConsumerOptions<
    * before they starve a partition.
    */
   handlerTimeoutMs?: number;
+  /**
+   * Enable Lamport Clock deduplication.
+   * Requires the producer to stamp messages with `x-lamport-clock` headers
+   * (done automatically when using this library's send methods).
+   * Messages without the header are passed through unchanged.
+   */
+  deduplication?: DeduplicationOptions;
 }
 
 /** Configuration for consumer retry behavior. */
