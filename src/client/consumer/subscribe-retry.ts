@@ -4,12 +4,15 @@ import { toError, sleep } from "./pipeline";
 
 export async function subscribeWithRetry(
   consumer: KafkaJS.Consumer,
-  topics: string[],
+  topics: (string | RegExp)[],
   logger: KafkaLogger,
   retryOpts?: SubscribeRetryOptions,
 ): Promise<void> {
   const maxAttempts = retryOpts?.retries ?? 5;
   const backoffMs = retryOpts?.backoffMs ?? 5000;
+  const displayTopics = topics
+    .map((t) => (t instanceof RegExp ? t.toString() : t))
+    .join(", ");
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -20,7 +23,7 @@ export async function subscribeWithRetry(
       const msg = toError(error).message;
       const delay = Math.floor(Math.random() * backoffMs);
       logger.warn(
-        `Failed to subscribe to [${topics.join(", ")}] (attempt ${attempt}/${maxAttempts}): ${msg}. Retrying in ${delay}ms...`,
+        `Failed to subscribe to [${displayTopics}] (attempt ${attempt}/${maxAttempts}): ${msg}. Retrying in ${delay}ms...`,
       );
       await sleep(delay);
     }

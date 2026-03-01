@@ -34,6 +34,17 @@ export type GroupId = string;
 
 export type MessageHeaders = Record<string, string>;
 
+/**
+ * Message compression codec.
+ * Maps directly to the underlying librdkafka codec values.
+ * - `'none'` — no compression (default)
+ * - `'gzip'` — widely supported, moderate compression ratio
+ * - `'snappy'` — fast, moderate compression ratio
+ * - `'lz4'` — fastest, slightly lower ratio
+ * - `'zstd'` — best ratio, slightly slower
+ */
+export type CompressionType = "none" | "gzip" | "snappy" | "lz4" | "zstd";
+
 /** Options for sending a single message. */
 export interface SendOptions {
   /** Partition key for message routing. */
@@ -46,16 +57,38 @@ export interface SendOptions {
   schemaVersion?: number;
   /** Override the auto-generated event ID (UUID v4). */
   eventId?: string;
+  /**
+   * Compression codec for this message.
+   * Applied at the producer record level — all messages in a single `send` call share the same codec.
+   * Default: `'none'`.
+   */
+  compression?: CompressionType;
 }
 
 /** Shape of each item in a `sendBatch` call. */
 export interface BatchMessageItem<V> {
   value: V;
+  /**
+   * Kafka partition key for this message.
+   * Kafka hashes the key to deterministically route the message to a partition.
+   * Messages with the same key always land on the same partition — use this to
+   * guarantee ordering per entity (e.g. `userId`, `orderId`).
+   */
   key?: string;
   headers?: MessageHeaders;
   correlationId?: string;
   schemaVersion?: number;
   eventId?: string;
+}
+
+/** Options for a `sendBatch` call (applies to all messages in the batch). */
+export interface BatchSendOptions {
+  /**
+   * Compression codec for this batch.
+   * Applied at the producer record level — all messages in the batch share the same codec.
+   * Default: `'none'`.
+   */
+  compression?: CompressionType;
 }
 
 /** Metadata exposed to batch consumer handlers. */
@@ -220,6 +253,23 @@ export interface ConsumerOptions<
    * Only applies to `consume()`. Default: unbounded.
    */
   queueHighWaterMark?: number;
+  /**
+   * Kafka partition assignment strategy for this consumer group.
+   * - `'cooperative-sticky'` — **(default)** partitions move as little as possible on rebalance.
+   *   Best for horizontal scaling: only the partitions that need to be reassigned are moved.
+   * - `'roundrobin'` — distributes partitions as evenly as possible across consumers.
+   * - `'range'` — assigns contiguous partition ranges; can cause uneven distribution with multiple topics.
+   */
+  partitionAssigner?: "roundrobin" | "range" | "cooperative-sticky";
+  /**
+   * Called when a message is dropped due to TTL expiration (`messageTtlMs`).
+   * Fires instead of `onMessageLost` for expired messages when `dlq` is not enabled.
+   * When `dlq: true`, expired messages go to the DLQ and this callback is NOT called.
+   *
+   * **Per-consumer override**: takes precedence over `KafkaClientOptions.onTtlExpired`
+   * when both are set. Use this to handle TTL expiry differently per consumer group.
+   */
+  onTtlExpired?: (ctx: TtlExpiredContext) => void | Promise<void>;
 }
 
 /** Configuration for consumer retry behavior. */
@@ -387,10 +437,12 @@ export interface TransactionContext<T extends TopicMapConstraint<T>> {
   sendBatch<K extends keyof T>(
     topic: K,
     messages: Array<BatchMessageItem<T[K]>>,
+    options?: BatchSendOptions,
   ): Promise<void>;
   sendBatch<D extends TopicDescriptor<string & keyof T, T[string & keyof T]>>(
     descriptor: D,
     messages: Array<BatchMessageItem<D["__type"]>>,
+    options?: BatchSendOptions,
   ): Promise<void>;
 }
 
@@ -407,9 +459,65 @@ export type KafkaHealthResult =
   | { status: "up"; clientId: string; topics: string[] }
   | { status: "down"; clientId: string; error: string };
 
+/** Summary of a consumer group returned by `listConsumerGroups`. */
+export interface ConsumerGroupSummary {
+  /** Consumer group ID. */
+  groupId: string;
+  /**
+   * Current broker-reported state of the group.
+   * Common values: `'Empty'`, `'Stable'`, `'PreparingRebalance'`, `'CompletingRebalance'`, `'Dead'`.
+   */
+  state: string;
+}
+
+/** Partition-level metadata for a topic. */
+export interface TopicPartitionInfo {
+  /** Partition index (0-based). */
+  partition: number;
+  /** Node ID of the partition leader broker. */
+  leader: number;
+  /** Node IDs of all replica brokers. */
+  replicas: number[];
+  /** Node IDs of in-sync replicas. */
+  isr: number[];
+}
+
+/** Topic metadata returned by `describeTopics`. */
+export interface TopicDescription {
+  /** Topic name. */
+  name: string;
+  /** Per-partition metadata. */
+  partitions: TopicPartitionInfo[];
+}
+
 /** Interface describing all public methods of the Kafka client. */
 export interface IKafkaClient<T extends TopicMapConstraint<T>> {
   checkStatus(): Promise<KafkaHealthResult>;
+
+  /**
+   * List all consumer groups known to the broker.
+   * @returns Array of `{ groupId, state }` summaries.
+   */
+  listConsumerGroups(): Promise<ConsumerGroupSummary[]>;
+
+  /**
+   * Describe topics — returns partition layout, leader, replicas, and ISR for each topic.
+   * @param topics Topic names to describe. Omit to describe all topics visible to this client.
+   */
+  describeTopics(topics?: string[]): Promise<TopicDescription[]>;
+
+  /**
+   * Delete records from a topic up to (but not including) the specified offsets.
+   * All messages with offsets **before** the given offset are deleted.
+   * Useful for purging expired or sensitive data.
+   *
+   * @param topic Topic name.
+   * @param partitions Array of `{ partition, offset }` — records before each offset are deleted.
+   */
+  deleteRecords(
+    topic: string,
+    partitions: Array<{ partition: number; offset: string }>,
+  ): Promise<void>;
 
   /**
    * Query the consumer group lag per partition using the admin API.
@@ -435,6 +543,17 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
     options?: ConsumerOptions<T>,
   ): Promise<ConsumerHandle>;
 
+  /**
+   * Subscribe using regex topic patterns (or a mix of strings and patterns).
+   * Note: type-safety is reduced to the union of all topic payloads when using regex.
+   * Incompatible with `retryTopics: true`.
+   */
+  startConsumer(
+    topics: (string | RegExp)[],
+    handleMessage: (envelope: EventEnvelope<T[keyof T]>) => Promise<void>,
+    options?: ConsumerOptions<T>,
+  ): Promise<ConsumerHandle>;
+
   startBatchConsumer<K extends Array<keyof T>>(
     topics: K,
     handleBatch: (
@@ -456,6 +575,20 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
   ): Promise<ConsumerHandle>;
 
   /**
+   * Subscribe using regex topic patterns (or a mix of strings and patterns).
+   * Note: type-safety is reduced to the union of all topic payloads when using regex.
+   * Incompatible with `retryTopics: true`.
+   */
+  startBatchConsumer(
+    topics: (string | RegExp)[],
+    handleBatch: (
+      envelopes: EventEnvelope<T[keyof T]>[],
+      meta: BatchMeta,
+    ) => Promise<void>,
+    options?: ConsumerOptions<T>,
+  ): Promise<ConsumerHandle>;
+
+  /**
    * Stop consumer(s).
    * - `stopConsumer(groupId)` — disconnect and remove the consumer for a specific group.
    * - `stopConsumer()` — disconnect and remove all consumers.
@@ -468,9 +601,29 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
     options?: SendOptions,
   ): Promise<void>;
 
+  /**
+   * Send a null-value (tombstone) message to a topic.
+   * Tombstones are used with log-compacted topics to signal that a key's record
+   * should be removed during the next compaction cycle.
+   *
+   * Unlike `sendMessage`, tombstones carry no payload, no envelope headers, and
+   * skip schema validation. Only the partition `key` and optional custom `headers`
+   * are forwarded to Kafka.
+   *
+   * @param topic Topic name or descriptor.
+   * @param key Partition key identifying the record to tombstone.
+   * @param headers Optional custom Kafka headers.
+   */
+  sendTombstone(
+    topic: string,
+    key: string,
+    headers?: MessageHeaders,
+  ): Promise<void>;
+
   sendBatch<K extends keyof T>(
     topic: K,
     messages: Array<BatchMessageItem<T[K]>>,
+    options?: BatchSendOptions,
   ): Promise<void>;
 
   transaction(fn: (ctx: TransactionContext<T>) => Promise<void>): Promise<void>;
@@ -578,6 +731,11 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
    *
    * Breaking out of the loop (or calling `return()` on the iterator) stops the
    * underlying consumer automatically.
+   *
+   * @remarks
+   * **Limitations vs `startConsumer`:**
+   * - Does **not** support `retryTopics: true` (EOS retry chains). Use `startConsumer` for that.
+   * - Does not support regex topic patterns.
    *
    * @example
    * ```ts
@@ -708,6 +866,9 @@ export interface KafkaClientOptions {
    * Called when a message is dropped due to TTL expiration (`messageTtlMs`).
    * Fires instead of `onMessageLost` for expired messages when `dlq` is not enabled.
    * When `dlq: true`, expired messages go to the DLQ and this callback is NOT called.
+   *
+   * **Client-wide fallback**: if `ConsumerOptions.onTtlExpired` is set on the consumer,
+   * it takes precedence over this client-level callback.
    */
   onTtlExpired?: (ctx: TtlExpiredContext) => void | Promise<void>;
   /**

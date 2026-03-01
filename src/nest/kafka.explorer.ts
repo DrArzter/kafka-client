@@ -23,6 +23,12 @@ export class KafkaExplorer implements OnModuleInit {
     private readonly moduleRef: ModuleRef,
   ) {}
 
+  /**
+   * Scan all NestJS providers for `@SubscribeTo()` metadata and wire each decorated
+   * method to its Kafka client via `startConsumer` or `startBatchConsumer`.
+   *
+   * Called automatically by the NestJS lifecycle — do not invoke manually.
+   */
   async onModuleInit() {
     const providers = this.discoveryService.getProviders();
 

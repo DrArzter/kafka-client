@@ -54,6 +54,13 @@ const mockFetchOffsets = jest.fn().mockResolvedValue([]);
 const mockFetchTopicOffsets = jest.fn().mockResolvedValue([]);
 const mockFetchTopicOffsetsByTime = jest.fn().mockResolvedValue([]);
 const mockSetOffsets = jest.fn().mockResolvedValue(undefined);
+const mockListGroups = jest
+  .fn()
+  .mockResolvedValue({ groups: [], errors: [] });
+const mockFetchTopicMetadata = jest
+  .fn()
+  .mockResolvedValue({ topics: [] });
+const mockDeleteTopicRecords = jest.fn().mockResolvedValue([]);
 
 const mockAdmin = {
   connect: jest.fn().mockResolvedValue(undefined),
@@ -64,6 +71,9 @@ const mockAdmin = {
   fetchTopicOffsets: mockFetchTopicOffsets,
   fetchTopicOffsetsByTime: mockFetchTopicOffsetsByTime,
   setOffsets: mockSetOffsets,
+  listGroups: mockListGroups,
+  fetchTopicMetadata: mockFetchTopicMetadata,
+  deleteTopicRecords: mockDeleteTopicRecords,
 };
 
 const Kafka = jest.fn().mockImplementation(() => ({
@@ -80,9 +90,16 @@ const logLevel = {
   DEBUG: 4,
 };
 
+const PartitionAssigners = {
+  roundRobin: "roundrobin",
+  range: "range",
+  cooperativeSticky: "cooperative-sticky",
+};
+
 const KafkaJS = {
   Kafka,
   logLevel,
+  PartitionAssigners,
 };
 
 export {
@@ -101,6 +118,9 @@ export {
   mockFetchTopicOffsets,
   mockFetchTopicOffsetsByTime,
   mockSetOffsets,
+  mockListGroups,
+  mockFetchTopicMetadata,
+  mockDeleteTopicRecords,
   mockTransaction,
   mockTxSend,
   mockTxCommit,

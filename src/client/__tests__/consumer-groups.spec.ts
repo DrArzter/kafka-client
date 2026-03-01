@@ -38,10 +38,10 @@ describe("KafkaClient — Consumer Groups", () => {
         .KafkaJS.Kafka.mock.results[0].value;
       expect(kafkaInstance.consumer).toHaveBeenCalledTimes(2);
       expect(kafkaInstance.consumer).toHaveBeenCalledWith({
-        kafkaJS: { groupId: "group-a", fromBeginning: false, autoCommit: true },
+        kafkaJS: { groupId: "group-a", fromBeginning: false, autoCommit: true, partitionAssigners: ["cooperative-sticky"] },
       });
       expect(kafkaInstance.consumer).toHaveBeenCalledWith({
-        kafkaJS: { groupId: "group-b", fromBeginning: false, autoCommit: true },
+        kafkaJS: { groupId: "group-b", fromBeginning: false, autoCommit: true, partitionAssigners: ["cooperative-sticky"] },
       });
     });
 
@@ -67,6 +67,7 @@ describe("KafkaClient — Consumer Groups", () => {
           groupId: "test-group",
           fromBeginning: false,
           autoCommit: true,
+          partitionAssigners: ["cooperative-sticky"],
         },
       });
     });
@@ -102,6 +103,7 @@ describe("KafkaClient — Consumer Groups", () => {
           groupId: "batch-group",
           fromBeginning: false,
           autoCommit: true,
+          partitionAssigners: ["cooperative-sticky"],
         },
       });
     });

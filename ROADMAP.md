@@ -13,6 +13,21 @@
 
 ## Done
 
+### 0.7.2
+
+- [x] **`sendTombstone(topic, key, headers?)`** — sends a null-value Kafka record to compact a specific key out of a log-compacted topic; skips envelope headers, schema validation, and Lamport clock stamping; both `beforeSend` and `afterSend` instrumentation hooks still fire so tracing works correctly
+- [x] **Regex topic subscription** — `startConsumer` and `startBatchConsumer` now accept `(string | RegExp)[]`; pattern-based subscriptions route any broker-side matching topic to the consumer dynamically; startup validation throws a clear error when `retryTopics: true` is combined with a regex (incompatible — static retry topic names cannot be derived from a pattern)
+- [x] **`compression` in `SendOptions` / `BatchSendOptions`** — per-call compression codec (`'gzip'`, `'snappy'`, `'lz4'`, `'zstd'`) for `sendMessage`, `sendBatch`, and `tx.send` / `tx.sendBatch` inside transactions; `CompressionType` exported from all entrypoints
+- [x] **`partitionAssigner` in `ConsumerOptions`** — choose between `'cooperative-sticky'` (default, minimal partition movement on rebalance), `'roundrobin'`, and `'range'`; previously the strategy was always `cooperative-sticky` with no way to override
+- [x] **`onTtlExpired` in `ConsumerOptions`** — per-consumer override of the client-level `onTtlExpired` callback; the consumer-level value takes precedence, enabling different TTL handlers for different topics within the same client
+- [x] **`listConsumerGroups()`** — returns all consumer groups known to the broker as `{ groupId, state }[]`; delegates to `admin.listGroups()` via the shared admin connection
+- [x] **`describeTopics(topics?)`** — fetches partition metadata (leader, replicas, ISR) via `admin.fetchTopicMetadata`; omitting `topics` describes all known topics; returns `TopicDescription[]`
+- [x] **`deleteRecords(topic, partitions)`** — truncates a topic by deleting records up to a given per-partition offset via `admin.deleteTopicRecords`; pass `offset: '-1'` to truncate completely
+- [x] **`consume()` `retryTopics` guard** — `consume()` now throws immediately if `retryTopics: true` is passed, with a clear message directing callers to `startConsumer()`; previously the option was silently ignored, giving a false sense of EOS coverage
+- [x] **Comprehensive JSDoc** — all public-facing functions and types in `producer-ops.ts`, `consumer-ops.ts`, `kafka.client/index.ts`, `kafka.decorator.ts`, and `kafka.explorer.ts` now carry accurate JSDoc; verified against implementations
+- [x] **Unit tests: `retry-topic.spec.ts`** — 8 scenarios covering null-value skip, future `x-retry-after` pause/sleep/resume, success commit (no EOS tx), EOS routing to next level, EOS routing to DLQ, no-DLQ `onMessageLost`, EOS tx abort on failure, and JSON parse failure
+- [x] **Unit tests: `kafka.explorer.spec.ts`** — 6 scenarios covering no-metadata skip, `@SubscribeTo` → `startConsumer`, batch → `startBatchConsumer`, named client DI token, client-not-found error handling, and schemas merged into `consumerOptions`
+
 ### 0.7.1
 
 - [x] **`consume()` backpressure** — `queueHighWaterMark` option in `ConsumerOptions`; when the internal `AsyncQueue` reaches the limit the partition is paused via `consumer.pause()`; resumes automatically when the queue drains below 50%; uses `consumer.assignment()` to resolve current partition numbers at pause/resume time; no-op when the option is omitted (default: unbounded)

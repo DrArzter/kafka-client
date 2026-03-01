@@ -20,12 +20,15 @@ Type-safe Kafka client for Node.js. Framework-agnostic core with a first-class N
 - [Consuming messages](#consuming-messages)
   - [Declarative: @SubscribeTo()](#declarative-subscribeto)
   - [Imperative: startConsumer()](#imperative-startconsumer)
+  - [Regex topic subscription](#regex-topic-subscription)
   - [Iterator: consume()](#iterator-consume)
 - [Multiple consumer groups](#multiple-consumer-groups)
 - [Partition key](#partition-key)
 - [Message headers](#message-headers)
 - [Batch sending](#batch-sending)
 - [Batch consuming](#batch-consuming)
+- [Tombstone messages](#tombstone-messages)
+- [Compression](#compression)
 - [Transactions](#transactions)
 - [Consumer interceptors](#consumer-interceptors)
 - [Instrumentation](#instrumentation)
@@ -42,6 +45,7 @@ Type-safe Kafka client for Node.js. Framework-agnostic core with a first-class N
 - [Seek to timestamp](#seek-to-timestamp)
 - [Message TTL](#message-ttl)
 - [DLQ replay](#dlq-replay)
+- [Admin API](#admin-api)
 - [Graceful shutdown](#graceful-shutdown)
 - [Consumer handles](#consumer-handles)
 - [onMessageLost](#onmessagelost)
@@ -97,6 +101,11 @@ Safe by default. Configurable when you need it. Escape hatches for when you know
 - **Message TTL** — `messageTtlMs` drops or DLQs messages older than a configurable threshold, preventing stale events from poisoning downstream systems after a lag spike
 - **Circuit breaker** — `circuitBreaker` option applies a sliding-window breaker per topic-partition; pauses delivery on repeated DLQ failures and resumes after a configurable recovery window
 - **Seek to offset** — `seekToOffset(groupId, assignments)` seeks individual partitions to explicit offsets for fine-grained replay
+- **Tombstone messages** — `sendTombstone(topic, key)` sends a null-value record to compact a key out of a log-compacted topic; all instrumentation hooks still fire
+- **Regex topic subscription** — `startConsumer([/^orders\..+/], handler)` subscribes using a pattern; the broker routes matching topics to the consumer dynamically
+- **Compression** — per-send `compression` option (`gzip`, `snappy`, `lz4`, `zstd`) in `SendOptions` and `BatchSendOptions`
+- **Partition assignment strategy** — `partitionAssigner` in `ConsumerOptions` chooses between `cooperative-sticky` (default), `roundrobin`, and `range`
+- **Admin API** — `listConsumerGroups()`, `describeTopics()`, `deleteRecords()` for group inspection, partition metadata, and message deletion
 
 See the [Roadmap](./ROADMAP.md) for upcoming features and version history.
 
@@ -439,6 +448,27 @@ export class OrdersService implements OnModuleInit {
 }
 ```
 
+### Regex topic subscription
+
+Subscribe to multiple topics matching a pattern — the broker dynamically routes any topic whose name matches the regex to this consumer:
+
+```typescript
+// Subscribe to all topics starting with "orders."
+await kafka.startConsumer([/^orders\..+/], handler);
+
+// Mix regexes and literal strings
+await kafka.startConsumer([/^payments\..+/, 'audit.global'], handler);
+```
+
+Works with `startBatchConsumer` and `@SubscribeTo` too:
+
+```typescript
+@SubscribeTo(/^events\..+/)
+async handleEvent(envelope: EventEnvelope<any>) { ... }
+```
+
+> **Limitation:** `retryTopics: true` is incompatible with regex subscriptions — the library cannot derive static retry topic names from a pattern. An error is thrown at startup if both are combined.
+
 ### Iterator: consume()
 
 Stream messages from a single topic as an `AsyncIterableIterator` — useful for scripts, one-off tasks, or any context where you prefer `for await` over a callback:
@@ -682,6 +712,36 @@ await kafka.startBatchConsumer(
 | `resolveOffset(offset)` | Mark offset as processed (required before `commitOffsetsIfNecessary`) |
 | `commitOffsetsIfNecessary()` | Commit resolved offsets; respects `autoCommit` setting |
 
+## Tombstone messages
+
+Send a null-value Kafka record to compact a specific key out of a log-compacted topic:
+
+```typescript
+// Delete the record with key "user-123" from the log-compacted "users" topic
+await kafka.sendTombstone('users', 'user-123');
+
+// With custom headers
+await kafka.sendTombstone('users', 'user-123', { 'x-reason': 'gdpr-deletion' });
+```
+
+`sendTombstone` skips envelope headers, schema validation, and the Lamport clock — the record value is literally `null`, as required by Kafka's log compaction protocol. Both `beforeSend` and `afterSend` instrumentation hooks still fire so tracing works correctly.
+
+## Compression
+
+Reduce network bandwidth with per-send compression. Supported codecs: `'gzip'`, `'snappy'`, `'lz4'`, `'zstd'`:
+
+```typescript
+import { CompressionType } from '@drarzter/kafka-client/core';
+
+// Single message
+await kafka.sendMessage('events', payload, { compression: 'gzip' });
+
+// Batch
+await kafka.sendBatch('events', messages, { compression: 'snappy' });
+```
+
+Compression is applied at the Kafka message-set level — the broker decompresses transparently on the consumer side. `'snappy'` and `'lz4'` offer the best throughput/CPU trade-off for most workloads; `'gzip'` gives the highest compression ratio; `'zstd'` balances both.
+
 ## Transactions
 
 Send multiple messages atomically with exactly-once semantics:
@@ -862,8 +922,9 @@ Options for `sendMessage()` — the third argument:
 | `correlationId` | auto | Override the auto-propagated correlation ID (default: inherited from ALS context or new UUID) |
 | `schemaVersion` | `1` | Schema version for the payload |
 | `eventId` | auto | Override the auto-generated event ID (UUID v4) |
+| `compression` | — | Compression codec for the message set: `'gzip'`, `'snappy'`, `'lz4'`, `'zstd'`; omit to send uncompressed |
 
-`sendBatch()` accepts the same options per message inside the array items.
+`sendBatch()` accepts `compression` as a top-level option (not per-message); all other options are per-message inside the array items.
 
 ### Consumer options
 
@@ -890,6 +951,8 @@ Options for `sendMessage()` — the third argument:
 | `circuitBreaker.halfOpenSuccesses` | `1` | Consecutive successes in HALF_OPEN required to close the circuit |
 | `queueHighWaterMark` | unbounded | Max messages buffered in the `consume()` iterator queue before the partition is paused; resumes at 50% drain. Only applies to `consume()` |
 | `batch` | `false` | (decorator only) Use `startBatchConsumer` instead of `startConsumer` |
+| `partitionAssigner` | `'cooperative-sticky'` | Partition assignment strategy: `'cooperative-sticky'` (minimal movement on rebalance, best for horizontal scaling), `'roundrobin'` (even distribution), `'range'` (contiguous partition ranges) |
+| `onTtlExpired` | — | Per-consumer override of the client-level `onTtlExpired` callback; takes precedence when set. Receives `TtlExpiredContext` — same shape as the client-level hook |
 | `subscribeRetry.retries` | `5` | Max attempts for `consumer.subscribe()` when topic doesn't exist yet |
 | `subscribeRetry.backoffMs` | `5000` | Delay between subscribe retry attempts (ms) |
 
@@ -1367,6 +1430,50 @@ const filtered = await kafka.replayDlq('orders', {
 
 `replayDlq` creates a temporary consumer group that reads the DLQ topic up to the high-watermark at the time of the call — messages published after replay starts are not included. DLQ metadata headers (`x-dlq-original-topic`, `x-dlq-error-message`, `x-dlq-error-stack`, `x-dlq-failed-at`, `x-dlq-attempt-count`) are stripped from the replayed messages; all other headers (e.g. `x-correlation-id`) are preserved.
 
+## Admin API
+
+Inspect consumer groups, topic metadata, and delete records via the built-in admin client — no separate connection needed.
+
+### `listConsumerGroups()`
+
+Returns all consumer groups known to the broker:
+
+```typescript
+const groups = await kafka.listConsumerGroups();
+// [{ groupId: 'orders-group', state: 'Stable' }, ...]
+```
+
+`state` reflects the librdkafka group state: `'Stable'`, `'PreparingRebalance'`, `'CompletingRebalance'`, `'Dead'`, or `'Empty'`.
+
+### `describeTopics(topics?)`
+
+Fetch partition metadata (leader, replicas, ISR) for one or more topics. Omit `topics` to describe all topics the client knows about:
+
+```typescript
+const info = await kafka.describeTopics(['orders.created', 'payments.received']);
+// [
+//   {
+//     name: 'orders.created',
+//     partitions: [{ partition: 0, leader: 1, replicas: [1, 2], isr: [1, 2] }],
+//   },
+//   ...
+// ]
+```
+
+### `deleteRecords(topic, partitions)`
+
+Truncate a topic by deleting all records up to (but not including) a given offset:
+
+```typescript
+// Delete all records in partition 0 up to offset 500
+await kafka.deleteRecords('orders.created', [
+  { partition: 0, offset: '500' },
+  { partition: 1, offset: '200' },
+]);
+```
+
+Pass `offset: '-1'` to delete all records in a partition (truncate completely).
+
 ## Graceful shutdown
 
 `disconnect()` now drains in-flight handlers before tearing down connections — no messages are silently cut off mid-processing.
@@ -1459,6 +1566,18 @@ const kafka = new KafkaClient('my-app', 'my-group', ['localhost:9092'], {
 ```
 
 When `dlq: true`, expired messages are routed to DLQ instead and `onTtlExpired` is **not** called.
+
+`onTtlExpired` can also be set per-consumer via `ConsumerOptions.onTtlExpired`. The consumer-level value takes precedence over the client-level one, so you can use different handlers for different topics:
+
+```typescript
+await kafka.startConsumer(['orders'], handler, {
+  messageTtlMs: 30_000,
+  onTtlExpired: (ctx) => {
+    // overrides the client-level onTtlExpired for this consumer only
+    ordersMetrics.increment('ttl_expired', { topic: ctx.topic });
+  },
+});
+```
 
 ## onRebalance
 

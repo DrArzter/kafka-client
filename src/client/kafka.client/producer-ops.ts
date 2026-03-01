@@ -6,11 +6,16 @@ import { KafkaValidationError } from "../errors";
 import type { SchemaLike, SchemaParseContext } from "../message/topic";
 import type {
   BatchMessageItem,
+  CompressionType,
   KafkaInstrumentation,
   KafkaLogger,
   MessageHeaders,
 } from "../types";
 
+/**
+ * Extract the plain topic name string from either a `TopicDescriptor` object or a raw string.
+ * Falls back to `String(topicOrDescriptor)` for any other value.
+ */
 export function resolveTopicName(topicOrDescriptor: unknown): string {
   if (typeof topicOrDescriptor === "string") return topicOrDescriptor;
   if (
@@ -23,6 +28,15 @@ export function resolveTopicName(topicOrDescriptor: unknown): string {
   return String(topicOrDescriptor);
 }
 
+/**
+ * Register the schema attached to a `TopicDescriptor` into the shared schema registry.
+ * If a different schema is already registered for the same topic, logs a warning and
+ * overwrites it — consistent schemas across all call sites avoid silent validation drift.
+ *
+ * @param topicOrDesc A `TopicDescriptor` (with `__schema`) or a plain string. Plain strings are ignored.
+ * @param schemaRegistry Mutable map of topic name → validator shared across the client.
+ * @param logger Optional logger for conflict warnings.
+ */
 export function registerSchema(
   topicOrDesc: any,
   schemaRegistry: Map<string, SchemaLike>,
@@ -41,6 +55,21 @@ export function registerSchema(
   }
 }
 
+/**
+ * Validate `message` against the schema attached to `topicOrDesc` (or looked up from the
+ * registry when `strictSchemasEnabled` is on). Returns the parsed (potentially transformed)
+ * value on success, or throws a `KafkaValidationError` on failure.
+ *
+ * Validation priority:
+ * 1. Inline schema on the `TopicDescriptor` — always applied.
+ * 2. Registry schema — applied only when `strictSchemasEnabled` is `true`.
+ * 3. No schema found — returns `message` unchanged.
+ *
+ * @param topicOrDesc Topic descriptor carrying an inline `__schema`, or a plain topic string.
+ * @param message The raw message payload to validate.
+ * @param deps Schema registry and strict-mode flag.
+ * @param ctx Optional parse context forwarded to the schema (topic name, headers, version).
+ */
 export async function validateMessage(
   topicOrDesc: any,
   message: any,
@@ -84,12 +113,30 @@ export type BuildSendPayloadDeps = {
   nextLamportClock?: () => number;
 };
 
+/**
+ * Build the Kafka producer payload from a topic descriptor (or name) and an array of messages.
+ *
+ * For each message the function:
+ * 1. Builds envelope headers (`x-event-id`, `x-correlation-id`, `x-timestamp`, …).
+ * 2. Stamps the Lamport clock header when `deps.nextLamportClock` is provided.
+ * 3. Calls `beforeSend` instrumentation hooks so tracing can inject `traceparent` etc.
+ * 4. Validates the payload against the attached or registry schema.
+ * 5. JSON-serialises the validated value.
+ *
+ * @param topicOrDesc Topic descriptor or plain topic name string.
+ * @param messages Array of outgoing messages with optional key, headers, and metadata.
+ * @param deps Schema registry, strict-mode flag, instrumentation hooks, and Lamport clock factory.
+ * @param compression Optional compression codec to include in the returned payload object.
+ * @returns Kafka producer `send()` payload — `{ topic, messages, compression? }`.
+ */
 export async function buildSendPayload(
   topicOrDesc: any,
   messages: Array<BatchMessageItem<any>>,
   deps: BuildSendPayloadDeps,
+  compression?: CompressionType,
 ): Promise<{
   topic: string;
+  compression?: CompressionType;
   messages: Array<{
     value: string;
     key: string | null;
@@ -131,5 +178,5 @@ export async function buildSendPayload(
       };
     }),
   );
-  return { topic, messages: builtMessages };
+  return { topic, messages: builtMessages, ...(compression && { compression }) };
 }

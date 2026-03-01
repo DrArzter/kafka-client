@@ -3,14 +3,22 @@ import { getKafkaClientToken } from "./kafka.constants";
 import { ConsumerOptions } from "../client/kafka.client";
 import { TopicDescriptor, SchemaLike } from "../client/message/topic";
 
+/** Reflect metadata key used to store `@SubscribeTo` entries on a class constructor. */
 export const KAFKA_SUBSCRIBER_METADATA = "KAFKA_SUBSCRIBER_METADATA";
 
+/** Internal shape stored per `@SubscribeTo()` decoration on a class. */
 export interface KafkaSubscriberMetadata {
+  /** Resolved topic name strings (descriptors are unwrapped to their `__topic` string). */
   topics: string[];
+  /** Per-topic schema validators extracted from `TopicDescriptor` objects (if any). */
   schemas?: Map<string, SchemaLike>;
+  /** Additional consumer options forwarded to `startConsumer` / `startBatchConsumer`. */
   options?: ConsumerOptions;
+  /** Named client identifier — resolves to `KAFKA_CLIENT_<clientName>` in the DI container. */
   clientName?: string;
+  /** When `true`, routes to `startBatchConsumer` instead of `startConsumer`. */
   batch?: boolean;
+  /** Name of the decorated method on the provider class. */
   methodName?: string | symbol;
 }
 
@@ -19,8 +27,27 @@ export const InjectKafkaClient = (name?: string): ParameterDecorator =>
   Inject(getKafkaClientToken(name));
 
 /**
- * Decorator that auto-subscribes a method to Kafka topics on module init.
- * The decorated method receives `(message, topic)` for each consumed message.
+ * Method decorator that auto-subscribes the decorated method to one or more Kafka topics
+ * when the NestJS module initialises.
+ *
+ * The decorated method receives a fully-decoded `EventEnvelope` for each message
+ * (or an array of envelopes + `BatchMeta` when `batch: true`).
+ *
+ * @param topics One or more topic names or `TopicDescriptor` objects. Schemas embedded in
+ *   descriptors are automatically extracted and forwarded to the consumer.
+ * @param options Consumer and routing options:
+ *   - All `ConsumerOptions` fields (`groupId`, `retry`, `dlq`, `fromBeginning`, …)
+ *   - `clientName` — target a named `KafkaClient` (resolves `KAFKA_CLIENT_<name>` from the DI container)
+ *   - `batch` — use `startBatchConsumer` instead of `startConsumer`
+ *
+ * @example
+ * ```ts
+ * @SubscribeTo('orders.created', { groupId: 'orders-svc', retry: { maxRetries: 3 } })
+ * async handleOrder(envelope: EventEnvelope<Order>) { ... }
+ *
+ * @SubscribeTo(OrdersTopic, { batch: true })
+ * async handleBatch(envelopes: EventEnvelope<Order>[], meta: BatchMeta) { ... }
+ * ```
  */
 export const SubscribeTo = (
   topics:

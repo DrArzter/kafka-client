@@ -16,11 +16,30 @@ export type ConsumerOpsDeps = {
   logger: KafkaLogger;
 };
 
+/**
+ * Return an existing consumer for `groupId`, or create and register a new one.
+ *
+ * If the group already exists with different `fromBeginning` / `autoCommit` options the
+ * existing consumer is returned unchanged and a warning is logged — use a distinct
+ * `groupId` if different options are required.
+ *
+ * Partition assignment strategy defaults to `cooperative-sticky`, which minimises
+ * partition movement during rebalances and is the safest choice for horizontally
+ * scaled deployments.
+ *
+ * @param groupId Kafka consumer group ID.
+ * @param fromBeginning When `true`, the group starts from the earliest available offset.
+ * @param autoCommit When `true`, offsets are committed automatically. Set to `false` for manual EOS commits.
+ * @param deps Shared client dependencies (consumer map, Kafka instance, logger, …).
+ * @param partitionAssigner Assignment strategy — `'cooperative-sticky'` (default), `'roundrobin'`, or `'range'`.
+ * @returns The consumer instance for the group (existing or newly created).
+ */
 export function getOrCreateConsumer(
   groupId: string,
   fromBeginning: boolean,
   autoCommit: boolean,
   deps: ConsumerOpsDeps,
+  partitionAssigner?: "roundrobin" | "range" | "cooperative-sticky",
 ): Consumer {
   const { consumers, consumerCreationOptions, kafka, onRebalance, logger } =
     deps;
@@ -43,8 +62,19 @@ export function getOrCreateConsumer(
 
   consumerCreationOptions.set(groupId, { fromBeginning, autoCommit });
 
+  // Default to cooperative-sticky: minimal partition movement during rebalances.
+  // This is especially important for horizontal scaling — only the partitions that
+  // actually need to be reassigned are moved, avoiding a full stop-the-world rebalance.
+  const assigners: KafkaJS.PartitionAssigners[] = [
+    partitionAssigner === "roundrobin"
+      ? KafkaJS.PartitionAssigners.roundRobin
+      : partitionAssigner === "range"
+        ? KafkaJS.PartitionAssigners.range
+        : KafkaJS.PartitionAssigners.cooperativeSticky,
+  ];
+
   const config: Parameters<typeof kafka.consumer>[0] = {
-    kafkaJS: { groupId, fromBeginning, autoCommit },
+    kafkaJS: { groupId, fromBeginning, autoCommit, partitionAssigners: assigners },
   };
 
   if (onRebalance) {
@@ -71,6 +101,23 @@ export function getOrCreateConsumer(
   return consumer;
 }
 
+/**
+ * Build a local schema map for the topics being subscribed to.
+ *
+ * Schemas are collected from two sources in order:
+ * 1. Inline schemas on `TopicDescriptor` objects in the `topics` array.
+ * 2. Explicit overrides passed in `optionSchemas` (e.g. from `ConsumerOptions.schemas`).
+ *
+ * Both sources are also registered in the shared `schemaRegistry` so that the same
+ * schema is used consistently across producers and consumers. A warning is logged when
+ * a topic already has a different schema registered.
+ *
+ * @param topics Array of topic names or `TopicDescriptor` objects.
+ * @param schemaRegistry Shared client-wide schema map (mutated in place).
+ * @param optionSchemas Additional topic → schema overrides from consumer options.
+ * @param logger Optional logger for schema-conflict warnings.
+ * @returns A topic → schema map scoped to the current subscription.
+ */
 export function buildSchemaMap(
   topics: any[],
   schemaRegistry: Map<string, SchemaLike>,

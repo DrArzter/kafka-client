@@ -72,6 +72,11 @@ export type EachMessageOpts = {
   /** Drop messages older than this threshold (ms). See `ConsumerOptions.messageTtlMs`. */
   messageTtlMs?: number;
   /**
+   * Per-consumer TTL expiry callback. Takes precedence over the client-level
+   * `KafkaClientOptions.onTtlExpired` stored in `deps.onTtlExpired`.
+   */
+  onTtlExpired?: KafkaClientOptions["onTtlExpired"];
+  /**
    * EOS context for main consumer → retry.1 routing.
    * When set, the main consumer runs with `autoCommit: false`. On handler failure,
    * routing to the retry topic and the source offset commit are wrapped in a single
@@ -303,7 +308,8 @@ export async function handleEachMessage(
         });
         deps.onDlq?.(envelope, "ttl-expired");
       } else {
-        await deps.onTtlExpired?.({
+        const ttlHandler = opts.onTtlExpired ?? deps.onTtlExpired;
+        await ttlHandler?.({
           topic,
           ageMs,
           messageTtlMs: opts.messageTtlMs!,
@@ -358,6 +364,11 @@ export type EachBatchOpts = {
   deduplication?: DeduplicationContext;
   /** Drop messages older than this threshold (ms). See `ConsumerOptions.messageTtlMs`. */
   messageTtlMs?: number;
+  /**
+   * Per-consumer TTL expiry callback. Takes precedence over the client-level
+   * `KafkaClientOptions.onTtlExpired` stored in `deps.onTtlExpired`.
+   */
+  onTtlExpired?: KafkaClientOptions["onTtlExpired"];
   /**
    * EOS context for batch consumer → retry.1 routing.
    * When set, the batch consumer runs with `autoCommit: false`.
@@ -506,7 +517,8 @@ export async function handleEachBatch(
           });
           deps.onDlq?.(envelope, "ttl-expired");
         } else {
-          await deps.onTtlExpired?.({
+          const ttlHandler = opts.onTtlExpired ?? deps.onTtlExpired;
+          await ttlHandler?.({
             topic: batch.topic,
             ageMs,
             messageTtlMs: opts.messageTtlMs!,

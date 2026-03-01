@@ -11,6 +11,7 @@ import type {
   GroupId,
   SendOptions,
   BatchMessageItem,
+  BatchSendOptions,
   ConsumerOptions,
   ConsumerHandle,
   TransactionContext,
@@ -24,6 +25,9 @@ import type {
   BatchMeta,
   DlqReplayOptions,
   CircuitBreakerOptions,
+  ConsumerGroupSummary,
+  TopicDescription,
+  MessageHeaders,
 } from "../types";
 
 /**
@@ -229,7 +233,13 @@ export class KafkaClient<
 
   // ── Send ─────────────────────────────────────────────────────────
 
-  /** Send a single typed message. Accepts a topic key or a TopicDescriptor. */
+  /**
+   * Send a single typed message. Accepts a topic key or a `TopicDescriptor`.
+   *
+   * @param topic Topic key from the `TopicMessageMap` or a `TopicDescriptor` object.
+   * @param message Message payload — validated against the topic schema when one is registered.
+   * @param options Optional per-send settings: `key`, `headers`, `correlationId`, `compression`, etc.
+   */
   public async sendMessage<
     D extends TopicDescriptor<string & keyof T, T[string & keyof T]>,
   >(descriptor: D, message: D["__type"], options?: SendOptions): Promise<void>;
@@ -243,36 +253,86 @@ export class KafkaClient<
     message: any,
     options: SendOptions = {},
   ): Promise<void> {
-    const payload = await this.preparePayload(topicOrDesc, [
-      {
-        value: message,
-        key: options.key,
-        headers: options.headers,
-        correlationId: options.correlationId,
-        schemaVersion: options.schemaVersion,
-        eventId: options.eventId,
-      },
-    ]);
+    const payload = await this.preparePayload(
+      topicOrDesc,
+      [
+        {
+          value: message,
+          key: options.key,
+          headers: options.headers,
+          correlationId: options.correlationId,
+          schemaVersion: options.schemaVersion,
+          eventId: options.eventId,
+        },
+      ],
+      options.compression,
+    );
     await this.producer.send(payload);
     this.notifyAfterSend(payload.topic, payload.messages.length);
   }
 
-  /** Send multiple typed messages in one call. Accepts a topic key or a TopicDescriptor. */
+  /**
+   * Send a null-value (tombstone) message. Used with log-compacted topics to signal
+   * that a key's record should be removed during the next compaction cycle.
+   *
+   * Tombstones skip envelope headers, schema validation, and Lamport clock stamping.
+   * Both `beforeSend` and `afterSend` instrumentation hooks are still called so tracing works correctly.
+   *
+   * @param topic Topic name.
+   * @param key Partition key identifying the record to tombstone.
+   * @param headers Optional custom Kafka headers.
+   */
+  public async sendTombstone(
+    topic: string,
+    key: string,
+    headers?: MessageHeaders,
+  ): Promise<void> {
+    const hdrs: MessageHeaders = { ...headers };
+    for (const inst of this.instrumentation) {
+      inst.beforeSend?.(topic, hdrs);
+    }
+    await this.ensureTopic(topic);
+    await this.producer.send({
+      topic,
+      messages: [{ value: null, key, headers: hdrs }],
+    });
+    for (const inst of this.instrumentation) {
+      inst.afterSend?.(topic);
+    }
+  }
+
+  /**
+   * Send multiple typed messages in a single Kafka produce request. Accepts a topic key or a `TopicDescriptor`.
+   *
+   * Each item in `messages` can carry its own `key`, `headers`, `correlationId`, and `schemaVersion`.
+   * The `key` is used for partition routing — messages with the same key always land on the same partition.
+   *
+   * @param topic Topic key from the `TopicMessageMap` or a `TopicDescriptor` object.
+   * @param messages Array of messages to send.
+   * @param options Optional batch-level settings: `compression` codec.
+   */
   public async sendBatch<
     D extends TopicDescriptor<string & keyof T, T[string & keyof T]>,
   >(
     descriptor: D,
     messages: Array<BatchMessageItem<D["__type"]>>,
+    options?: BatchSendOptions,
   ): Promise<void>;
   public async sendBatch<K extends keyof T>(
     topic: K,
     messages: Array<BatchMessageItem<T[K]>>,
+    options?: BatchSendOptions,
   ): Promise<void>;
   public async sendBatch(
     topicOrDesc: any,
     messages: Array<BatchMessageItem<any>>,
+    options?: BatchSendOptions,
   ): Promise<void> {
-    const payload = await this.preparePayload(topicOrDesc, messages);
+    const payload = await this.preparePayload(
+      topicOrDesc,
+      messages,
+      options?.compression,
+    );
     await this.producer.send(payload);
     this.notifyAfterSend(payload.topic, payload.messages.length);
   }
@@ -333,6 +393,13 @@ export class KafkaClient<
           await tx.send(payload);
           this.notifyAfterSend(payload.topic, payload.messages.length);
         },
+  /**
+   * Send multiple messages in a single call to the topic.
+   * All messages in the batch will be sent atomically.
+   * If any message fails to send, the entire batch will be aborted.
+   * @param topicOrDesc - topic name or TopicDescriptor
+   * @param messages - array of messages to send with optional key, headers, correlationId, schemaVersion, and eventId
+   */
         sendBatch: async (
           topicOrDesc: any,
           messages: BatchMessageItem<any>[],
@@ -378,7 +445,19 @@ export class KafkaClient<
 
   // ── Consumer: eachMessage ────────────────────────────────────────
 
-  /** Subscribe to topics and start consuming messages with the given handler. */
+  /**
+   * Subscribe to one or more topics and start consuming messages one at a time.
+   *
+   * Each message is delivered to `handleMessage` as a fully-decoded `EventEnvelope`.
+   * The call blocks until the consumer is connected and the subscription is set up,
+   * then returns a `ConsumerHandle` with a `stop()` method for clean shutdown.
+   *
+   * @param topics Array of topic keys, `TopicDescriptor` objects, or `RegExp` patterns.
+   *   Regex patterns cannot be combined with `retryTopics: true`.
+   * @param handleMessage Async handler called for every message. Throw to trigger retries.
+   * @param options Consumer configuration — `groupId`, `retry`, `dlq`, `circuitBreaker`, etc.
+   * @returns A handle with `{ groupId, stop() }` for managing the consumer lifecycle.
+   */
   public async startConsumer<K extends Array<keyof T>>(
     topics: K,
     handleMessage: (envelope: EventEnvelope<T[K[number]]>) => Promise<void>,
@@ -399,6 +478,12 @@ export class KafkaClient<
     if (options.retryTopics && !options.retry) {
       throw new Error(
         "retryTopics requires retry to be configured — set retry.maxRetries to enable the retry topic chain",
+      );
+    }
+    const hasRegexTopics = topics.some((t) => t instanceof RegExp);
+    if (options.retryTopics && hasRegexTopics) {
+      throw new Error(
+        "retryTopics is incompatible with regex topic patterns — retry topics require a fixed topic name to build the retry chain.",
       );
     }
 
@@ -446,6 +531,7 @@ export class KafkaClient<
               wrapWithTimeout: this.wrapWithTimeoutWarning.bind(this),
               deduplication,
               messageTtlMs: options.messageTtlMs,
+              onTtlExpired: options.onTtlExpired,
               eosMainContext,
             },
             deps,
@@ -478,7 +564,21 @@ export class KafkaClient<
 
   // ── Consumer: eachBatch ──────────────────────────────────────────
 
-  /** Subscribe to topics and consume messages in batches. */
+  /**
+   * Subscribe to one or more topics and consume messages in batches.
+   *
+   * `handleBatch` receives an array of decoded `EventEnvelope` objects together with
+   * batch metadata (topic, partition, high-watermark offset). Prefer this over
+   * `startConsumer` when throughput matters more than per-message latency.
+   *
+   * Set `autoCommit: false` in options when the handler calls `resolveOffset()` or
+   * `commitOffsetsIfNecessary()` directly, to avoid offset conflicts.
+   *
+   * @param topics Array of topic keys, `TopicDescriptor` objects, or `RegExp` patterns.
+   * @param handleBatch Async handler called with each batch of decoded messages.
+   * @param options Consumer configuration — `groupId`, `retry`, `dlq`, `autoCommit`, etc.
+   * @returns A handle with `{ groupId, stop() }` for managing the consumer lifecycle.
+   */
   public async startBatchConsumer<K extends Array<keyof T>>(
     topics: K,
     handleBatch: (
@@ -508,6 +608,12 @@ export class KafkaClient<
     if (options.retryTopics && !options.retry) {
       throw new Error(
         "retryTopics requires retry to be configured — set retry.maxRetries to enable the retry topic chain",
+      );
+    }
+    const hasRegexTopics = topics.some((t) => t instanceof RegExp);
+    if (options.retryTopics && hasRegexTopics) {
+      throw new Error(
+        "retryTopics is incompatible with regex topic patterns — retry topics require a fixed topic name to build the retry chain.",
       );
     }
 
@@ -547,6 +653,16 @@ export class KafkaClient<
     }
 
     await consumer.run({
+    /**
+     * eachBatch: called by the consumer for each batch of messages.
+     * Called with the `payload` argument, which is an object containing the
+     * batch of messages and a `BatchMeta` object with offset management controls.
+     *
+     * The function is wrapped with `trackInFlight` and `handleEachBatch` to provide
+     * error handling and offset management.
+     *
+     * @param payload - an object containing the batch of messages and a `BatchMeta` object.
+     */
       eachBatch: (payload) =>
         this.trackInFlight(() =>
           handleEachBatch(
@@ -562,6 +678,7 @@ export class KafkaClient<
               wrapWithTimeout: this.wrapWithTimeoutWarning.bind(this),
               deduplication,
               messageTtlMs: options.messageTtlMs,
+              onTtlExpired: options.onTtlExpired,
               eosMainContext,
             },
             deps,
@@ -617,6 +734,12 @@ export class KafkaClient<
     topic: K,
     options?: ConsumerOptions<T>,
   ): AsyncIterableIterator<EventEnvelope<T[K]>> {
+    if (options?.retryTopics) {
+      throw new Error(
+        "consume() does not support retryTopics (EOS retry chains). " +
+          "Use startConsumer() with retryTopics: true for guaranteed retry delivery.",
+      );
+    }
     const gid = options?.groupId ?? this.defaultGroupId;
     const queue = new AsyncQueue<EventEnvelope<T[K]>>(
       options?.queueHighWaterMark,
@@ -647,6 +770,14 @@ export class KafkaClient<
 
   // ── Consumer lifecycle ───────────────────────────────────────────
 
+  /**
+   * Stop all consumers or a specific group.
+   *
+   * If `groupId` is unspecified, all active consumers are stopped.
+   * If `groupId` is specified, only the consumer with that group ID is stopped.
+   *
+   * @throws {Error} if the consumer fails to disconnect.
+   */
   public async stopConsumer(groupId?: string): Promise<void> {
     if (groupId !== undefined) {
       const consumer = this.consumers.get(groupId);
@@ -753,6 +884,12 @@ export class KafkaClient<
     }
   }
 
+  /**
+   * Temporarily stop delivering messages from specific partitions without disconnecting the consumer.
+   *
+   * @param groupId Consumer group to pause. Defaults to the client's default groupId.
+   * @param assignments Topic-partition pairs to pause.
+   */
   public pauseConsumer(
     groupId: string | undefined,
     assignments: Array<{ topic: string; partitions: number[] }>,
@@ -770,6 +907,12 @@ export class KafkaClient<
     );
   }
 
+  /**
+   * Resume message delivery for previously paused topic-partitions.
+   *
+   * @param {string|undefined} groupId Consumer group to resume. Defaults to the client's default groupId.
+   * @param {Array<{ topic: string; partitions: number[] }>} assignments Topic-partition pairs to resume.
+   */
   public resumeConsumer(
     groupId: string | undefined,
     assignments: Array<{ topic: string; partitions: number[] }>,
@@ -822,6 +965,17 @@ export class KafkaClient<
     "x-dlq-attempt-count",
   ]);
 
+  /**
+   * Re-publish messages from a dead letter queue back to the original topic.
+   *
+   * Messages are consumed from `<topic>.dlq` and re-published to `<topic>`.
+   * The original topic is determined by the `x-dlq-original-topic` header.
+   * The `x-dlq-*` headers are stripped before re-publishing.
+   *
+   * @param topic - The topic to replay from `<topic>.dlq`
+   * @param options - Options for replay
+   * @returns { replayed: number; skipped: number } - counts of re-published vs skipped messages
+   */
   public async replayDlq(
     topic: string,
     options: DlqReplayOptions = {},
@@ -989,6 +1143,14 @@ export class KafkaClient<
     }
   }
 
+  /**
+   * Seek specific topic-partition pairs to the offset nearest to a given timestamp
+   * (in milliseconds) for a stopped consumer group.
+   * Throws if the group is still running — call `stopConsumer(groupId)` first.
+   * Assignments are grouped by topic and committed via `admin.setOffsets`.
+   * If no offset exists at the requested timestamp (e.g. empty partition or
+   * future timestamp), the partition falls back to `-1` (end of topic — new messages only).
+   */
   public async seekToTimestamp(
     groupId: string | undefined,
     assignments: Array<{ topic: string; partition: number; timestamp: number }>,
@@ -1031,6 +1193,17 @@ export class KafkaClient<
     }
   }
 
+  /**
+   * Returns the current circuit breaker state for a specific topic partition.
+   * Returns `undefined` when no circuit state exists — either `circuitBreaker` is not
+   * configured for the group, or the circuit has never been tripped.
+   *
+   * @param topic Topic name.
+   * @param partition Partition index.
+   * @param groupId Consumer group. Defaults to the client's default groupId.
+   *
+   * @returns `{ status, failures, windowSize }` snapshot for a given partition or `undefined` if no state exists.
+   */
   public getCircuitState(
     topic: string,
     partition: number,
@@ -1105,10 +1278,69 @@ export class KafkaClient<
     }
   }
 
+  /**
+   * List all consumer groups known to the broker.
+   * Useful for monitoring which groups are active and their current state.
+   */
+  public async listConsumerGroups(): Promise<ConsumerGroupSummary[]> {
+    await this.ensureAdminConnected();
+    const result = await this.admin.listGroups();
+    return result.groups.map((g: any) => ({
+      groupId: g.groupId,
+      state: g.state ?? "Unknown",
+    }));
+  }
+
+  /**
+   * Describe topics — returns partition layout, leader, replicas, and ISR.
+   * @param topics Topic names to describe. Omit to describe all topics.
+   */
+  public async describeTopics(topics?: string[]): Promise<TopicDescription[]> {
+    await this.ensureAdminConnected();
+    const result = await (this.admin as any).fetchTopicMetadata(
+      topics ? { topics } : undefined,
+    );
+    return (result.topics as any[]).map((t: any) => ({
+      name: t.name,
+      partitions: (t.partitions as any[]).map((p: any) => ({
+        partition: p.partitionId ?? p.partition,
+        leader: p.leader,
+        replicas: (p.replicas as any[]).map((r: any) =>
+          typeof r === "number" ? r : r.nodeId,
+        ),
+        isr: (p.isr as any[]).map((r: any) =>
+          typeof r === "number" ? r : r.nodeId,
+        ),
+      })),
+    }));
+  }
+
+  /**
+   * Delete records from a topic up to (but not including) the given offsets.
+   * All messages with offsets **before** the given offset are deleted.
+   */
+  public async deleteRecords(
+    topic: string,
+    partitions: Array<{ partition: number; offset: string }>,
+  ): Promise<void> {
+    await this.ensureAdminConnected();
+    await this.admin.deleteTopicRecords({ topic, partitions });
+  }
+
+  /** Return the client ID provided during `KafkaClient` construction. */
   public getClientId(): ClientId {
     return this.clientId;
   }
 
+  /**
+   * Return a snapshot of internal event counters accumulated since client creation
+   * (or since the last `resetMetrics()` call).
+   *
+   * @param topic Topic name to scope the snapshot to. When omitted, counters are
+   *   aggregated across all topics. If the topic has no recorded events yet, returns
+   *   a zero-valued snapshot.
+   * @returns Read-only `KafkaMetrics` snapshot: `processedCount`, `retryCount`, `dlqCount`, `dedupCount`.
+   */
   public getMetrics(topic?: string): Readonly<KafkaMetrics> {
     if (topic !== undefined) {
       const m = this._topicMetrics.get(topic);
@@ -1132,6 +1364,11 @@ export class KafkaClient<
     return agg;
   }
 
+  /**
+   * Reset internal event counters to zero.
+   *
+   * @param topic Topic name to reset. When omitted, all topics are reset.
+   */
   public resetMetrics(topic?: string): void {
     if (topic !== undefined) {
       this._topicMetrics.delete(topic);
@@ -1211,6 +1448,13 @@ export class KafkaClient<
     }
   }
 
+  /**
+   * Increment the in-flight handler count and return a promise that calls the given handler.
+   * When the promise resolves or rejects, decrement the in flight handler count.
+   * If the in flight handler count reaches 0, call all previously registered drain resolvers.
+   * @param fn The handler to call when the promise is resolved or rejected.
+   * @returns A promise that resolves or rejects with the result of calling the handler.
+   */
   private trackInFlight<R>(fn: () => Promise<R>): Promise<R> {
     this.inFlightTotal++;
     return fn().finally(() => {
@@ -1221,6 +1465,12 @@ export class KafkaClient<
     });
   }
 
+  /**
+   * Waits for all in-flight handlers to complete or for a given timeout, whichever comes first.
+   * @param timeoutMs Maximum time to wait in milliseconds.
+   * @returns A promise that resolves when all handlers have completed or the timeout is reached.
+   * @private
+   */
   private waitForDrain(timeoutMs: number): Promise<void> {
     if (this.inFlightTotal === 0) return Promise.resolve();
     return new Promise<void>((resolve) => {
@@ -1243,15 +1493,23 @@ export class KafkaClient<
 
   // ── Private helpers ──────────────────────────────────────────────
 
+  /**
+   * Prepare a send payload by registering the topic's schema and then building the payload.
+   * @param topicOrDesc - topic name or topic descriptor
+   * @param messages - batch of messages to send
+   * @returns - prepared payload
+   */
   private async preparePayload(
     topicOrDesc: any,
     messages: Array<BatchMessageItem<any>>,
+    compression?: import("../types").CompressionType,
   ) {
     registerSchema(topicOrDesc, this.schemaRegistry, this.logger);
     const payload = await buildSendPayload(
       topicOrDesc,
       messages,
       this.producerOpsDeps,
+      compression,
     );
     await this.ensureTopic(payload.topic);
     return payload;
@@ -1266,6 +1524,12 @@ export class KafkaClient<
     }
   }
 
+  /**
+   * Returns the KafkaMetrics for a given topic.
+   * If the topic hasn't seen any events, initializes a zero-valued snapshot.
+   * @param topic - name of the topic to get the metrics for
+   * @returns - KafkaMetrics for the given topic
+   */
   private metricsFor(topic: string): KafkaMetrics {
     let m = this._topicMetrics.get(topic);
     if (!m) {
@@ -1275,6 +1539,12 @@ export class KafkaClient<
     return m;
   }
 
+/**
+ * Notifies instrumentation hooks of a retry event.
+ * @param envelope The original message envelope that triggered the retry.
+ * @param attempt The current retry attempt (1-indexed).
+ * @param maxRetries The maximum number of retries configured for this topic.
+ */
   private notifyRetry(
     envelope: import("../message/envelope").EventEnvelope<any>,
     attempt: number,
@@ -1286,6 +1556,12 @@ export class KafkaClient<
     }
   }
 
+/**
+ * Called whenever a message is routed to the dead letter queue.
+ * @param envelope The original message envelope.
+ * @param reason The reason for routing to the dead letter queue.
+ * @param gid The group ID of the consumer that triggered the circuit breaker, if any.
+ */
   private notifyDlq(
     envelope: import("../message/envelope").EventEnvelope<any>,
     reason: DlqReason,
@@ -1362,6 +1638,13 @@ export class KafkaClient<
     }
   }
 
+  /**
+   * Notify all instrumentation hooks about a duplicate message detection.
+   * Invoked by the consumer after a message has been successfully processed
+   * and the Lamport clock detected a duplicate.
+   * @param envelope The processed message envelope.
+   * @param strategy The duplicate detection strategy used.
+   */
   private notifyDuplicate(
     envelope: import("../message/envelope").EventEnvelope<any>,
     strategy: "drop" | "dlq" | "topic",
@@ -1372,6 +1655,13 @@ export class KafkaClient<
     }
   }
 
+  /**
+   * Notify all instrumentation hooks about a successfully processed message.
+   * Invoked by the consumer after a message has been successfully processed
+   * by the handler.
+   * @param envelope The processed message envelope.
+   * @param gid The optional consumer group ID.
+   */
   private notifyMessage(
     envelope: import("../message/envelope").EventEnvelope<any>,
     gid?: string,
@@ -1549,6 +1839,15 @@ export class KafkaClient<
     return p;
   }
 
+  /**
+   * Ensure that a topic exists by creating it if it doesn't already exist.
+   * If `autoCreateTopics` is disabled, this method will not create the topic and
+   * will return immediately.
+   * If multiple concurrent calls are made to `ensureTopic` for the same topic,
+   * they are deduplicated to prevent multiple calls to `admin.createTopics()`.
+   * @param topic - The topic to ensure exists.
+   * @returns A promise that resolves when the topic has been created or already exists.
+   */
   private async ensureTopic(topic: string): Promise<void> {
     if (!this.autoCreateTopicsEnabled || this.ensuredTopics.has(topic)) return;
     // Deduplicate concurrent calls for the same topic so that parallel sends
@@ -1582,6 +1881,12 @@ export class KafkaClient<
       schemas: optionSchemas,
     } = options;
 
+    // Separate string topic names from regex patterns.
+    // Schema registration, topic-ensure, and retry chains only apply to string topics.
+    const stringTopics: any[] = topics.filter((t) => !(t instanceof RegExp));
+    const regexTopics: RegExp[] = topics.filter((t) => t instanceof RegExp);
+    const hasRegex = regexTopics.length > 0;
+
     const gid = optGroupId || this.defaultGroupId;
     const existingMode = this.runningConsumers.get(gid);
     const oppositeMode = mode === "eachMessage" ? "eachBatch" : "eachMessage";
@@ -1605,17 +1910,26 @@ export class KafkaClient<
       fromBeginning,
       options.autoCommit ?? true,
       this.consumerOpsDeps,
+      options.partitionAssigner,
     );
+
+    // Only build schema map for string topics (regex patterns have no fixed name to look up).
     const schemaMap = buildSchemaMap(
-      topics,
+      stringTopics,
       this.schemaRegistry,
       optionSchemas,
       this.logger,
     );
 
-    const topicNames = (topics as any[]).map((t: any) => resolveTopicName(t));
+    const topicNames = stringTopics.map((t: any) => resolveTopicName(t));
+    // All topics (strings + regex) passed to subscribe.
+    const subscribeTopics: (string | RegExp)[] = [
+      ...topicNames,
+      ...regexTopics,
+    ];
 
-    // Ensure topics exist before subscribing — librdkafka errors on unknown topics
+    // Ensure topics exist before subscribing — librdkafka errors on unknown topics.
+    // Regex patterns are skipped (we can't create or validate a pattern).
     for (const t of topicNames) {
       await this.ensureTopic(t);
     }
@@ -1623,7 +1937,7 @@ export class KafkaClient<
       for (const t of topicNames) {
         await this.ensureTopic(`${t}.dlq`);
       }
-      if (!this.autoCreateTopicsEnabled) {
+      if (!this.autoCreateTopicsEnabled && topicNames.length > 0) {
         await this.validateDlqTopicsExist(topicNames);
       }
     }
@@ -1634,7 +1948,7 @@ export class KafkaClient<
         for (const t of topicNames) {
           await this.ensureTopic(dest ?? `${t}.duplicates`);
         }
-      } else {
+      } else if (topicNames.length > 0) {
         await this.validateDuplicatesTopicsExist(topicNames, dest);
       }
     }
@@ -1642,16 +1956,19 @@ export class KafkaClient<
     await consumer.connect();
     await subscribeWithRetry(
       consumer,
-      topicNames,
+      subscribeTopics,
       this.logger,
       options.subscribeRetry,
     );
 
+    const displayTopics = subscribeTopics
+      .map((t) => (t instanceof RegExp ? t.toString() : t))
+      .join(", ");
     this.logger.log(
-      `${mode === "eachBatch" ? "Batch consumer" : "Consumer"} subscribed to topics: ${topicNames.join(", ")}`,
+      `${mode === "eachBatch" ? "Batch consumer" : "Consumer"} subscribed to topics: ${displayTopics}`,
     );
 
-    return { consumer, schemaMap, topicNames, gid, dlq, interceptors, retry };
+    return { consumer, schemaMap, topicNames, gid, dlq, interceptors, retry, hasRegex };
   }
 
   /** Create or retrieve the deduplication context for a consumer group. */
@@ -1668,6 +1985,15 @@ export class KafkaClient<
 
   // ── Deps object getters ──────────────────────────────────────────
 
+  /**
+   * An object containing the necessary dependencies for building a send payload.
+   *
+   * @property {Map<string, SchemaLike>} schemaRegistry - A map of topic names to their schemas.
+   * @property {boolean} strictSchemasEnabled - Whether strict schema validation is enabled.
+   * @property {KafkaInstrumentation} instrumentation - An object for creating a span for instrumentation.
+   * @property {KafkaLogger} logger - A logger for logging messages.
+   * @property {() => number} nextLamportClock - A function that returns the next value of the logical clock.
+   */
   private get producerOpsDeps(): BuildSendPayloadDeps {
     return {
       schemaRegistry: this.schemaRegistry,
@@ -1678,6 +2004,15 @@ export class KafkaClient<
     };
   }
 
+  /**
+   * ConsumerOpsDeps object properties:
+   *
+   * @property {Map<string, Consumer>} consumers - A map of consumer group IDs to their corresponding consumer instances.
+   * @property {Map<string, { fromBeginning: boolean; autoCommit: boolean }>} consumerCreationOptions - A map of consumer group IDs to their creation options.
+   * @property {Kafka} kafka - The Kafka client instance.
+   * @property {function(string, Partition[]): void} onRebalance - An optional callback function called when a consumer group is rebalanced.
+   * @property {KafkaLogger} logger - The logger instance used for logging consumer operations.
+   */
   private get consumerOpsDeps(): ConsumerOpsDeps {
     return {
       consumers: this.consumers,
@@ -1703,6 +2038,21 @@ export class KafkaClient<
     };
   }
 
+  /**
+   * The dependencies object passed to the retry topic consumers.
+   *
+   * `logger`: The logger instance passed to the retry topic consumers.
+   * `producer`: The producer instance passed to the retry topic consumers.
+   * `instrumentation`: The instrumentation instance passed to the retry topic consumers.
+   * `onMessageLost`: The callback function passed to the retry topic consumers for tracking lost messages.
+   * `onRetry`: The callback function passed to the retry topic consumers for tracking retry attempts.
+   * `onDlq`: The callback function passed to the retry topic consumers for tracking dead-letter queue routing.
+   * `onMessage`: The callback function passed to the retry topic consumers for tracking message delivery.
+   * `ensureTopic`: A function that ensures a topic exists before subscribing to it.
+   * `getOrCreateConsumer`: A function that creates or retrieves a consumer instance.
+   * `runningConsumers`: A map of consumer group IDs to their corresponding consumer instances.
+   * `createRetryTxProducer`: A function that creates a retry transactional producer instance.
+   */
   private get retryTopicDeps() {
     return {
       logger: this.logger,
