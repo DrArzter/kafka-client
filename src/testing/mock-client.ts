@@ -100,8 +100,12 @@ export function createMockKafkaClient<T extends TopicMapConstraint<T>>(
       stop: mock().mockResolvedValue(undefined),
     }),
     stopConsumer: resolved(undefined),
+    consume: returning(
+      (function* () {})() as unknown as AsyncIterableIterator<any>,
+    ),
     replayDlq: resolved({ replayed: 0, skipped: 0 }),
     resetOffsets: resolved(undefined),
+    seekToOffset: resolved(undefined),
     pauseConsumer: mock(),
     resumeConsumer: mock(),
     getMetrics: returning({

@@ -68,6 +68,8 @@ export type EachMessageOpts = {
     topic: string,
   ) => Promise<R>;
   deduplication?: DeduplicationContext;
+  /** Drop messages older than this threshold (ms). See `ConsumerOptions.messageTtlMs`. */
+  messageTtlMs?: number;
   /**
    * EOS context for main consumer → retry.1 routing.
    * When set, the main consumer runs with `autoCommit: false`. On handler failure,
@@ -286,6 +288,32 @@ export async function handleEachMessage(
     }
   }
 
+  if (opts.messageTtlMs !== undefined) {
+    const ageMs = Date.now() - new Date(envelope.timestamp).getTime();
+    if (ageMs > opts.messageTtlMs) {
+      deps.logger.warn(
+        `[KafkaClient] TTL expired on ${topic}: age ${ageMs}ms > ${opts.messageTtlMs}ms`,
+      );
+      if (dlq) {
+        await sendToDlq(topic, message.value!.toString(), deps, {
+          error: new Error(`Message TTL expired: age ${ageMs}ms`),
+          attempt: 0,
+          originalHeaders: envelope.headers,
+        });
+        deps.onDlq?.(envelope, "ttl-expired");
+      } else {
+        await deps.onMessageLost?.({
+          topic,
+          error: new Error(`TTL expired: ${ageMs}ms`),
+          attempt: 0,
+          headers: envelope.headers,
+        });
+      }
+      await commitOffset?.();
+      return;
+    }
+  }
+
   await executeWithRetry(
     () => {
       const fn = () =>
@@ -327,6 +355,8 @@ export type EachBatchOpts = {
     topic: string,
   ) => Promise<R>;
   deduplication?: DeduplicationContext;
+  /** Drop messages older than this threshold (ms). See `ConsumerOptions.messageTtlMs`. */
+  messageTtlMs?: number;
   /**
    * EOS context for batch consumer → retry.1 routing.
    * When set, the batch consumer runs with `autoCommit: false`.
@@ -459,6 +489,31 @@ export async function handleEachBatch(
         deps,
       );
       if (isDuplicate) continue;
+    }
+
+    if (opts.messageTtlMs !== undefined) {
+      const ageMs = Date.now() - new Date(envelope.timestamp).getTime();
+      if (ageMs > opts.messageTtlMs) {
+        deps.logger.warn(
+          `[KafkaClient] TTL expired on ${batch.topic}: age ${ageMs}ms > ${opts.messageTtlMs}ms`,
+        );
+        if (dlq) {
+          await sendToDlq(batch.topic, message.value!.toString(), deps, {
+            error: new Error(`Message TTL expired: age ${ageMs}ms`),
+            attempt: 0,
+            originalHeaders: envelope.headers,
+          });
+          deps.onDlq?.(envelope, "ttl-expired");
+        } else {
+          await deps.onMessageLost?.({
+            topic: batch.topic,
+            error: new Error(`TTL expired: ${ageMs}ms`),
+            attempt: 0,
+            headers: envelope.headers,
+          });
+        }
+        continue;
+      }
     }
 
     envelopes.push(envelope);

@@ -23,6 +23,7 @@ import type {
   DlqReason,
   BatchMeta,
   DlqReplayOptions,
+  CircuitBreakerOptions,
 } from "../types";
 
 /**
@@ -56,6 +57,36 @@ import { startRetryTopicConsumers } from "./retry-topic";
 import { subscribeWithRetry } from "../consumer/subscribe-retry";
 import { toError } from "../consumer/pipeline";
 import { decodeHeaders } from "../message/envelope";
+
+/** Push-to-pull async queue used by consume() to bridge Kafka's push model to AsyncIterableIterator. */
+class AsyncQueue<V> {
+  private readonly items: V[] = [];
+  private readonly waiting: Array<(r: IteratorResult<V>) => void> = [];
+  private closed = false;
+
+  push(item: V): void {
+    if (this.waiting.length > 0) {
+      this.waiting.shift()!({ value: item, done: false });
+    } else {
+      this.items.push(item);
+    }
+  }
+
+  close(): void {
+    this.closed = true;
+    for (const r of this.waiting.splice(0)) {
+      r({ value: undefined as any, done: true });
+    }
+  }
+
+  next(): Promise<IteratorResult<V>> {
+    if (this.items.length > 0)
+      return Promise.resolve({ value: this.items.shift()!, done: false });
+    if (this.closed)
+      return Promise.resolve({ value: undefined as any, done: true });
+    return new Promise((r) => this.waiting.push(r));
+  }
+}
 
 /**
  * Type-safe Kafka client.
@@ -106,6 +137,19 @@ export class KafkaClient<
   private _lamportClock = 0;
   /** Per-groupId deduplication state: `"topic:partition"` → last processed clock. */
   private readonly dedupStates = new Map<string, Map<string, number>>();
+
+  /** Circuit breaker state per `"${gid}:${topic}:${partition}"` key. */
+  private readonly circuitStates = new Map<
+    string,
+    {
+      status: "closed" | "open" | "half-open";
+      window: boolean[];
+      successes: number;
+      timer?: ReturnType<typeof setTimeout>;
+    }
+  >();
+  /** Circuit breaker config per groupId, set at startConsumer/startBatchConsumer time. */
+  private readonly circuitConfigs = new Map<string, CircuitBreakerOptions>();
 
   private isAdminConnected = false;
   private inFlightTotal = 0;
@@ -336,7 +380,9 @@ export class KafkaClient<
     const { consumer, schemaMap, topicNames, gid, dlq, interceptors, retry } =
       await this.setupConsumer(topics, "eachMessage", setupOptions);
 
-    const deps = this.messageDeps;
+    if (options.circuitBreaker)
+      this.circuitConfigs.set(gid, options.circuitBreaker);
+    const deps = this.messageDepsFor(gid);
     const timeoutMs = options.handlerTimeoutMs;
     const deduplication = this.resolveDeduplicationContext(
       gid,
@@ -368,6 +414,7 @@ export class KafkaClient<
               timeoutMs,
               wrapWithTimeout: this.wrapWithTimeoutWarning.bind(this),
               deduplication,
+              messageTtlMs: options.messageTtlMs,
               eosMainContext,
             },
             deps,
@@ -450,7 +497,9 @@ export class KafkaClient<
     const { consumer, schemaMap, topicNames, gid, dlq, interceptors, retry } =
       await this.setupConsumer(topics, "eachBatch", setupOptions);
 
-    const deps = this.messageDeps;
+    if (options.circuitBreaker)
+      this.circuitConfigs.set(gid, options.circuitBreaker);
+    const deps = this.messageDepsFor(gid);
     const timeoutMs = options.handlerTimeoutMs;
     const deduplication = this.resolveDeduplicationContext(
       gid,
@@ -481,6 +530,7 @@ export class KafkaClient<
               timeoutMs,
               wrapWithTimeout: this.wrapWithTimeoutWarning.bind(this),
               deduplication,
+              messageTtlMs: options.messageTtlMs,
               eosMainContext,
             },
             deps,
@@ -523,6 +573,41 @@ export class KafkaClient<
     return { groupId: gid, stop: () => this.stopConsumer(gid) };
   }
 
+  /**
+   * Consume messages from a topic as an AsyncIterableIterator.
+   * Use with `for await` — breaking out of the loop automatically stops the consumer.
+   *
+   * @example
+   * for await (const envelope of kafka.consume('my.topic')) {
+   *   console.log(envelope.data);
+   * }
+   */
+  public consume<K extends keyof T & string>(
+    topic: K,
+    options?: ConsumerOptions<T>,
+  ): AsyncIterableIterator<EventEnvelope<T[K]>> {
+    const queue = new AsyncQueue<EventEnvelope<T[K]>>();
+    const handlePromise = this.startConsumer(
+      [topic as any],
+      async (envelope) => {
+        queue.push(envelope as EventEnvelope<T[K]>);
+      },
+      options,
+    );
+    return {
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+      next: () => queue.next(),
+      return: async () => {
+        queue.close();
+        const handle = await handlePromise;
+        await handle.stop();
+        return { value: undefined as any, done: true as const };
+      },
+    };
+  }
+
   // ── Consumer lifecycle ───────────────────────────────────────────
 
   public async stopConsumer(groupId?: string): Promise<void> {
@@ -546,6 +631,14 @@ export class KafkaClient<
       this.runningConsumers.delete(groupId);
       this.consumerCreationOptions.delete(groupId);
       this.dedupStates.delete(groupId);
+      // Clean up circuit breaker state for this group
+      for (const key of [...this.circuitStates.keys()]) {
+        if (key.startsWith(`${groupId}:`)) {
+          clearTimeout(this.circuitStates.get(key)!.timer);
+          this.circuitStates.delete(key);
+        }
+      }
+      this.circuitConfigs.delete(groupId);
       this.logger.log(`Consumer disconnected: group "${groupId}"`);
 
       // Clean up the main consumer's EOS tx producer (present when retryTopics: true)
@@ -615,6 +708,10 @@ export class KafkaClient<
       this.companionGroupIds.clear();
       this.retryTxProducers.clear();
       this.dedupStates.clear();
+      for (const state of this.circuitStates.values())
+        clearTimeout(state.timer);
+      this.circuitStates.clear();
+      this.circuitConfigs.clear();
       this.logger.log("All consumers disconnected");
     }
   }
@@ -712,9 +809,7 @@ export class KafkaClient<
 
       consumer
         .connect()
-        .then(() =>
-          subscribeWithRetry(consumer, [dlqTopic], this.logger),
-        )
+        .then(() => subscribeWithRetry(consumer, [dlqTopic], this.logger))
         .then(() =>
           consumer.run({
             eachMessage: async ({ partition, message }) => {
@@ -795,6 +890,40 @@ export class KafkaClient<
     this.logger.log(
       `Offsets reset to ${position} for group "${gid}" on topic "${topic}"`,
     );
+  }
+
+  /**
+   * Seek specific topic-partition pairs to explicit offsets for a stopped consumer group.
+   * Throws if the group is still running — call `stopConsumer(groupId)` first.
+   * Assignments are grouped by topic and committed via `admin.setOffsets`.
+   */
+  public async seekToOffset(
+    groupId: string | undefined,
+    assignments: Array<{ topic: string; partition: number; offset: string }>,
+  ): Promise<void> {
+    const gid = groupId ?? this.defaultGroupId;
+    if (this.runningConsumers.has(gid)) {
+      throw new Error(
+        `seekToOffset: consumer group "${gid}" is still running. ` +
+          `Call stopConsumer("${gid}") before seeking offsets.`,
+      );
+    }
+    await this.ensureAdminConnected();
+    const byTopic = new Map<
+      string,
+      Array<{ partition: number; offset: string }>
+    >();
+    for (const { topic, partition, offset } of assignments) {
+      const list = byTopic.get(topic) ?? [];
+      list.push({ partition, offset });
+      byTopic.set(topic, list);
+    }
+    for (const [topic, partitions] of byTopic) {
+      await (this.admin as any).setOffsets({ groupId: gid, topic, partitions });
+      this.logger.log(
+        `Offsets set for group "${gid}" on "${topic}": ${JSON.stringify(partitions)}`,
+      );
+    }
   }
 
   /**
@@ -920,6 +1049,9 @@ export class KafkaClient<
     this.runningConsumers.clear();
     this.consumerCreationOptions.clear();
     this.companionGroupIds.clear();
+    for (const state of this.circuitStates.values()) clearTimeout(state.timer);
+    this.circuitStates.clear();
+    this.circuitConfigs.clear();
     this.logger.log("All connections closed");
   }
 
@@ -1037,10 +1169,69 @@ export class KafkaClient<
   private notifyDlq(
     envelope: import("../message/envelope").EventEnvelope<any>,
     reason: DlqReason,
+    gid?: string,
   ): void {
     this.metricsFor(envelope.topic).dlqCount++;
     for (const inst of this.instrumentation) {
       inst.onDlq?.(envelope, reason);
+    }
+
+    if (!gid) return;
+    const cfg = this.circuitConfigs.get(gid);
+    if (!cfg) return;
+
+    const threshold = cfg.threshold ?? 5;
+    const recoveryMs = cfg.recoveryMs ?? 30_000;
+
+    const stateKey = `${gid}:${envelope.topic}:${envelope.partition}`;
+    let state = this.circuitStates.get(stateKey);
+    if (!state) {
+      state = { status: "closed", window: [], successes: 0 };
+      this.circuitStates.set(stateKey, state);
+    }
+    if (state.status === "open") return; // already tripped — skip window update
+
+    const openCircuit = () => {
+      state!.status = "open";
+      this.pauseConsumer(gid, [
+        { topic: envelope.topic, partitions: [envelope.partition] },
+      ]);
+      state!.timer = setTimeout(() => {
+        state!.status = "half-open";
+        state!.successes = 0;
+        this.logger.log(
+          `[CircuitBreaker] HALF-OPEN — group="${gid}" topic="${envelope.topic}" partition=${envelope.partition}`,
+        );
+        this.resumeConsumer(gid, [
+          { topic: envelope.topic, partitions: [envelope.partition] },
+        ]);
+      }, recoveryMs);
+    };
+
+    if (state.status === "half-open") {
+      // Any failure in half-open immediately re-opens the circuit.
+      clearTimeout(state.timer);
+      this.logger.warn(
+        `[CircuitBreaker] OPEN (half-open failure) — group="${gid}" topic="${envelope.topic}" partition=${envelope.partition}`,
+      );
+      openCircuit();
+      return;
+    }
+
+    // CLOSED: update sliding window
+    const windowSize = cfg.windowSize ?? Math.max(threshold * 2, 10);
+    state.window = [...state.window, false];
+    if (state.window.length > windowSize) {
+      state.window = state.window.slice(state.window.length - windowSize);
+    }
+    const failures = state.window.filter((v) => !v).length;
+
+    if (failures >= threshold) {
+      this.logger.warn(
+        `[CircuitBreaker] OPEN — group="${gid}" topic="${envelope.topic}" partition=${envelope.partition} ` +
+          `(${failures}/${state.window.length} failures, threshold=${threshold})`,
+      );
+      openCircuit();
     }
   }
 
@@ -1056,10 +1247,42 @@ export class KafkaClient<
 
   private notifyMessage(
     envelope: import("../message/envelope").EventEnvelope<any>,
+    gid?: string,
   ): void {
     this.metricsFor(envelope.topic).processedCount++;
     for (const inst of this.instrumentation) {
       inst.onMessage?.(envelope);
+    }
+
+    if (!gid) return;
+    const cfg = this.circuitConfigs.get(gid);
+    if (!cfg) return;
+
+    const stateKey = `${gid}:${envelope.topic}:${envelope.partition}`;
+    const state = this.circuitStates.get(stateKey);
+    if (!state) return;
+
+    const halfOpenSuccesses = cfg.halfOpenSuccesses ?? 1;
+
+    if (state.status === "half-open") {
+      state.successes++;
+      if (state.successes >= halfOpenSuccesses) {
+        clearTimeout(state.timer);
+        state.timer = undefined;
+        state.status = "closed";
+        state.window = [];
+        state.successes = 0;
+        this.logger.log(
+          `[CircuitBreaker] CLOSED — group="${gid}" topic="${envelope.topic}" partition=${envelope.partition}`,
+        );
+      }
+    } else if (state.status === "closed") {
+      const threshold = cfg.threshold ?? 5;
+      const windowSize = cfg.windowSize ?? Math.max(threshold * 2, 10);
+      state.window = [...state.window, true];
+      if (state.window.length > windowSize) {
+        state.window = state.window.slice(state.window.length - windowSize);
+      }
     }
   }
 
@@ -1336,16 +1559,17 @@ export class KafkaClient<
     };
   }
 
-  private get messageDeps(): MessageHandlerDeps {
+  /** Build MessageHandlerDeps with circuit breaker callbacks bound to the given groupId. */
+  private messageDepsFor(gid: string): MessageHandlerDeps {
     return {
       logger: this.logger,
       producer: this.producer,
       instrumentation: this.instrumentation,
       onMessageLost: this.onMessageLost,
       onRetry: this.notifyRetry.bind(this),
-      onDlq: this.notifyDlq.bind(this),
+      onDlq: (envelope, reason) => this.notifyDlq(envelope, reason, gid),
       onDuplicate: this.notifyDuplicate.bind(this),
-      onMessage: this.notifyMessage.bind(this),
+      onMessage: (envelope) => this.notifyMessage(envelope, gid),
     };
   }
 

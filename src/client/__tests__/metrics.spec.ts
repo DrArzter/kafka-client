@@ -303,7 +303,10 @@ describe("KafkaClient — metrics.dedupCount", () => {
 describe("KafkaClient — KafkaInstrumentation hooks (onRetry, onDlq, onDuplicate, onMessage)", () => {
   let client: KafkaClient<TestTopicMap>;
   let inst: Required<
-    Pick<KafkaInstrumentation, "onRetry" | "onDlq" | "onDuplicate" | "onMessage">
+    Pick<
+      KafkaInstrumentation,
+      "onRetry" | "onDlq" | "onDuplicate" | "onMessage"
+    >
   >;
 
   beforeEach(() => {

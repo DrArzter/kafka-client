@@ -42,9 +42,7 @@ function makeDlqMessage(
 
 /** Setup mockFetchTopicOffsets to return N messages per partition and mockRun
  * to deliver them synchronously before resolving. */
-function setupDlqConsumer(
-  messages: ReturnType<typeof makeDlqMessage>[],
-): void {
+function setupDlqConsumer(messages: ReturnType<typeof makeDlqMessage>[]): void {
   // Group by partition to set up HWMs
   const byPartition = new Map<number, ReturnType<typeof makeDlqMessage>[]>();
   for (const m of messages) {

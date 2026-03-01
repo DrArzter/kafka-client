@@ -200,10 +200,17 @@ export function buildRetryTopicPayload(
   messages: Array<{ value: string; headers: MessageHeaders }>;
 } {
   const retryTopic = `${originalTopic}.retry.${attempt}`;
-  const STRIP = new Set([RETRY_HEADER_ATTEMPT, RETRY_HEADER_AFTER, RETRY_HEADER_MAX_RETRIES, RETRY_HEADER_ORIGINAL_TOPIC]);
+  const STRIP = new Set([
+    RETRY_HEADER_ATTEMPT,
+    RETRY_HEADER_AFTER,
+    RETRY_HEADER_MAX_RETRIES,
+    RETRY_HEADER_ORIGINAL_TOPIC,
+  ]);
   function buildHeaders(hdr: MessageHeaders): MessageHeaders {
     // Strip any stale retry headers from a previous hop so they don't leak through.
-    const userHeaders = Object.fromEntries(Object.entries(hdr).filter(([k]) => !STRIP.has(k)));
+    const userHeaders = Object.fromEntries(
+      Object.entries(hdr).filter(([k]) => !STRIP.has(k)),
+    );
     return {
       ...userHeaders,
       [RETRY_HEADER_ATTEMPT]: String(attempt),

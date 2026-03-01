@@ -112,6 +112,42 @@ export interface DeduplicationOptions {
   duplicatesTopic?: string;
 }
 
+/**
+ * Options for the per-partition circuit breaker.
+ *
+ * The circuit breaker tracks recent message outcomes in a **sliding window** and
+ * opens (pauses the partition) when too many failures accumulate:
+ *
+ * - **CLOSED** — normal operation. Each DLQ route or successful delivery is recorded
+ *   in the window. When `failuresInWindow >= threshold` the circuit opens.
+ * - **OPEN** — the partition is paused. After `recoveryMs` the circuit moves to HALF-OPEN.
+ * - **HALF-OPEN** — the partition is resumed. If the next `halfOpenSuccesses` messages
+ *   succeed the circuit closes; a new failure immediately re-opens it.
+ */
+export interface CircuitBreakerOptions {
+  /**
+   * Number of failures within the sliding window required to open the circuit.
+   * A failure is any message that ends up in the DLQ.
+   * Default: `5`.
+   */
+  threshold?: number;
+  /**
+   * Time (ms) to keep the circuit OPEN before attempting recovery (HALF_OPEN).
+   * Default: `30_000` (30 s).
+   */
+  recoveryMs?: number;
+  /**
+   * Number of outcomes (successes + failures) to keep in the sliding window.
+   * Default: `threshold * 2` (minimum `10`).
+   */
+  windowSize?: number;
+  /**
+   * Number of consecutive successes in HALF-OPEN state required to close the
+   * circuit. Default: `1`.
+   */
+  halfOpenSuccesses?: number;
+}
+
 /** Options for configuring a Kafka consumer. */
 export interface ConsumerOptions<
   T extends TopicMapConstraint<T> = TTopicMessageMap,
@@ -163,6 +199,21 @@ export interface ConsumerOptions<
    * Messages without the header are passed through unchanged.
    */
   deduplication?: DeduplicationOptions;
+  /**
+   * Drop messages older than this threshold, measured in milliseconds from
+   * the `x-timestamp` header set by the producer.
+   *
+   * Expired messages are routed to `{topic}.dlq` when `dlq: true`, otherwise
+   * `onMessageLost` is called. The handler is never invoked for an expired message.
+   */
+  messageTtlMs?: number;
+  /**
+   * Automatically pause a partition when it accumulates too many consecutive
+   * failures, then resume after a recovery window.
+   *
+   * See `CircuitBreakerOptions` for the sliding-window semantics.
+   */
+  circuitBreaker?: CircuitBreakerOptions;
 }
 
 /** Configuration for consumer retry behavior. */
@@ -217,11 +268,13 @@ export type BeforeConsumeResult =
  * - `'validation-error'` — schema validation failed before the handler ran.
  * - `'lamport-clock-duplicate'` — message was identified as a Lamport-clock duplicate
  *   and `deduplication.strategy` is `'dlq'`.
+ * - `'ttl-expired'` — message age exceeded `messageTtlMs` before the handler ran.
  */
 export type DlqReason =
   | "handler-error"
   | "validation-error"
-  | "lamport-clock-duplicate";
+  | "lamport-clock-duplicate"
+  | "ttl-expired";
 
 /** Options for `replayDlq`. */
 export interface DlqReplayOptions {
@@ -460,6 +513,40 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
     topic: string,
     position: "earliest" | "latest",
   ): Promise<void>;
+
+  /**
+   * Seek specific partitions to explicit offsets.
+   * More granular than `resetOffsets` — each partition can target a different offset.
+   *
+   * The consumer group must be inactive. Assignments for different topics are batched
+   * into one admin call per topic.
+   *
+   * @param groupId Consumer group to seek. Defaults to the client's default groupId.
+   * @param assignments Array of `{ topic, partition, offset }` tuples.
+   */
+  seekToOffset(
+    groupId: string | undefined,
+    assignments: Array<{ topic: string; partition: number; offset: string }>,
+  ): Promise<void>;
+
+  /**
+   * Consume messages as an async iterator. Useful for scripts, migrations, and
+   * one-off processing where the full `startConsumer` lifecycle is unnecessary.
+   *
+   * Breaking out of the loop (or calling `return()` on the iterator) stops the
+   * underlying consumer automatically.
+   *
+   * @example
+   * ```ts
+   * for await (const envelope of kafka.consume('orders')) {
+   *   await process(envelope);
+   * }
+   * ```
+   */
+  consume<K extends keyof T & string>(
+    topic: K,
+    options?: ConsumerOptions<T>,
+  ): AsyncIterableIterator<EventEnvelope<T[K]>>;
 
   /**
    * Pause message delivery for specific topic-partitions on a consumer group.

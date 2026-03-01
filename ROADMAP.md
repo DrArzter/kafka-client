@@ -7,12 +7,18 @@
 ### Larger features
 
 - **Benchmarks** — compare throughput / latency: raw `@confluentinc/kafka-javascript` → `@drarzter/kafka-client` → `@nestjs/microservices` Kafka transport; quantify abstraction overhead
-- **Circuit breaker** — stop retrying when downstream is consistently unavailable
 - **Transport abstraction** — `KafkaTransport` interface to decouple `KafkaClient` from `@confluentinc/kafka-javascript`; swap transports without touching business code
 
 ---
 
 ## Done
+
+### 0.7.0
+
+- [x] **`seekToOffset`** — `seekToOffset(groupId, assignments[])` seeks individual topic-partitions to explicit offsets; groups assignments by topic and calls `admin.setOffsets` per topic; throws if the consumer group is currently running to prevent racing with an active offset commit; complements `resetOffsets` for fine-grained replay scenarios
+- [x] **Message TTL** — `messageTtlMs` option in `ConsumerOptions`; evaluated against the `x-timestamp` header stamped by the producer; messages older than the threshold at consumption time are routed to DLQ with `x-dlq-reason: ttl-expired` (when `dlq: true`) or dropped via `onMessageLost`; works with both `startConsumer` and `startBatchConsumer`
+- [x] **`consume()` async iterator** — `consume<K>(topic, options?)` returns an `AsyncIterableIterator<EventEnvelope<T[K]>>`; backed by an `AsyncQueue<V>` push-to-pull bridge that resolves pending `next()` calls or buffers items; `break` or any early exit from the `for await` loop calls the iterator's `return()` which closes the queue and calls `handle.stop()` on the background consumer; accepts the full `ConsumerOptions` API
+- [x] **Circuit breaker** — `circuitBreaker?: CircuitBreakerOptions` in `ConsumerOptions`; sliding window per `${groupId}:${topic}:${partition}`; CLOSED → OPEN when DLQ failures ≥ threshold within `windowSize`; OPEN → HALF_OPEN after `recoveryMs` timer; HALF_OPEN → CLOSED after `halfOpenSuccesses` consecutive successes; any HALF_OPEN failure immediately re-opens the circuit; OPEN pauses the partition via `pauseConsumer`, HALF_OPEN resumes it; retry topic path is not subject to the breaker; circuit state and config cleaned up on `stopConsumer` / `disconnect`
 
 ### 0.6.9
 

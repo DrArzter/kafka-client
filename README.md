@@ -20,6 +20,7 @@ Type-safe Kafka client for Node.js. Framework-agnostic core with a first-class N
 - [Consuming messages](#consuming-messages)
   - [Declarative: @SubscribeTo()](#declarative-subscribeto)
   - [Imperative: startConsumer()](#imperative-startconsumer)
+  - [Iterator: consume()](#iterator-consume)
 - [Multiple consumer groups](#multiple-consumer-groups)
 - [Partition key](#partition-key)
 - [Message headers](#message-headers)
@@ -34,7 +35,10 @@ Type-safe Kafka client for Node.js. Framework-agnostic core with a first-class N
 - [Retry topic chain](#retry-topic-chain)
 - [stopConsumer](#stopconsumer)
 - [Pause and resume](#pause-and-resume)
+- [Circuit breaker](#circuit-breaker)
 - [Reset consumer offsets](#reset-consumer-offsets)
+- [Seek to offset](#seek-to-offset)
+- [Message TTL](#message-ttl)
 - [DLQ replay](#dlq-replay)
 - [Graceful shutdown](#graceful-shutdown)
 - [Consumer handles](#consumer-handles)
@@ -86,6 +90,10 @@ Safe by default. Configurable when you need it. Escape hatches for when you know
 - **Health check** — built-in health indicator for monitoring
 - **Multiple consumer groups** — named clients for different bounded contexts
 - **Declarative & imperative** — use `@SubscribeTo()` decorator or `startConsumer()` directly
+- **Async iterator** — `consume<K>()` returns an `AsyncIterableIterator<EventEnvelope<T[K]>>` for `for await` consumption; breaking out of the loop stops the consumer automatically
+- **Message TTL** — `messageTtlMs` drops or DLQs messages older than a configurable threshold, preventing stale events from poisoning downstream systems after a lag spike
+- **Circuit breaker** — `circuitBreaker` option applies a sliding-window breaker per topic-partition; pauses delivery on repeated DLQ failures and resumes after a configurable recovery window
+- **Seek to offset** — `seekToOffset(groupId, assignments)` seeks individual partitions to explicit offsets for fine-grained replay
 
 See the [Roadmap](./ROADMAP.md) for upcoming features and version history.
 
@@ -379,7 +387,7 @@ export class OrdersService {
 
 ## Consuming messages
 
-Two ways — choose what fits your style.
+Three ways — choose what fits your style.
 
 ### Declarative: @SubscribeTo()
 
@@ -427,6 +435,35 @@ export class OrdersService implements OnModuleInit {
   }
 }
 ```
+
+### Iterator: consume()
+
+Stream messages from a single topic as an `AsyncIterableIterator` — useful for scripts, one-off tasks, or any context where you prefer `for await` over a callback:
+
+```typescript
+for await (const envelope of kafka.consume('order.created')) {
+  console.log('Order:', envelope.payload.orderId);
+}
+
+// Breaking out of the loop stops the consumer automatically
+for await (const envelope of kafka.consume('order.created')) {
+  if (envelope.payload.orderId === targetId) break;
+}
+```
+
+`consume()` accepts the same `ConsumerOptions` as `startConsumer()`:
+
+```typescript
+for await (const envelope of kafka.consume('orders', {
+  retry: { maxRetries: 3 },
+  dlq: true,
+  messageTtlMs: 60_000,
+})) {
+  await processOrder(envelope.payload);
+}
+```
+
+`break`, `return`, or any early exit from the loop calls the iterator's `return()` method, which closes the internal queue and calls `handle.stop()` on the background consumer.
 
 ## Multiple consumer groups
 
@@ -828,6 +865,12 @@ Options for `sendMessage()` — the third argument:
 | `handlerTimeoutMs` | — | Log a warning if the handler hasn't resolved within this window (ms) — does not cancel the handler |
 | `deduplication.strategy` | `'drop'` | What to do with duplicate messages: `'drop'` silently discards, `'dlq'` forwards to `{topic}.dlq` (requires `dlq: true`), `'topic'` forwards to `{topic}.duplicates` |
 | `deduplication.duplicatesTopic` | `{topic}.duplicates` | Custom destination for `strategy: 'topic'` |
+| `messageTtlMs` | — | Drop (or DLQ) messages older than this many milliseconds at consumption time; evaluated against the `x-timestamp` header; see [Message TTL](#message-ttl) |
+| `circuitBreaker` | — | Enable circuit breaker with `{}` for zero-config defaults; requires `dlq: true`; see [Circuit breaker](#circuit-breaker) |
+| `circuitBreaker.threshold` | `5` | DLQ failures within `windowSize` that opens the circuit |
+| `circuitBreaker.recoveryMs` | `30_000` | Milliseconds to wait in OPEN state before entering HALF_OPEN |
+| `circuitBreaker.windowSize` | `threshold × 2, min 10` | Sliding window size in messages |
+| `circuitBreaker.halfOpenSuccesses` | `1` | Consecutive successes in HALF_OPEN required to close the circuit |
 | `batch` | `false` | (decorator only) Use `startBatchConsumer` instead of `startConsumer` |
 | `subscribeRetry.retries` | `5` | Max attempts for `consumer.subscribe()` when topic doesn't exist yet |
 | `subscribeRetry.backoffMs` | `5000` | Delay between subscribe retry attempts (ms) |
@@ -1109,6 +1152,54 @@ The first argument is the consumer group ID — pass `undefined` to target the d
 
 Pausing is non-destructive: the consumer stays connected and Kafka preserves the partition assignment for as long as the group session is alive. Messages accumulate in the topic and are delivered once the consumer resumes. Typical use: apply backpressure when a downstream dependency (e.g. a database) is temporarily overloaded.
 
+## Circuit breaker
+
+Automatically pause delivery from a topic-partition when its DLQ error rate exceeds a threshold. After a recovery window the partition is resumed automatically.
+
+**`dlq: true` is required** — the breaker counts DLQ events as failures. Without it no failures are recorded and the circuit never opens.
+
+Zero-config start — all options have sensible defaults:
+
+```typescript
+await kafka.startConsumer(['orders'], handler, {
+  dlq: true,
+  circuitBreaker: {},
+});
+```
+
+Full config for fine-tuning:
+
+```typescript
+await kafka.startConsumer(['orders'], handler, {
+  dlq: true,
+  circuitBreaker: {
+    threshold: 10,         // open after 10 failures (default: 5)
+    recoveryMs: 60_000,   // wait 60 s before probing (default: 30 s)
+    windowSize: 50,        // track last 50 messages (default: threshold × 2, min 10)
+    halfOpenSuccesses: 3,  // 3 successes to close (default: 1)
+  },
+});
+```
+
+State machine per `${groupId}:${topic}:${partition}`:
+
+| State | Behaviour |
+| ----- | --------- |
+| **CLOSED** (normal) | Messages delivered. Failures recorded in sliding window. Opens when `failures ≥ threshold`. |
+| **OPEN** | Partition paused via `pauseConsumer`. After `recoveryMs` ms transitions to HALF_OPEN. |
+| **HALF_OPEN** | Partition resumed. After `halfOpenSuccesses` consecutive successes the circuit closes. Any single failure immediately re-opens it. |
+
+Successful `onMessage` completions count as successes. The retry topic path is not subject to the breaker — it has its own backoff and EOS guarantees.
+
+Options:
+
+| Option | Default | Description |
+| ------ | ------- | ----------- |
+| `threshold` | `5` | DLQ failures within `windowSize` that opens the circuit |
+| `recoveryMs` | `30_000` | Milliseconds to wait in OPEN state before entering HALF_OPEN |
+| `windowSize` | `threshold × 2, min 10` | Sliding window size in messages |
+| `halfOpenSuccesses` | `1` | Consecutive successes in HALF_OPEN required to close the circuit |
+
 ## Reset consumer offsets
 
 Seek a consumer group's committed offsets to the beginning or end of a topic:
@@ -1125,6 +1216,46 @@ await kafka.resetOffsets('payments-group', 'orders', 'earliest');
 ```
 
 **Important:** the consumer for the specified group must be stopped before calling `resetOffsets`. An error is thrown if the group is currently running — this prevents the reset from racing with an active offset commit.
+
+## Seek to offset
+
+Seek individual topic-partitions to explicit offsets — useful when `resetOffsets` is too coarse and you need per-partition control:
+
+```typescript
+// Seek partition 0 of 'orders' to offset 100, partition 1 to offset 200
+await kafka.seekToOffset(undefined, [
+  { topic: 'orders', partition: 0, offset: '100' },
+  { topic: 'orders', partition: 1, offset: '200' },
+]);
+
+// Multiple topics in one call
+await kafka.seekToOffset('payments-group', [
+  { topic: 'payments', partition: 0, offset: '0' },
+  { topic: 'refunds',  partition: 0, offset: '500' },
+]);
+```
+
+The first argument is the consumer group ID — pass `undefined` to target the default group. Assignments are grouped by topic internally so each `admin.setOffsets` call covers all partitions of one topic.
+
+**Important:** the consumer for the specified group must be stopped before calling `seekToOffset`. An error is thrown if the group is currently running.
+
+## Message TTL
+
+Drop or route expired messages using `messageTtlMs` in `ConsumerOptions`:
+
+```typescript
+await kafka.startConsumer(['orders'], handler, {
+  messageTtlMs: 60_000, // drop messages older than 60 s
+  dlq: true,            // route expired messages to DLQ instead of dropping
+});
+```
+
+The TTL is evaluated against the `x-timestamp` header stamped on every outgoing message by the producer. Messages whose age at consumption time exceeds `messageTtlMs` are:
+
+- **Routed to DLQ** with `x-dlq-reason: ttl-expired` when `dlq: true`
+- **Dropped** (calling `onMessageLost`) otherwise
+
+Typical use: prevent stale events from poisoning downstream systems after a consumer lag spike — e.g. discard order events or push notifications that are no longer actionable.
 
 ## DLQ replay
 

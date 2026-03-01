@@ -256,7 +256,9 @@ describe("KafkaClient — Consumer Groups", () => {
     it("pauses the consumer for the specified topic-partitions", async () => {
       await client.startConsumer(["test.topic"], jest.fn());
 
-      client.pauseConsumer(undefined, [{ topic: "test.topic", partitions: [0, 1] }]);
+      client.pauseConsumer(undefined, [
+        { topic: "test.topic", partitions: [0, 1] },
+      ]);
 
       expect(mockConsumerPause).toHaveBeenCalledWith([
         { topic: "test.topic", partitions: [0] },
@@ -267,7 +269,9 @@ describe("KafkaClient — Consumer Groups", () => {
     it("resumes the consumer for the specified topic-partitions", async () => {
       await client.startConsumer(["test.topic"], jest.fn());
 
-      client.resumeConsumer(undefined, [{ topic: "test.topic", partitions: [0] }]);
+      client.resumeConsumer(undefined, [
+        { topic: "test.topic", partitions: [0] },
+      ]);
 
       expect(mockConsumerResume).toHaveBeenCalledWith([
         { topic: "test.topic", partitions: [0] },
@@ -275,8 +279,15 @@ describe("KafkaClient — Consumer Groups", () => {
     });
 
     it("logs a warning when no consumer exists for the group", () => {
-      const logger = { log: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
-      const c = new KafkaClient<TestTopicMap>("t", "g", ["localhost:9092"], { logger });
+      const logger = {
+        log: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+        debug: jest.fn(),
+      };
+      const c = new KafkaClient<TestTopicMap>("t", "g", ["localhost:9092"], {
+        logger,
+      });
 
       c.pauseConsumer(undefined, [{ topic: "test.topic", partitions: [0] }]);
 
@@ -322,6 +333,62 @@ describe("KafkaClient — Consumer Groups", () => {
 
       await expect(
         client.resetOffsets(undefined, "test.topic", "earliest"),
+      ).rejects.toThrow("still running");
+    });
+  });
+
+  describe("seekToOffset", () => {
+    it("seeks multiple partitions on the same topic in one setOffsets call", async () => {
+      await client.seekToOffset(undefined, [
+        { topic: "test.topic", partition: 0, offset: "10" },
+        { topic: "test.topic", partition: 1, offset: "20" },
+      ]);
+
+      expect(mockSetOffsets).toHaveBeenCalledTimes(1);
+      expect(mockSetOffsets).toHaveBeenCalledWith({
+        groupId: "test-group",
+        topic: "test.topic",
+        partitions: [
+          { partition: 0, offset: "10" },
+          { partition: 1, offset: "20" },
+        ],
+      });
+    });
+
+    it("groups by topic — separate setOffsets calls per topic", async () => {
+      await client.seekToOffset(undefined, [
+        { topic: "test.topic", partition: 0, offset: "5" },
+        { topic: "test.other", partition: 0, offset: "3" },
+      ]);
+
+      expect(mockSetOffsets).toHaveBeenCalledTimes(2);
+      expect(mockSetOffsets).toHaveBeenCalledWith(
+        expect.objectContaining({ topic: "test.topic" }),
+      );
+      expect(mockSetOffsets).toHaveBeenCalledWith(
+        expect.objectContaining({ topic: "test.other" }),
+      );
+    });
+
+    it("uses an explicit groupId when provided", async () => {
+      await client.seekToOffset("custom-group", [
+        { topic: "test.topic", partition: 0, offset: "99" },
+      ]);
+
+      expect(mockSetOffsets).toHaveBeenCalledWith({
+        groupId: "custom-group",
+        topic: "test.topic",
+        partitions: [{ partition: 0, offset: "99" }],
+      });
+    });
+
+    it("throws when the consumer group is still running", async () => {
+      await client.startConsumer(["test.topic"], jest.fn());
+
+      await expect(
+        client.seekToOffset(undefined, [
+          { topic: "test.topic", partition: 0, offset: "0" },
+        ]),
       ).rejects.toThrow("still running");
     });
   });
