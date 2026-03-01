@@ -1,5 +1,6 @@
 import { KafkaJS } from "@confluentinc/kafka-javascript";
 type Producer = KafkaJS.Producer;
+type Consumer = KafkaJS.Consumer;
 import {
   decodeHeaders,
   extractEnvelope,
@@ -12,6 +13,7 @@ import {
   executeWithRetry,
   sendToDlq,
   sendToDuplicatesTopic,
+  buildRetryTopicPayload,
 } from "../consumer/pipeline";
 import type { DuplicateMetadata } from "../consumer/pipeline";
 import { HEADER_LAMPORT_CLOCK } from "../message/envelope";
@@ -66,6 +68,18 @@ export type EachMessageOpts = {
     topic: string,
   ) => Promise<R>;
   deduplication?: DeduplicationContext;
+  /**
+   * EOS context for main consumer → retry.1 routing.
+   * When set, the main consumer runs with `autoCommit: false`. On handler failure,
+   * routing to the retry topic and the source offset commit are wrapped in a single
+   * Kafka transaction — a crash at any point rolls back the transaction, ensuring
+   * the message is not duplicated between the main topic and retry.1.
+   * On success, the offset is committed manually (no transaction needed).
+   */
+  eosMainContext?: {
+    txProducer: Producer;
+    consumer: Consumer;
+  };
 };
 
 /**
@@ -192,6 +206,58 @@ export async function handleEachMessage(
     wrapWithTimeout,
   } = opts;
 
+  // Build EOS callbacks when the main consumer runs with autoCommit: false
+  // (activated by retryTopics: true in startConsumer).
+  const eos = opts.eosMainContext;
+  const nextOffsetStr = (parseInt(message.offset, 10) + 1).toString();
+
+  // Commit offset manually (used on skip path: empty/invalid/duplicate message).
+  const commitOffset = eos
+    ? async () => {
+        await eos.consumer.commitOffsets([
+          { topic, partition, offset: nextOffsetStr },
+        ]);
+      }
+    : undefined;
+
+  // EOS routing closure: produce to retry.1 + commit source offset atomically.
+  const eosRouteToRetry =
+    eos && retry
+      ? async (
+          rawMsgs: string[],
+          envelopes: EventEnvelope<any>[],
+          delay: number,
+        ) => {
+          const { topic: rtTopic, messages: rtMsgs } = buildRetryTopicPayload(
+            topic,
+            rawMsgs,
+            1,
+            retry.maxRetries,
+            delay,
+            envelopes[0]?.headers ?? {},
+          );
+          const tx = await eos.txProducer.transaction();
+          try {
+            await tx.send({ topic: rtTopic, messages: rtMsgs });
+            await tx.sendOffsets({
+              consumer: eos.consumer,
+              topics: [
+                {
+                  topic,
+                  partitions: [{ partition, offset: nextOffsetStr }],
+                },
+              ],
+            });
+            await tx.commit();
+          } catch (txErr) {
+            try {
+              await tx.abort();
+            } catch {}
+            throw txErr;
+          }
+        }
+      : undefined;
+
   const envelope = await parseSingleMessage(
     message,
     topic,
@@ -201,7 +267,10 @@ export async function handleEachMessage(
     dlq,
     deps,
   );
-  if (envelope === null) return;
+  if (envelope === null) {
+    await commitOffset?.();
+    return;
+  }
 
   if (opts.deduplication) {
     const isDuplicate = await applyDeduplication(
@@ -211,7 +280,10 @@ export async function handleEachMessage(
       dlq,
       deps,
     );
-    if (isDuplicate) return;
+    if (isDuplicate) {
+      await commitOffset?.();
+      return;
+    }
   }
 
   await executeWithRetry(
@@ -234,7 +306,7 @@ export async function handleEachMessage(
       retry,
       retryTopics,
     },
-    deps,
+    { ...deps, eosRouteToRetry, eosCommitOnSuccess: commitOffset },
   );
 }
 
@@ -255,6 +327,17 @@ export type EachBatchOpts = {
     topic: string,
   ) => Promise<R>;
   deduplication?: DeduplicationContext;
+  /**
+   * EOS context for batch consumer → retry.1 routing.
+   * When set, the batch consumer runs with `autoCommit: false`.
+   * On handler failure, all messages are routed to retry.1 and the partition
+   * offset is committed atomically in a single Kafka transaction.
+   * On success, the offset is committed manually.
+   */
+  eosMainContext?: {
+    txProducer: Producer;
+    consumer: Consumer;
+  };
 };
 
 export async function handleEachBatch(
@@ -288,6 +371,69 @@ export async function handleEachBatch(
     wrapWithTimeout,
   } = opts;
 
+  // Build EOS callbacks when the batch consumer runs with autoCommit: false.
+  // Offset to commit = last message in batch + 1 (all messages in one partition, sequential).
+  const eos = opts.eosMainContext;
+  const lastRawOffset =
+    batch.messages.length > 0
+      ? batch.messages[batch.messages.length - 1]!.offset
+      : undefined;
+  const batchNextOffsetStr = lastRawOffset
+    ? (parseInt(lastRawOffset, 10) + 1).toString()
+    : undefined;
+
+  const commitBatchOffset =
+    eos && batchNextOffsetStr
+      ? async () => {
+          await eos.consumer.commitOffsets([
+            {
+              topic: batch.topic,
+              partition: batch.partition,
+              offset: batchNextOffsetStr,
+            },
+          ]);
+        }
+      : undefined;
+
+  const eosRouteToRetry =
+    eos && retry && batchNextOffsetStr
+      ? async (
+          rawMsgs: string[],
+          envelopes: EventEnvelope<any>[],
+          delay: number,
+        ) => {
+          const { topic: rtTopic, messages: rtMsgs } = buildRetryTopicPayload(
+            batch.topic,
+            rawMsgs,
+            1,
+            retry.maxRetries,
+            delay,
+            envelopes.map((e) => e.headers),
+          );
+          const tx = await eos.txProducer.transaction();
+          try {
+            await tx.send({ topic: rtTopic, messages: rtMsgs });
+            await tx.sendOffsets({
+              consumer: eos.consumer,
+              topics: [
+                {
+                  topic: batch.topic,
+                  partitions: [
+                    { partition: batch.partition, offset: batchNextOffsetStr },
+                  ],
+                },
+              ],
+            });
+            await tx.commit();
+          } catch (txErr) {
+            try {
+              await tx.abort();
+            } catch {}
+            throw txErr;
+          }
+        }
+      : undefined;
+
   const envelopes: EventEnvelope<any>[] = [];
   const rawMessages: string[] = [];
 
@@ -319,7 +465,12 @@ export async function handleEachBatch(
     rawMessages.push(message.value!.toString());
   }
 
-  if (envelopes.length === 0) return;
+  if (envelopes.length === 0) {
+    // All messages in this batch were filtered (invalid/duplicate).
+    // When running EOS, commit the batch offset so the consumer advances.
+    await commitBatchOffset?.();
+    return;
+  }
 
   const meta: BatchMeta = {
     partition: batch.partition,
@@ -343,6 +494,6 @@ export async function handleEachBatch(
       isBatch: true,
       retryTopics,
     },
-    deps,
+    { ...deps, eosRouteToRetry, eosCommitOnSuccess: commitBatchOffset },
   );
 }

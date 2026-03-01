@@ -3,6 +3,9 @@ import {
   createClient,
   mockRun,
   mockSend,
+  mockTxSend,
+  mockTxCommit,
+  mockSendOffsets,
   mockAssignment,
   KafkaClient,
 } from "./helpers";
@@ -190,11 +193,15 @@ describe("KafkaClient — metrics.retryCount", () => {
       retryTopics: true,
     });
 
-    // main consumer routes to retry.1 once (then retry consumer takes over)
+    // main consumer routes to retry.1 once via EOS transaction (then retry consumer takes over)
     expect(retryClient.getMetrics().retryCount).toBe(1);
-    expect(mockSend).toHaveBeenCalledWith(
+    expect(mockTxSend).toHaveBeenCalledWith(
       expect.objectContaining({ topic: "test.topic.retry.1" }),
     );
+    expect(mockSendOffsets).toHaveBeenCalled();
+    expect(mockTxCommit).toHaveBeenCalled();
+
+    await retryClient.disconnect();
   });
 });
 
@@ -545,5 +552,123 @@ describe("KafkaClient — duplicate transactionalId warning", () => {
     // cleanup
     await client1.disconnect();
     await client2.disconnect();
+  });
+});
+
+describe("KafkaClient — per-topic metrics", () => {
+  let client: KafkaClient<TestTopicMap>;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    client = createClient();
+  });
+
+  it("getMetrics(topic) returns zero for an unseen topic", () => {
+    expect(client.getMetrics("test.topic")).toEqual({
+      processedCount: 0,
+      retryCount: 0,
+      dlqCount: 0,
+      dedupCount: 0,
+    });
+  });
+
+  it("getMetrics(topic) counts only events for that topic", async () => {
+    const handler = jest.fn().mockResolvedValue(undefined);
+    deliverMessage();
+    await client.startConsumer(["test.topic"], handler);
+
+    expect(client.getMetrics("test.topic").processedCount).toBe(1);
+    // other topics untouched
+    expect(client.getMetrics("test.other").processedCount).toBe(0);
+  });
+
+  it("getMetrics() aggregate equals sum of per-topic metrics", async () => {
+    mockRun.mockImplementation(async ({ eachMessage }: any) => {
+      for (const [topic, id] of [
+        ["test.topic", "1"],
+        ["test.other", "2"],
+        ["test.topic", "3"],
+      ] as [string, string][]) {
+        await eachMessage({
+          topic,
+          partition: 0,
+          message: {
+            value: Buffer.from(JSON.stringify({ id, value: 1, name: "x" })),
+            headers: {},
+            offset: id,
+          },
+        });
+      }
+    });
+
+    const handler = jest.fn().mockResolvedValue(undefined);
+    await client.startConsumer(["test.topic", "test.other"], handler);
+
+    expect(client.getMetrics("test.topic").processedCount).toBe(2);
+    expect(client.getMetrics("test.other").processedCount).toBe(1);
+    expect(client.getMetrics().processedCount).toBe(3); // aggregate
+  });
+
+  it("resetMetrics(topic) resets only the specified topic", async () => {
+    mockRun.mockImplementation(async ({ eachMessage }: any) => {
+      for (const [topic, id] of [
+        ["test.topic", "1"],
+        ["test.other", "2"],
+      ] as [string, string][]) {
+        await eachMessage({
+          topic,
+          partition: 0,
+          message: {
+            value: Buffer.from(JSON.stringify({ id, value: 1, name: "x" })),
+            headers: {},
+            offset: id,
+          },
+        });
+      }
+    });
+
+    const handler = jest.fn().mockResolvedValue(undefined);
+    await client.startConsumer(["test.topic", "test.other"], handler);
+
+    expect(client.getMetrics().processedCount).toBe(2);
+
+    client.resetMetrics("test.topic");
+
+    expect(client.getMetrics("test.topic").processedCount).toBe(0);
+    expect(client.getMetrics("test.other").processedCount).toBe(1); // untouched
+    expect(client.getMetrics().processedCount).toBe(1); // aggregate updated
+  });
+
+  it("resetMetrics() resets all topics", async () => {
+    mockRun.mockImplementation(async ({ eachMessage }: any) => {
+      for (const [topic, id] of [
+        ["test.topic", "1"],
+        ["test.other", "2"],
+      ] as [string, string][]) {
+        await eachMessage({
+          topic,
+          partition: 0,
+          message: {
+            value: Buffer.from(JSON.stringify({ id, value: 1, name: "x" })),
+            headers: {},
+            offset: id,
+          },
+        });
+      }
+    });
+
+    const handler = jest.fn().mockResolvedValue(undefined);
+    await client.startConsumer(["test.topic", "test.other"], handler);
+
+    expect(client.getMetrics().processedCount).toBe(2);
+
+    client.resetMetrics();
+
+    expect(client.getMetrics()).toEqual({
+      processedCount: 0,
+      retryCount: 0,
+      dlqCount: 0,
+      dedupCount: 0,
+    });
   });
 });

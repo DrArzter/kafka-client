@@ -22,6 +22,7 @@ import type {
   KafkaMetrics,
   DlqReason,
   BatchMeta,
+  DlqReplayOptions,
 } from "../types";
 
 /**
@@ -54,6 +55,7 @@ import type {
 import { startRetryTopicConsumers } from "./retry-topic";
 import { subscribeWithRetry } from "../consumer/subscribe-retry";
 import { toError } from "../consumer/pipeline";
+import { decodeHeaders } from "../message/envelope";
 
 /**
  * Type-safe Kafka client.
@@ -97,13 +99,8 @@ export class KafkaClient<
   private readonly onRebalance: KafkaClientOptions["onRebalance"];
   /** Transactional producer ID — configurable via `KafkaClientOptions.transactionalId`. */
   private readonly txId: string;
-  /** Internal event counters exposed via `getMetrics()`. */
-  private readonly _metrics: KafkaMetrics = {
-    processedCount: 0,
-    retryCount: 0,
-    dlqCount: 0,
-    dedupCount: 0,
-  };
+  /** Per-topic event counters, lazily created on first event. Aggregated by `getMetrics()`. */
+  private readonly _topicMetrics = new Map<string, KafkaMetrics>();
 
   /** Monotonically increasing Lamport clock stamped on every outgoing message. */
   private _lamportClock = 0;
@@ -330,8 +327,14 @@ export class KafkaClient<
       );
     }
 
+    // When retryTopics is enabled, the main consumer must run with autoCommit: false
+    // so that offset commits can be coordinated with EOS routing transactions.
+    const setupOptions = options.retryTopics
+      ? { ...options, autoCommit: false as const }
+      : options;
+
     const { consumer, schemaMap, topicNames, gid, dlq, interceptors, retry } =
-      await this.setupConsumer(topics, "eachMessage", options);
+      await this.setupConsumer(topics, "eachMessage", setupOptions);
 
     const deps = this.messageDeps;
     const timeoutMs = options.handlerTimeoutMs;
@@ -339,6 +342,16 @@ export class KafkaClient<
       gid,
       options.deduplication,
     );
+
+    // Create EOS transactional producer for atomic main → retry.1 routing.
+    let eosMainContext:
+      | import("./message-handler").EachMessageOpts["eosMainContext"]
+      | undefined;
+    if (options.retryTopics && retry) {
+      const mainTxId = `${gid}-main-tx`;
+      const txProducer = await this.createRetryTxProducer(mainTxId);
+      eosMainContext = { txProducer, consumer };
+    }
 
     await consumer.run({
       eachMessage: (payload) =>
@@ -355,6 +368,7 @@ export class KafkaClient<
               timeoutMs,
               wrapWithTimeout: this.wrapWithTimeoutWarning.bind(this),
               deduplication,
+              eosMainContext,
             },
             deps,
           ),
@@ -419,15 +433,22 @@ export class KafkaClient<
       );
     }
 
-    if (options.autoCommit !== false) {
+    if (options.retryTopics) {
+      // When retryTopics is enabled, autoCommit: false is required for EOS routing.
+      // Suppress the manual-offset diagnostic that would otherwise fire.
+    } else if (options.autoCommit !== false) {
       this.logger.debug?.(
         `startBatchConsumer: autoCommit is enabled (default true). ` +
           `If your handler calls resolveOffset() or commitOffsetsIfNecessary(), set autoCommit: false to avoid offset conflicts.`,
       );
     }
 
+    const setupOptions = options.retryTopics
+      ? { ...options, autoCommit: false as const }
+      : options;
+
     const { consumer, schemaMap, topicNames, gid, dlq, interceptors, retry } =
-      await this.setupConsumer(topics, "eachBatch", options);
+      await this.setupConsumer(topics, "eachBatch", setupOptions);
 
     const deps = this.messageDeps;
     const timeoutMs = options.handlerTimeoutMs;
@@ -435,6 +456,15 @@ export class KafkaClient<
       gid,
       options.deduplication,
     );
+
+    let eosMainContext:
+      | import("./message-handler").EachBatchOpts["eosMainContext"]
+      | undefined;
+    if (options.retryTopics && retry) {
+      const mainTxId = `${gid}-main-tx`;
+      const txProducer = await this.createRetryTxProducer(mainTxId);
+      eosMainContext = { txProducer, consumer };
+    }
 
     await consumer.run({
       eachBatch: (payload) =>
@@ -451,6 +481,7 @@ export class KafkaClient<
               timeoutMs,
               wrapWithTimeout: this.wrapWithTimeoutWarning.bind(this),
               deduplication,
+              eosMainContext,
             },
             deps,
           ),
@@ -517,6 +548,22 @@ export class KafkaClient<
       this.dedupStates.delete(groupId);
       this.logger.log(`Consumer disconnected: group "${groupId}"`);
 
+      // Clean up the main consumer's EOS tx producer (present when retryTopics: true)
+      const mainTxId = `${groupId}-main-tx`;
+      const mainTxProducer = this.retryTxProducers.get(mainTxId);
+      if (mainTxProducer) {
+        await mainTxProducer
+          .disconnect()
+          .catch((e) =>
+            this.logger.warn(
+              `Error disconnecting main tx producer "${mainTxId}":`,
+              toError(e).message,
+            ),
+          );
+        _activeTransactionalIds.delete(mainTxId);
+        this.retryTxProducers.delete(mainTxId);
+      }
+
       // Stop all companion retry level consumers and their tx producers
       const companions = this.companionGroupIds.get(groupId) ?? [];
       for (const cGroupId of companions) {
@@ -570,6 +617,184 @@ export class KafkaClient<
       this.dedupStates.clear();
       this.logger.log("All consumers disconnected");
     }
+  }
+
+  public pauseConsumer(
+    groupId: string | undefined,
+    assignments: Array<{ topic: string; partitions: number[] }>,
+  ): void {
+    const gid = groupId ?? this.defaultGroupId;
+    const consumer = this.consumers.get(gid);
+    if (!consumer) {
+      this.logger.warn(`pauseConsumer: no active consumer for group "${gid}"`);
+      return;
+    }
+    consumer.pause(
+      assignments.flatMap(({ topic, partitions }) =>
+        partitions.map((p) => ({ topic, partitions: [p] })),
+      ),
+    );
+  }
+
+  public resumeConsumer(
+    groupId: string | undefined,
+    assignments: Array<{ topic: string; partitions: number[] }>,
+  ): void {
+    const gid = groupId ?? this.defaultGroupId;
+    const consumer = this.consumers.get(gid);
+    if (!consumer) {
+      this.logger.warn(`resumeConsumer: no active consumer for group "${gid}"`);
+      return;
+    }
+    consumer.resume(
+      assignments.flatMap(({ topic, partitions }) =>
+        partitions.map((p) => ({ topic, partitions: [p] })),
+      ),
+    );
+  }
+
+  /** DLQ header keys added by `sendToDlq` — stripped before re-publishing. */
+  private static readonly DLQ_HEADER_KEYS = new Set([
+    "x-dlq-original-topic",
+    "x-dlq-failed-at",
+    "x-dlq-error-message",
+    "x-dlq-error-stack",
+    "x-dlq-attempt-count",
+  ]);
+
+  public async replayDlq(
+    topic: string,
+    options: DlqReplayOptions = {},
+  ): Promise<{ replayed: number; skipped: number }> {
+    const dlqTopic = `${topic}.dlq`;
+    await this.ensureAdminConnected();
+
+    const partitionOffsets = await this.admin.fetchTopicOffsets(dlqTopic);
+    const activePartitions = partitionOffsets.filter(
+      (p) => parseInt(p.high, 10) > 0,
+    );
+    if (activePartitions.length === 0) {
+      this.logger.log(`replayDlq: "${dlqTopic}" is empty — nothing to replay`);
+      return { replayed: 0, skipped: 0 };
+    }
+
+    const highWatermarks = new Map(
+      activePartitions.map(({ partition, high }) => [
+        partition,
+        parseInt(high, 10),
+      ]),
+    );
+    const processedOffsets = new Map<number, number>();
+
+    let replayed = 0;
+    let skipped = 0;
+
+    const tempGroupId = `${dlqTopic}-replay-${Date.now()}`;
+
+    await new Promise<void>((resolve, reject) => {
+      const consumer = getOrCreateConsumer(
+        tempGroupId,
+        true,
+        true,
+        this.consumerOpsDeps,
+      );
+
+      const cleanup = () => {
+        consumer
+          .disconnect()
+          .catch(() => {})
+          .finally(() => {
+            this.consumers.delete(tempGroupId);
+            this.runningConsumers.delete(tempGroupId);
+            this.consumerCreationOptions.delete(tempGroupId);
+          });
+      };
+
+      consumer
+        .connect()
+        .then(() =>
+          subscribeWithRetry(consumer, [dlqTopic], this.logger),
+        )
+        .then(() =>
+          consumer.run({
+            eachMessage: async ({ partition, message }) => {
+              if (!message.value) return;
+
+              const offset = parseInt(message.offset, 10);
+              processedOffsets.set(partition, offset);
+
+              const headers = decodeHeaders(message.headers);
+              const targetTopic =
+                options.targetTopic ?? headers["x-dlq-original-topic"];
+              const originalHeaders = Object.fromEntries(
+                Object.entries(headers).filter(
+                  ([k]) => !KafkaClient.DLQ_HEADER_KEYS.has(k),
+                ),
+              );
+              const value = message.value.toString();
+              const shouldProcess =
+                !options.filter || options.filter(headers, value);
+
+              if (!targetTopic || !shouldProcess) {
+                skipped++;
+              } else if (options.dryRun) {
+                this.logger.log(
+                  `[DLQ replay dry-run] Would replay to "${targetTopic}"`,
+                );
+                replayed++;
+              } else {
+                await this.producer.send({
+                  topic: targetTopic,
+                  messages: [{ value, headers: originalHeaders }],
+                });
+                replayed++;
+              }
+
+              // Stop when all active partitions have reached their high watermark
+              const allDone = Array.from(highWatermarks.entries()).every(
+                ([p, hwm]) => (processedOffsets.get(p) ?? -1) >= hwm - 1,
+              );
+              if (allDone) {
+                cleanup();
+                resolve();
+              }
+            },
+          }),
+        )
+        .catch((err) => {
+          cleanup();
+          reject(err);
+        });
+    });
+
+    this.logger.log(
+      `replayDlq: replayed ${replayed}, skipped ${skipped} from "${dlqTopic}"`,
+    );
+    return { replayed, skipped };
+  }
+
+  public async resetOffsets(
+    groupId: string | undefined,
+    topic: string,
+    position: "earliest" | "latest",
+  ): Promise<void> {
+    const gid = groupId ?? this.defaultGroupId;
+    if (this.runningConsumers.has(gid)) {
+      throw new Error(
+        `resetOffsets: consumer group "${gid}" is still running. ` +
+          `Call stopConsumer("${gid}") before resetting offsets.`,
+      );
+    }
+    await this.ensureAdminConnected();
+    const partitionOffsets = await this.admin.fetchTopicOffsets(topic);
+    const partitions = partitionOffsets.map(({ partition, low, high }) => ({
+      partition,
+      offset: position === "earliest" ? low : high,
+    }));
+    await (this.admin as any).setOffsets({ groupId: gid, topic, partitions });
+    this.logger.log(
+      `Offsets reset to ${position} for group "${gid}" on topic "${topic}"`,
+    );
   }
 
   /**
@@ -635,15 +860,35 @@ export class KafkaClient<
     return this.clientId;
   }
 
-  public getMetrics(): Readonly<KafkaMetrics> {
-    return { ...this._metrics };
+  public getMetrics(topic?: string): Readonly<KafkaMetrics> {
+    if (topic !== undefined) {
+      const m = this._topicMetrics.get(topic);
+      return m
+        ? { ...m }
+        : { processedCount: 0, retryCount: 0, dlqCount: 0, dedupCount: 0 };
+    }
+    // Aggregate across all topics
+    const agg: KafkaMetrics = {
+      processedCount: 0,
+      retryCount: 0,
+      dlqCount: 0,
+      dedupCount: 0,
+    };
+    for (const m of this._topicMetrics.values()) {
+      agg.processedCount += m.processedCount;
+      agg.retryCount += m.retryCount;
+      agg.dlqCount += m.dlqCount;
+      agg.dedupCount += m.dedupCount;
+    }
+    return agg;
   }
 
-  public resetMetrics(): void {
-    this._metrics.processedCount = 0;
-    this._metrics.retryCount = 0;
-    this._metrics.dlqCount = 0;
-    this._metrics.dedupCount = 0;
+  public resetMetrics(topic?: string): void {
+    if (topic !== undefined) {
+      this._topicMetrics.delete(topic);
+      return;
+    }
+    this._topicMetrics.clear();
   }
 
   /** Gracefully disconnect producer, all consumers, and admin. */
@@ -769,12 +1014,21 @@ export class KafkaClient<
     }
   }
 
+  private metricsFor(topic: string): KafkaMetrics {
+    let m = this._topicMetrics.get(topic);
+    if (!m) {
+      m = { processedCount: 0, retryCount: 0, dlqCount: 0, dedupCount: 0 };
+      this._topicMetrics.set(topic, m);
+    }
+    return m;
+  }
+
   private notifyRetry(
     envelope: import("../message/envelope").EventEnvelope<any>,
     attempt: number,
     maxRetries: number,
   ): void {
-    this._metrics.retryCount++;
+    this.metricsFor(envelope.topic).retryCount++;
     for (const inst of this.instrumentation) {
       inst.onRetry?.(envelope, attempt, maxRetries);
     }
@@ -784,7 +1038,7 @@ export class KafkaClient<
     envelope: import("../message/envelope").EventEnvelope<any>,
     reason: DlqReason,
   ): void {
-    this._metrics.dlqCount++;
+    this.metricsFor(envelope.topic).dlqCount++;
     for (const inst of this.instrumentation) {
       inst.onDlq?.(envelope, reason);
     }
@@ -794,7 +1048,7 @@ export class KafkaClient<
     envelope: import("../message/envelope").EventEnvelope<any>,
     strategy: "drop" | "dlq" | "topic",
   ): void {
-    this._metrics.dedupCount++;
+    this.metricsFor(envelope.topic).dedupCount++;
     for (const inst of this.instrumentation) {
       inst.onDuplicate?.(envelope, strategy);
     }
@@ -803,7 +1057,7 @@ export class KafkaClient<
   private notifyMessage(
     envelope: import("../message/envelope").EventEnvelope<any>,
   ): void {
-    this._metrics.processedCount++;
+    this.metricsFor(envelope.topic).processedCount++;
     for (const inst of this.instrumentation) {
       inst.onMessage?.(envelope);
     }

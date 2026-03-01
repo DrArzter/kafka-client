@@ -472,6 +472,21 @@ export async function executeWithRetry<T extends TopicMapConstraint<T>>(
     ) => void;
     onDlq?: (envelope: EventEnvelope<any>, reason: DlqReason) => void;
     onMessage?: (envelope: EventEnvelope<any>) => void;
+    /**
+     * EOS atomic routing to `<topic>.retry.1` (main consumer only).
+     * When present, replaces `sendToRetryTopic` with a Kafka transaction that
+     * sends to the retry topic AND commits the source offset atomically.
+     */
+    eosRouteToRetry?: (
+      rawMessages: string[],
+      envelopes: EventEnvelope<any>[],
+      delay: number,
+    ) => Promise<void>;
+    /**
+     * Manual offset commit for the success path when the main consumer runs
+     * with `autoCommit: false` (required when `eosRouteToRetry` is active).
+     */
+    eosCommitOnSuccess?: () => Promise<void>;
   },
 ): Promise<void> {
   const {
@@ -498,6 +513,19 @@ export async function executeWithRetry<T extends TopicMapConstraint<T>>(
       deps.instrumentation,
     );
     if (!error) {
+      if (deps.eosCommitOnSuccess) {
+        try {
+          await deps.eosCommitOnSuccess();
+        } catch (commitErr) {
+          // Offset commit failed — message will be redelivered; don't call onMessage
+          // to avoid counting a message whose offset was not actually committed.
+          deps.logger.error(
+            `EOS offset commit failed after successful handler — message will be redelivered:`,
+            toError(commitErr).stack,
+          );
+          return;
+        }
+      }
       for (const env of envelopes) deps.onMessage?.(env);
       return;
     }
@@ -523,28 +551,42 @@ export async function executeWithRetry<T extends TopicMapConstraint<T>>(
     if (retryTopics && retry) {
       // Route to retry topic — retry consumer handles backoff and further attempts.
       // Always use attempt 1 here (main consumer never retries in-process).
-      //
-      // NOTE: this send is NOT EOS. The main consumer routes to <topic>.retry.1
-      // via the regular (non-transactional) producer. If the process crashes after
-      // producer.send() but before the offset commit, the message will appear in
-      // retry.1 AND be redelivered to the main consumer — handled twice.
-      // EOS (read-process-write atomicity) is guaranteed only from retry.N onward
-      // (see startRetryTopicConsumers). This is a known limitation tracked in the
-      // roadmap under 0.5.6.
       const cap = Math.min(backoffMs, maxBackoffMs);
       const delay = Math.floor(Math.random() * cap);
-      await sendToRetryTopic(
-        topic,
-        rawMessages,
-        1,
-        retry.maxRetries,
-        delay,
-        isBatch
-          ? envelopes.map((e) => e.headers)
-          : (envelopes[0]?.headers ?? {}),
-        deps,
-      );
-      deps.onRetry?.(envelopes[0]!, 1, retry.maxRetries);
+      if (deps.eosRouteToRetry) {
+        // EOS path (single-message consumers): send to retry.1 + commit source
+        // offset atomically via a Kafka transaction. A crash at any point rolls
+        // back the transaction — no duplicate is routed to retry.1.
+        try {
+          await deps.eosRouteToRetry(rawMessages, envelopes, delay);
+          deps.onRetry?.(envelopes[0]!, 1, retry.maxRetries);
+        } catch (txErr) {
+          // Transaction failed — offset is NOT committed; message will be
+          // redelivered and the routing retried on the next delivery.
+          deps.logger.error(
+            `EOS routing to retry topic failed — message will be redelivered:`,
+            toError(txErr).stack,
+          );
+        }
+      } else {
+        // Non-EOS path (batch consumers, or single-message consumers without EOS context).
+        // The regular producer sends to retry.1 and the offset is committed by
+        // librdkafka's autoCommit after eachMessage returns. A crash between the
+        // two operations can cause the message to appear in retry.1 AND be
+        // redelivered to the main consumer — handlers must be idempotent.
+        await sendToRetryTopic(
+          topic,
+          rawMessages,
+          1,
+          retry.maxRetries,
+          delay,
+          isBatch
+            ? envelopes.map((e) => e.headers)
+            : (envelopes[0]?.headers ?? {}),
+          deps,
+        );
+        deps.onRetry?.(envelopes[0]!, 1, retry.maxRetries);
+      }
     } else if (isLastAttempt) {
       if (dlq) {
         // Use per-message headers so each DLQ message preserves its own

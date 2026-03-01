@@ -33,6 +33,9 @@ Type-safe Kafka client for Node.js. Framework-agnostic core with a first-class N
 - [Deduplication (Lamport Clock)](#deduplication-lamport-clock)
 - [Retry topic chain](#retry-topic-chain)
 - [stopConsumer](#stopconsumer)
+- [Pause and resume](#pause-and-resume)
+- [Reset consumer offsets](#reset-consumer-offsets)
+- [DLQ replay](#dlq-replay)
 - [Graceful shutdown](#graceful-shutdown)
 - [Consumer handles](#consumer-handles)
 - [onMessageLost](#onmessagelost)
@@ -776,11 +779,19 @@ const myInstrumentation: KafkaInstrumentation = {
 `KafkaClient` maintains lightweight in-process event counters independently of any instrumentation:
 
 ```typescript
+// Global snapshot — aggregate across all topics
 const snapshot = kafka.getMetrics();
 // { processedCount: number; retryCount: number; dlqCount: number; dedupCount: number }
 
-kafka.resetMetrics(); // reset all counters to zero
+// Per-topic snapshot
+const orderMetrics = kafka.getMetrics('order.created');
+// { processedCount: 5, retryCount: 1, dlqCount: 0, dedupCount: 0 }
+
+kafka.resetMetrics();                // reset all counters
+kafka.resetMetrics('order.created'); // reset only one topic's counters
 ```
+
+Passing a topic name that has not seen any events returns a zero-valued snapshot — it never throws.
 
 Counters are incremented in the same code paths that fire the corresponding hooks — they are always active regardless of whether any instrumentation is configured.
 
@@ -1025,7 +1036,7 @@ By default, retry is handled in-process: the consumer sleeps between attempts wh
 
 Benefits over in-process retry:
 
-- **Durable** — retry messages survive a consumer restart; routing between levels and to DLQ is exactly-once via Kafka transactions
+- **Durable** — retry messages survive a consumer restart; all routing (main → retry.1, level N → N+1, retry → DLQ) is exactly-once via Kafka transactions
 - **Non-blocking** — the original consumer is free immediately; each level consumer only pauses its specific partition during the delay window, so other partitions continue processing
 - **Isolated** — each retry level has its own consumer group, so a slow level 3 consumer never blocks a level 1 consumer
 
@@ -1057,9 +1068,9 @@ Each level consumer uses `consumer.pause → sleep(remaining) → consumer.resum
 
 The retry topic messages carry scheduling headers (`x-retry-attempt`, `x-retry-after`, `x-retry-original-topic`, `x-retry-max-retries`) that each level consumer reads automatically — no manual configuration needed.
 
-> **Delivery guarantee:** routing within the retry chain (retry.N → retry.N+1 and retry.N → DLQ) is **exactly-once** — each routing step is wrapped in a Kafka transaction via `sendOffsetsToTransaction`, so the produce and the consumer offset commit happen atomically. A crash at any point rolls back the transaction: the message is redelivered and the routing is retried, with no duplicate in the next level. If the EOS transaction itself fails (broker unavailable), the offset is not committed and the message stays safely in the retry topic until the broker recovers.
+> **Delivery guarantee:** the entire retry chain — including the **main consumer → retry.1** boundary — is **exactly-once**. Every routing step (main → retry.1, retry.N → retry.N+1, retry.N → DLQ) is wrapped in a Kafka transaction via `sendOffsetsToTransaction`: the produce and the consumer offset commit happen atomically. A crash at any point rolls back the transaction: the message is redelivered and the routing is retried, with no duplicate in the next level. If the EOS transaction fails (broker unavailable), the offset stays uncommitted and the message is safely redelivered — it is never lost.
 >
-> The remaining at-least-once window is at the **main consumer → retry.1** boundary: the main consumer uses `autoCommit: true` by default, so if it crashes after routing to `retry.1` but before autoCommit fires, the message may appear twice in `retry.1`. This is the standard Kafka at-least-once trade-off for any consumer using autoCommit. Design handlers to be idempotent if this edge case is unacceptable.
+> The standard Kafka at-least-once guarantee still applies at the handler level: if your handler succeeds but the process crashes before the manual offset commit completes, the message is redelivered to the handler. Design handlers to be idempotent.
 >
 > **Startup validation:** `retryTopics` requires `retry` to be set — an error is thrown at startup if `retry` is missing. When `autoCreateTopics: false`, all `{topic}.retry.N` topics are validated to exist at startup and a clear error lists any missing ones. With `autoCreateTopics: true` the check is skipped — topics are created automatically by the `ensureTopic` path. Supported by both `startConsumer` and `startBatchConsumer`.
 
@@ -1078,6 +1089,75 @@ await kafka.stopConsumer();
 ```
 
 `stopConsumer(groupId)` disconnects and removes only that group's consumer, leaving other groups running. Useful when you want to pause processing for a specific topic without restarting the whole client.
+
+## Pause and resume
+
+Temporarily stop delivering messages from specific partitions without disconnecting the consumer:
+
+```typescript
+// Pause partition 0 of 'orders' (default group)
+kafka.pauseConsumer(undefined, [{ topic: 'orders', partitions: [0] }]);
+
+// Resume it later
+kafka.resumeConsumer(undefined, [{ topic: 'orders', partitions: [0] }]);
+
+// Target a specific consumer group, multiple partitions
+kafka.pauseConsumer('payments-group', [{ topic: 'payments', partitions: [0, 1] }]);
+```
+
+The first argument is the consumer group ID — pass `undefined` to target the default group. A warning is logged if the group is not found.
+
+Pausing is non-destructive: the consumer stays connected and Kafka preserves the partition assignment for as long as the group session is alive. Messages accumulate in the topic and are delivered once the consumer resumes. Typical use: apply backpressure when a downstream dependency (e.g. a database) is temporarily overloaded.
+
+## Reset consumer offsets
+
+Seek a consumer group's committed offsets to the beginning or end of a topic:
+
+```typescript
+// Seek to the beginning — re-process all existing messages
+await kafka.resetOffsets(undefined, 'orders', 'earliest');
+
+// Seek to the end — skip existing messages, process only new ones
+await kafka.resetOffsets(undefined, 'orders', 'latest');
+
+// Target a specific consumer group
+await kafka.resetOffsets('payments-group', 'orders', 'earliest');
+```
+
+**Important:** the consumer for the specified group must be stopped before calling `resetOffsets`. An error is thrown if the group is currently running — this prevents the reset from racing with an active offset commit.
+
+## DLQ replay
+
+Re-publish messages from a dead letter queue back to the original topic:
+
+```typescript
+// Re-publish all messages from 'orders.dlq' → 'orders'
+const result = await kafka.replayDlq('orders');
+// { replayed: 42, skipped: 0 }
+```
+
+Options:
+
+| Option | Default | Description |
+| ------ | ------- | ----------- |
+| `targetTopic` | `x-dlq-original-topic` header | Override the destination topic |
+| `dryRun` | `false` | Count messages without sending |
+| `filter` | — | `(headers) => boolean` — skip messages where the callback returns `false` |
+
+```typescript
+// Dry run — see how many messages would be replayed
+const dry = await kafka.replayDlq('orders', { dryRun: true });
+
+// Route to a different topic
+const result = await kafka.replayDlq('orders', { targetTopic: 'orders.v2' });
+
+// Only replay messages with a specific correlation ID
+const filtered = await kafka.replayDlq('orders', {
+  filter: (headers) => headers['x-correlation-id'] === 'corr-123',
+});
+```
+
+`replayDlq` creates a temporary consumer group that reads the DLQ topic up to the high-watermark at the time of the call — messages published after replay starts are not included. DLQ metadata headers (`x-dlq-original-topic`, `x-dlq-error-message`, `x-dlq-error-stack`, `x-dlq-failed-at`, `x-dlq-attempt-count`) are stripped from the replayed messages; all other headers (e.g. `x-correlation-id`) are preserved.
 
 ## Graceful shutdown
 

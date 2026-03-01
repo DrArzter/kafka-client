@@ -223,6 +223,26 @@ export type DlqReason =
   | "validation-error"
   | "lamport-clock-duplicate";
 
+/** Options for `replayDlq`. */
+export interface DlqReplayOptions {
+  /**
+   * Override the target topic to re-publish to.
+   * Default: reads the `x-dlq-original-topic` header from each DLQ message.
+   */
+  targetTopic?: string;
+  /**
+   * Dry-run mode — log what would be replayed without actually sending.
+   * Increments the `replayed` counter so you can see what would happen.
+   */
+  dryRun?: boolean;
+  /**
+   * Optional filter — return `false` to skip a message.
+   * @param headers All headers on the DLQ message (including `x-dlq-*` metadata).
+   * @param value Raw message value (JSON string).
+   */
+  filter?: (headers: MessageHeaders, value: string) => boolean;
+}
+
 /**
  * Snapshot of internal event counters accumulated since client creation
  * (or since the last `resetMetrics()` call).
@@ -394,12 +414,76 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
 
   /**
    * Return a snapshot of internal event counters (retry / DLQ / dedup).
+   * - `getMetrics()` — aggregate across all topics.
+   * - `getMetrics(topic)` — counters for a specific topic only; returns all-zero
+   *   if no events have been observed for that topic yet.
+   *
    * Counters accumulate since client creation or the last `resetMetrics()` call.
    */
-  getMetrics(): Readonly<KafkaMetrics>;
+  getMetrics(topic?: string): Readonly<KafkaMetrics>;
 
-  /** Reset all internal event counters to zero. */
-  resetMetrics(): void;
+  /**
+   * Reset internal event counters to zero.
+   * - `resetMetrics()` — reset all topics.
+   * - `resetMetrics(topic)` — reset a single topic only.
+   */
+  resetMetrics(topic?: string): void;
+
+  /**
+   * Consume all messages currently in `{topic}.dlq`, strip the `x-dlq-*` metadata
+   * headers, and re-publish each message to its original topic (or `options.targetTopic`).
+   *
+   * A temporary consumer group is created and torn down automatically. The DLQ topic
+   * itself is not modified — messages remain there after replay.
+   *
+   * @returns `{ replayed, skipped }` — counts of re-published vs skipped messages.
+   */
+  replayDlq(
+    topic: string,
+    options?: DlqReplayOptions,
+  ): Promise<{ replayed: number; skipped: number }>;
+
+  /**
+   * Reset committed offsets for a consumer group to the earliest or latest position.
+   *
+   * The consumer group must be inactive (no running consumers) — Kafka does not
+   * allow offset resets while members are actively consuming. Call
+   * `stopConsumer(groupId)` first.
+   *
+   * @param groupId Consumer group to reset. Defaults to the client's default groupId.
+   * @param topic Topic to reset.
+   * @param position `'earliest'` seeks to the first available offset; `'latest'`
+   *   seeks past the last message (consumer will only see new messages).
+   */
+  resetOffsets(
+    groupId: string | undefined,
+    topic: string,
+    position: "earliest" | "latest",
+  ): Promise<void>;
+
+  /**
+   * Pause message delivery for specific topic-partitions on a consumer group.
+   * The consumer remains connected and its committed offsets are preserved —
+   * only polling is suspended. Call `resumeConsumer` to restart delivery.
+   *
+   * @param groupId Consumer group to pause. Defaults to the client's default groupId.
+   * @param assignments Topic-partition pairs to pause.
+   */
+  pauseConsumer(
+    groupId: string | undefined,
+    assignments: Array<{ topic: string; partitions: number[] }>,
+  ): void;
+
+  /**
+   * Resume message delivery for previously paused topic-partitions.
+   *
+   * @param groupId Consumer group to resume. Defaults to the client's default groupId.
+   * @param assignments Topic-partition pairs to resume.
+   */
+  resumeConsumer(
+    groupId: string | undefined,
+    assignments: Array<{ topic: string; partitions: number[] }>,
+  ): void;
 
   /**
    * Drain in-flight handlers, then disconnect all producers, consumers, and admin.

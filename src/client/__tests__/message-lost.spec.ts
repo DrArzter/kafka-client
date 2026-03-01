@@ -4,6 +4,7 @@ import {
   setupMessage,
   mockRun,
   mockSend,
+  mockTxSend,
   mockListTopics,
   KafkaClient,
   MessageLostContext,
@@ -149,9 +150,12 @@ describe("KafkaClient — onMessageLost hook", () => {
     expect(onMessageLost).not.toHaveBeenCalled();
   });
 
-  it("should call onMessageLost when routing to retry topic fails", async () => {
-    // retryTopics: true routes failed messages via producer.send() to <topic>.retry.1.
-    // If that send throws, onMessageLost must fire (parity with DLQ send failure).
+  it("should NOT call onMessageLost when EOS routing to retry topic fails (message will be redelivered)", async () => {
+    // With retryTopics: true the main consumer uses EOS (tx.send) to route to retry.1.
+    // An EOS transaction failure does NOT commit the source offset — the message stays
+    // in the main topic and is redelivered on the next poll. It is not lost, so
+    // onMessageLost must NOT fire.
+    mockTxSend.mockRejectedValueOnce(new Error("EOS transaction failed"));
     mockListTopics.mockResolvedValueOnce(["test.topic", "test.topic.retry.1"]);
     mockRun
       .mockImplementationOnce(async ({ eachMessage }: any) => {
@@ -160,11 +164,11 @@ describe("KafkaClient — onMessageLost hook", () => {
           partition: 0,
           message: {
             value: Buffer.from(JSON.stringify({ id: "1", value: 1 })),
+            offset: "0",
           },
         });
       })
-      .mockImplementationOnce(async () => {}); // retry.1 consumer — no messages
-    mockSend.mockRejectedValueOnce(new Error("retry topic send failed"));
+      .mockResolvedValue(undefined); // retry.1 consumer — no messages
 
     const client = createClientWithHook();
     const handler = jest.fn().mockRejectedValue(new Error("handler error"));
@@ -175,13 +179,9 @@ describe("KafkaClient — onMessageLost hook", () => {
       retryTopicAssignmentTimeoutMs: 0,
     });
 
-    expect(onMessageLost).toHaveBeenCalledTimes(1);
-    expect(onMessageLost).toHaveBeenCalledWith(
-      expect.objectContaining({
-        topic: "test.topic",
-        error: expect.objectContaining({ message: "retry topic send failed" }),
-      }),
-    );
+    // Message is NOT lost — it will be redelivered via at-least-once semantics
+    expect(onMessageLost).not.toHaveBeenCalled();
+    await client.disconnect();
   });
 
   it("should call onMessageLost when DLQ send itself fails", async () => {

@@ -6,7 +6,6 @@
 
 ### Larger features
 
-- **DLQ replay** — `client.replayDlq(topic, options?)` reads `{topic}.dlq`, strips DLQ metadata headers, and re-publishes messages to the original topic; supports `from` / `to` time-range filters and a dry-run mode
 - **Benchmarks** — compare throughput / latency: raw `@confluentinc/kafka-javascript` → `@drarzter/kafka-client` → `@nestjs/microservices` Kafka transport; quantify abstraction overhead
 - **Circuit breaker** — stop retrying when downstream is consistently unavailable
 - **Transport abstraction** — `KafkaTransport` interface to decouple `KafkaClient` from `@confluentinc/kafka-javascript`; swap transports without touching business code
@@ -14,6 +13,18 @@
 ---
 
 ## Done
+
+### 0.6.9
+
+- [x] **Per-topic metrics** — `getMetrics(topic?)` now accepts an optional topic name; passing a topic returns a per-topic `KafkaMetrics` snapshot; calling without arguments returns an aggregate across all topics; `resetMetrics(topic?)` resets a single topic's counters or clears all; a topic that has never seen any events returns a zero-valued snapshot without throwing
+- [x] **Pause / resume API** — `pauseConsumer(groupId, assignments)` and `resumeConsumer(groupId, assignments)` exposed on `KafkaClient` and `IKafkaClient`; delegate to `consumer.pause/resume` for the specified topic-partitions; the consumer stays connected and Kafka preserves the partition assignment while paused; a warning is logged when the group is not found
+- [x] **`resetOffsets`** — `resetOffsets(groupId, topic, 'earliest' | 'latest')` fetches the partition watermarks via admin and calls `admin.setOffsets` to seek all partitions of a topic to the beginning or end; throws if the consumer group is currently running (prevents racing with an active offset commit)
+- [x] **DLQ replay** — `replayDlq(topic, options?)` reads `{topic}.dlq` up to the high-watermark at call time, strips `x-dlq-*` metadata headers, and re-publishes each message to its `x-dlq-original-topic` (or `options.targetTopic`); supports `dryRun` (count without sending) and `filter((headers) => boolean)` to selectively skip messages; all other original headers (e.g. `x-correlation-id`) are preserved; uses a temporary consumer group that is torn down automatically when replay finishes
+- [x] **Batch EOS** — EOS main-consumer routing extended to `startBatchConsumer`; when `retryTopics: true`, the batch consumer runs with `autoCommit: false`; on handler failure, all N messages in the batch are routed to `retry.1` in a single Kafka transaction (`tx.send(retry.1, allMessages) + tx.sendOffsets(consumer, batchNextOffset) + tx.commit()`); a crash at any point rolls back the transaction — the batch is redelivered without duplicates in `retry.1`; empty-batch skip path also commits the offset manually; same `${groupId}-main-tx` producer lifecycle as the single-message path
+
+### 0.6.8
+
+- [x] **EOS main consumer → retry.1** — the last at-least-once gap in the retry chain is now closed; when `retryTopics: true`, the main consumer runs with `autoCommit: false`; on handler failure, routing to `retry.1` and the source offset commit are wrapped in a single Kafka transaction (`tx.send(retry.1) + tx.sendOffsets(consumer) + tx.commit()`); a crash at any point rolls back the transaction — the message is redelivered, never duplicated in `retry.1`; on success, the offset is committed manually; skip paths (invalid/empty message, Lamport duplicate) also commit the offset manually; `${groupId}-main-tx` transactional producer is created at consumer start and cleaned up by `stopConsumer(groupId)`
 
 ### 0.6.7
 

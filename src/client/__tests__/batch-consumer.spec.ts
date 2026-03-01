@@ -6,6 +6,7 @@ import {
   mockSubscribe,
   mockRun,
   mockSend,
+  mockTxSend,
   mockListTopics,
   KafkaClient,
   topic,
@@ -361,8 +362,8 @@ describe("KafkaClient — Batch Consumer", () => {
       retryTopicAssignmentTimeoutMs: 0,
     });
 
-    // Both messages routed in one send — each with their own x-correlation-id
-    expect(mockSend).toHaveBeenCalledWith(
+    // Both messages routed in one EOS transaction — each with their own x-correlation-id
+    expect(mockTxSend).toHaveBeenCalledWith(
       expect.objectContaining({
         topic: "test.topic.retry.1",
         messages: [

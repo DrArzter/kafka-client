@@ -2,10 +2,14 @@ import {
   TestTopicMap,
   createClient,
   mockConsumer,
+  mockConsumerPause,
+  mockConsumerResume,
   mockDisconnect,
   mockSubscribe,
   mockRun,
   mockListTopics,
+  mockSetOffsets,
+  mockFetchTopicOffsets,
   KafkaClient,
 } from "./helpers";
 
@@ -225,8 +229,8 @@ describe("KafkaClient — Consumer Groups", () => {
       mockDisconnect.mockClear();
       await handle.stop();
 
-      // One disconnect per retry level tx producer (retry.1 and retry.2)
-      expect(mockDisconnect).toHaveBeenCalledTimes(2);
+      // One disconnect per retry level tx producer (retry.1 and retry.2) + main-tx EOS producer
+      expect(mockDisconnect).toHaveBeenCalledTimes(3);
     });
 
     it("should disconnect retryTxProducers when stopConsumer() (all) is called", async () => {
@@ -243,7 +247,82 @@ describe("KafkaClient — Consumer Groups", () => {
       mockDisconnect.mockClear();
       await client.stopConsumer(); // no groupId — stop all
 
-      expect(mockDisconnect).toHaveBeenCalledTimes(1);
+      // retry.1 tx producer + main-tx EOS producer
+      expect(mockDisconnect).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("pauseConsumer / resumeConsumer", () => {
+    it("pauses the consumer for the specified topic-partitions", async () => {
+      await client.startConsumer(["test.topic"], jest.fn());
+
+      client.pauseConsumer(undefined, [{ topic: "test.topic", partitions: [0, 1] }]);
+
+      expect(mockConsumerPause).toHaveBeenCalledWith([
+        { topic: "test.topic", partitions: [0] },
+        { topic: "test.topic", partitions: [1] },
+      ]);
+    });
+
+    it("resumes the consumer for the specified topic-partitions", async () => {
+      await client.startConsumer(["test.topic"], jest.fn());
+
+      client.resumeConsumer(undefined, [{ topic: "test.topic", partitions: [0] }]);
+
+      expect(mockConsumerResume).toHaveBeenCalledWith([
+        { topic: "test.topic", partitions: [0] },
+      ]);
+    });
+
+    it("logs a warning when no consumer exists for the group", () => {
+      const logger = { log: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
+      const c = new KafkaClient<TestTopicMap>("t", "g", ["localhost:9092"], { logger });
+
+      c.pauseConsumer(undefined, [{ topic: "test.topic", partitions: [0] }]);
+
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("g"));
+    });
+  });
+
+  describe("resetOffsets", () => {
+    it("seeks to earliest by passing the low watermark offset", async () => {
+      mockFetchTopicOffsets.mockResolvedValueOnce([
+        { partition: 0, low: "5", high: "100" },
+        { partition: 1, low: "0", high: "50" },
+      ]);
+
+      await client.resetOffsets(undefined, "test.topic", "earliest");
+
+      expect(mockSetOffsets).toHaveBeenCalledWith({
+        groupId: "test-group",
+        topic: "test.topic",
+        partitions: [
+          { partition: 0, offset: "5" },
+          { partition: 1, offset: "0" },
+        ],
+      });
+    });
+
+    it("seeks to latest by passing the high watermark offset", async () => {
+      mockFetchTopicOffsets.mockResolvedValueOnce([
+        { partition: 0, low: "0", high: "200" },
+      ]);
+
+      await client.resetOffsets(undefined, "test.topic", "latest");
+
+      expect(mockSetOffsets).toHaveBeenCalledWith({
+        groupId: "test-group",
+        topic: "test.topic",
+        partitions: [{ partition: 0, offset: "200" }],
+      });
+    });
+
+    it("throws when the consumer group is still running", async () => {
+      await client.startConsumer(["test.topic"], jest.fn());
+
+      await expect(
+        client.resetOffsets(undefined, "test.topic", "earliest"),
+      ).rejects.toThrow("still running");
     });
   });
 });
