@@ -36,13 +36,16 @@ Type-safe Kafka client for Node.js. Framework-agnostic core with a first-class N
 - [stopConsumer](#stopconsumer)
 - [Pause and resume](#pause-and-resume)
 - [Circuit breaker](#circuit-breaker)
+  - [getCircuitState](#getcircuitstate)
 - [Reset consumer offsets](#reset-consumer-offsets)
 - [Seek to offset](#seek-to-offset)
+- [Seek to timestamp](#seek-to-timestamp)
 - [Message TTL](#message-ttl)
 - [DLQ replay](#dlq-replay)
 - [Graceful shutdown](#graceful-shutdown)
 - [Consumer handles](#consumer-handles)
 - [onMessageLost](#onmessagelost)
+- [onTtlExpired](#onttlexpired)
 - [onRebalance](#onrebalance)
 - [Consumer lag](#consumer-lag)
 - [Handler timeout warning](#handler-timeout-warning)
@@ -465,6 +468,20 @@ for await (const envelope of kafka.consume('orders', {
 
 `break`, `return`, or any early exit from the loop calls the iterator's `return()` method, which closes the internal queue and calls `handle.stop()` on the background consumer.
 
+**Backpressure** — use `queueHighWaterMark` to prevent unbounded queue growth when processing is slower than the message rate:
+
+```typescript
+for await (const envelope of kafka.consume('orders', {
+  queueHighWaterMark: 100, // pause partition when queue reaches 100 messages
+})) {
+  await slowProcessing(envelope.payload); // resumes when queue drains below 50
+}
+```
+
+The partition is paused when the internal queue reaches `queueHighWaterMark` and automatically resumed when it drains below 50%. Without this option the queue is unbounded.
+
+**Error propagation** — if the consumer fails to start (e.g. broker unreachable), the error surfaces on the next `next()` / `for await` iteration rather than being silently swallowed.
+
 ## Multiple consumer groups
 
 ### Per-consumer groupId
@@ -871,6 +888,7 @@ Options for `sendMessage()` — the third argument:
 | `circuitBreaker.recoveryMs` | `30_000` | Milliseconds to wait in OPEN state before entering HALF_OPEN |
 | `circuitBreaker.windowSize` | `threshold × 2, min 10` | Sliding window size in messages |
 | `circuitBreaker.halfOpenSuccesses` | `1` | Consecutive successes in HALF_OPEN required to close the circuit |
+| `queueHighWaterMark` | unbounded | Max messages buffered in the `consume()` iterator queue before the partition is paused; resumes at 50% drain. Only applies to `consume()` |
 | `batch` | `false` | (decorator only) Use `startBatchConsumer` instead of `startConsumer` |
 | `subscribeRetry.retries` | `5` | Max attempts for `consumer.subscribe()` when topic doesn't exist yet |
 | `subscribeRetry.backoffMs` | `5000` | Delay between subscribe retry attempts (ms) |
@@ -892,6 +910,7 @@ Passed to `KafkaModule.register()` or returned from `registerAsync()` factory:
 | `instrumentation` | `[]` | Client-wide instrumentation hooks (e.g. OTel). Applied to both send and consume paths |
 | `transactionalId` | `${clientId}-tx` | Transactional producer ID for `transaction()` calls. Must be unique per producer instance across the cluster — two instances sharing the same ID will be fenced by Kafka. The client logs a warning when the same ID is registered twice within one process |
 | `onMessageLost` | — | Called when a message is silently dropped without DLQ — use to alert, log to external systems, or trigger fallback logic |
+| `onTtlExpired` | — | Called when a message is dropped due to TTL expiration (`messageTtlMs`) and `dlq` is not enabled; receives `{ topic, ageMs, messageTtlMs, headers }` |
 | `onRebalance` | — | Called on every partition assign/revoke event across all consumers created by this client |
 
 **Module-scoped** (default) — import `KafkaModule` in each module that needs it:
@@ -1200,6 +1219,41 @@ Options:
 | `windowSize` | `threshold × 2, min 10` | Sliding window size in messages |
 | `halfOpenSuccesses` | `1` | Consecutive successes in HALF_OPEN required to close the circuit |
 
+### getCircuitState
+
+Inspect the current circuit breaker state for a partition — useful for health endpoints and dashboards:
+
+```typescript
+const state = kafka.getCircuitState('orders', 0);
+// undefined — circuit not configured or never tripped
+// { status: 'closed', failures: 2, windowSize: 10 }
+// { status: 'open',   failures: 5, windowSize: 10 }
+// { status: 'half-open', failures: 0, windowSize: 0 }
+
+// With explicit group ID:
+const state = kafka.getCircuitState('orders', 0, 'payments-group');
+```
+
+Returns `undefined` when `circuitBreaker` is not configured for the group or the circuit has never been tripped (state is lazily initialised on the first DLQ event).
+
+**Instrumentation hooks** — react to state transitions via `KafkaInstrumentation`:
+
+```typescript
+const kafka = new KafkaClient('svc', 'group', brokers, {
+  instrumentation: [{
+    onCircuitOpen(topic, partition) {
+      metrics.increment('circuit_open', { topic, partition });
+    },
+    onCircuitHalfOpen(topic, partition) {
+      logger.log(`Circuit probing ${topic}[${partition}]`);
+    },
+    onCircuitClose(topic, partition) {
+      metrics.increment('circuit_close', { topic, partition });
+    },
+  }],
+});
+```
+
 ## Reset consumer offsets
 
 Seek a consumer group's committed offsets to the beginning or end of a topic:
@@ -1239,6 +1293,29 @@ The first argument is the consumer group ID — pass `undefined` to target the d
 
 **Important:** the consumer for the specified group must be stopped before calling `seekToOffset`. An error is thrown if the group is currently running.
 
+## Seek to timestamp
+
+Seek partitions to the offset nearest to a specific point in time — useful for replaying events that occurred after a known incident or deployment:
+
+```typescript
+const ts = new Date('2024-06-01T12:00:00Z').getTime(); // Unix ms
+
+await kafka.seekToTimestamp(undefined, [
+  { topic: 'orders', partition: 0, timestamp: ts },
+  { topic: 'orders', partition: 1, timestamp: ts },
+]);
+
+// Multiple topics in one call
+await kafka.seekToTimestamp('payments-group', [
+  { topic: 'payments', partition: 0, timestamp: ts },
+  { topic: 'refunds',  partition: 0, timestamp: ts },
+]);
+```
+
+Uses `admin.fetchTopicOffsetsByTime` under the hood. If no offset exists at the requested timestamp (e.g. the partition is empty or the timestamp is in the future), the partition falls back to `-1` (end of topic — new messages only).
+
+**Important:** the consumer group must be stopped before seeking. Assignments for the same topic are batched into a single `admin.setOffsets` call.
+
 ## Message TTL
 
 Drop or route expired messages using `messageTtlMs` in `ConsumerOptions`:
@@ -1253,7 +1330,7 @@ await kafka.startConsumer(['orders'], handler, {
 The TTL is evaluated against the `x-timestamp` header stamped on every outgoing message by the producer. Messages whose age at consumption time exceeds `messageTtlMs` are:
 
 - **Routed to DLQ** with `x-dlq-reason: ttl-expired` when `dlq: true`
-- **Dropped** (calling `onMessageLost`) otherwise
+- **Dropped** (calling `onTtlExpired` if configured) otherwise
 
 Typical use: prevent stale events from poisoning downstream systems after a consumer lag spike — e.g. discard order events or push notifications that are no longer actionable.
 
@@ -1360,6 +1437,28 @@ const kafka = new KafkaClient('my-app', 'my-group', ['localhost:9092'], {
 3. **DLQ send failure** — `dlq: true` but `producer.send()` to `{topic}.dlq` itself threw (broker down, topic missing); the error passed to `onMessageLost` is the send error, not the original handler error
 
 In the normal case (`dlq: true`, DLQ send succeeds), `onMessageLost` does NOT fire — the message is preserved in `{topic}.dlq`.
+
+> **Note:** TTL-expired messages do **not** trigger `onMessageLost`. Use `onTtlExpired` to observe them separately.
+
+## onTtlExpired
+
+Called when a message is dropped because it exceeded `messageTtlMs` and `dlq` is not enabled. Fires instead of `onMessageLost` for expired messages:
+
+```typescript
+import { KafkaClient, TtlExpiredContext } from '@drarzter/kafka-client/core';
+
+const kafka = new KafkaClient('my-app', 'my-group', ['localhost:9092'], {
+  onTtlExpired: (ctx: TtlExpiredContext) => {
+    // ctx.topic         — topic the message came from
+    // ctx.ageMs         — actual age of the message at drop time
+    // ctx.messageTtlMs  — the configured threshold
+    // ctx.headers       — original message headers
+    logger.warn(`Stale message on ${ctx.topic}: ${ctx.ageMs}ms old (limit ${ctx.messageTtlMs}ms)`);
+  },
+});
+```
+
+When `dlq: true`, expired messages are routed to DLQ instead and `onTtlExpired` is **not** called.
 
 ## onRebalance
 

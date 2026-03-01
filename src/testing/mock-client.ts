@@ -106,6 +106,8 @@ export function createMockKafkaClient<T extends TopicMapConstraint<T>>(
     replayDlq: resolved({ replayed: 0, skipped: 0 }),
     resetOffsets: resolved(undefined),
     seekToOffset: resolved(undefined),
+    seekToTimestamp: resolved(undefined),
+    getCircuitState: returning(undefined),
     pauseConsumer: mock(),
     resumeConsumer: mock(),
     getMetrics: returning({

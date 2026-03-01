@@ -61,30 +61,59 @@ import { decodeHeaders } from "../message/envelope";
 /** Push-to-pull async queue used by consume() to bridge Kafka's push model to AsyncIterableIterator. */
 class AsyncQueue<V> {
   private readonly items: V[] = [];
-  private readonly waiting: Array<(r: IteratorResult<V>) => void> = [];
+  private readonly waiting: Array<{
+    resolve: (r: IteratorResult<V>) => void;
+    reject: (err: Error) => void;
+  }> = [];
   private closed = false;
+  private error?: Error;
+  private paused = false;
+
+  constructor(
+    private readonly highWaterMark = Infinity,
+    private readonly onFull: () => void = () => {},
+    private readonly onDrained: () => void = () => {},
+  ) {}
 
   push(item: V): void {
     if (this.waiting.length > 0) {
-      this.waiting.shift()!({ value: item, done: false });
+      this.waiting.shift()!.resolve({ value: item, done: false });
     } else {
       this.items.push(item);
+      if (!this.paused && this.items.length >= this.highWaterMark) {
+        this.paused = true;
+        this.onFull();
+      }
     }
+  }
+
+  fail(err: Error): void {
+    this.closed = true;
+    this.error = err;
+    for (const { reject } of this.waiting.splice(0)) reject(err);
   }
 
   close(): void {
     this.closed = true;
-    for (const r of this.waiting.splice(0)) {
-      r({ value: undefined as any, done: true });
-    }
+    for (const { resolve } of this.waiting.splice(0))
+      resolve({ value: undefined as any, done: true });
   }
 
   next(): Promise<IteratorResult<V>> {
-    if (this.items.length > 0)
-      return Promise.resolve({ value: this.items.shift()!, done: false });
-    if (this.closed)
-      return Promise.resolve({ value: undefined as any, done: true });
-    return new Promise((r) => this.waiting.push(r));
+    if (this.error) return Promise.reject(this.error);
+    if (this.items.length > 0) {
+      const value = this.items.shift()!;
+      if (
+        this.paused &&
+        this.items.length <= Math.floor(this.highWaterMark / 2)
+      ) {
+        this.paused = false;
+        this.onDrained();
+      }
+      return Promise.resolve({ value, done: false });
+    }
+    if (this.closed) return Promise.resolve({ value: undefined as any, done: true });
+    return new Promise((resolve, reject) => this.waiting.push({ resolve, reject }));
   }
 }
 
@@ -127,6 +156,7 @@ export class KafkaClient<
   private readonly companionGroupIds = new Map<string, string[]>();
   private readonly instrumentation: KafkaInstrumentation[];
   private readonly onMessageLost: KafkaClientOptions["onMessageLost"];
+  private readonly onTtlExpired: KafkaClientOptions["onTtlExpired"];
   private readonly onRebalance: KafkaClientOptions["onRebalance"];
   /** Transactional producer ID — configurable via `KafkaClientOptions.transactionalId`. */
   private readonly txId: string;
@@ -178,6 +208,7 @@ export class KafkaClient<
     this.numPartitions = options?.numPartitions ?? 1;
     this.instrumentation = options?.instrumentation ?? [];
     this.onMessageLost = options?.onMessageLost;
+    this.onTtlExpired = options?.onTtlExpired;
     this.onRebalance = options?.onRebalance;
     this.txId = options?.transactionalId ?? `${clientId}-tx`;
 
@@ -586,7 +617,12 @@ export class KafkaClient<
     topic: K,
     options?: ConsumerOptions<T>,
   ): AsyncIterableIterator<EventEnvelope<T[K]>> {
-    const queue = new AsyncQueue<EventEnvelope<T[K]>>();
+    const gid = options?.groupId ?? this.defaultGroupId;
+    const queue = new AsyncQueue<EventEnvelope<T[K]>>(
+      options?.queueHighWaterMark,
+      () => this.pauseTopicAllPartitions(gid, topic as string),
+      () => this.resumeTopicAllPartitions(gid, topic as string),
+    );
     const handlePromise = this.startConsumer(
       [topic as any],
       async (envelope) => {
@@ -594,6 +630,7 @@ export class KafkaClient<
       },
       options,
     );
+    handlePromise.catch((err: Error) => queue.fail(err));
     return {
       [Symbol.asyncIterator]() {
         return this;
@@ -748,6 +785,32 @@ export class KafkaClient<
         partitions.map((p) => ({ topic, partitions: [p] })),
       ),
     );
+  }
+
+  /** Pause all assigned partitions of a topic for a consumer group (used for queue backpressure). */
+  private pauseTopicAllPartitions(gid: string, topic: string): void {
+    const consumer = this.consumers.get(gid);
+    if (!consumer) return;
+    const assignment: Array<{ topic: string; partition: number }> =
+      (consumer as any).assignment?.() ?? [];
+    const partitions = assignment
+      .filter((a) => a.topic === topic)
+      .map((a) => a.partition);
+    if (partitions.length > 0)
+      consumer.pause(partitions.map((p) => ({ topic, partitions: [p] })));
+  }
+
+  /** Resume all assigned partitions of a topic for a consumer group (used for queue backpressure). */
+  private resumeTopicAllPartitions(gid: string, topic: string): void {
+    const consumer = this.consumers.get(gid);
+    if (!consumer) return;
+    const assignment: Array<{ topic: string; partition: number }> =
+      (consumer as any).assignment?.() ?? [];
+    const partitions = assignment
+      .filter((a) => a.topic === topic)
+      .map((a) => a.partition);
+    if (partitions.length > 0)
+      consumer.resume(partitions.map((p) => ({ topic, partitions: [p] })));
   }
 
   /** DLQ header keys added by `sendToDlq` — stripped before re-publishing. */
@@ -924,6 +987,63 @@ export class KafkaClient<
         `Offsets set for group "${gid}" on "${topic}": ${JSON.stringify(partitions)}`,
       );
     }
+  }
+
+  public async seekToTimestamp(
+    groupId: string | undefined,
+    assignments: Array<{ topic: string; partition: number; timestamp: number }>,
+  ): Promise<void> {
+    const gid = groupId ?? this.defaultGroupId;
+    if (this.runningConsumers.has(gid)) {
+      throw new Error(
+        `seekToTimestamp: consumer group "${gid}" is still running. ` +
+          `Call stopConsumer("${gid}") before seeking offsets.`,
+      );
+    }
+    await this.ensureAdminConnected();
+    const byTopic = new Map<
+      string,
+      Array<{ partition: number; timestamp: number }>
+    >();
+    for (const { topic, partition, timestamp } of assignments) {
+      const list = byTopic.get(topic) ?? [];
+      list.push({ partition, timestamp });
+      byTopic.set(topic, list);
+    }
+    for (const [topic, parts] of byTopic) {
+      const offsets: Array<{ partition: number; offset: string }> =
+        await Promise.all(
+          parts.map(async ({ partition, timestamp }) => {
+            const results = await (this.admin as any).fetchTopicOffsetsByTime(
+              topic,
+              timestamp,
+            );
+            const found = (results as Array<{ partition: number; offset: string }>).find(
+              (r) => r.partition === partition,
+            );
+            return { partition, offset: found?.offset ?? "-1" };
+          }),
+        );
+      await (this.admin as any).setOffsets({ groupId: gid, topic, partitions: offsets });
+      this.logger.log(
+        `Offsets set by timestamp for group "${gid}" on "${topic}": ${JSON.stringify(offsets)}`,
+      );
+    }
+  }
+
+  public getCircuitState(
+    topic: string,
+    partition: number,
+    groupId?: string,
+  ): { status: "closed" | "open" | "half-open"; failures: number; windowSize: number } | undefined {
+    const gid = groupId ?? this.defaultGroupId;
+    const state = this.circuitStates.get(`${gid}:${topic}:${partition}`);
+    if (!state) return undefined;
+    return {
+      status: state.status,
+      failures: state.window.filter((v) => !v).length,
+      windowSize: state.window.length,
+    };
   }
 
   /**
@@ -1193,6 +1313,11 @@ export class KafkaClient<
 
     const openCircuit = () => {
       state!.status = "open";
+      state!.window = [];
+      state!.successes = 0;
+      clearTimeout(state!.timer);
+      for (const inst of this.instrumentation)
+        inst.onCircuitOpen?.(envelope.topic, envelope.partition);
       this.pauseConsumer(gid, [
         { topic: envelope.topic, partitions: [envelope.partition] },
       ]);
@@ -1202,6 +1327,8 @@ export class KafkaClient<
         this.logger.log(
           `[CircuitBreaker] HALF-OPEN — group="${gid}" topic="${envelope.topic}" partition=${envelope.partition}`,
         );
+        for (const inst of this.instrumentation)
+          inst.onCircuitHalfOpen?.(envelope.topic, envelope.partition);
         this.resumeConsumer(gid, [
           { topic: envelope.topic, partitions: [envelope.partition] },
         ]);
@@ -1275,6 +1402,8 @@ export class KafkaClient<
         this.logger.log(
           `[CircuitBreaker] CLOSED — group="${gid}" topic="${envelope.topic}" partition=${envelope.partition}`,
         );
+        for (const inst of this.instrumentation)
+          inst.onCircuitClose?.(envelope.topic, envelope.partition);
       }
     } else if (state.status === "closed") {
       const threshold = cfg.threshold ?? 5;
@@ -1566,6 +1695,7 @@ export class KafkaClient<
       producer: this.producer,
       instrumentation: this.instrumentation,
       onMessageLost: this.onMessageLost,
+      onTtlExpired: this.onTtlExpired,
       onRetry: this.notifyRetry.bind(this),
       onDlq: (envelope, reason) => this.notifyDlq(envelope, reason, gid),
       onDuplicate: this.notifyDuplicate.bind(this),

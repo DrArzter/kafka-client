@@ -43,15 +43,15 @@ describe("KafkaClient — Message TTL", () => {
       expect(handler).toHaveBeenCalledTimes(1);
     });
 
-    it("drops an expired message (no dlq) and calls onMessageLost", async () => {
+    it("drops an expired message (no dlq) and calls onTtlExpired", async () => {
       const handler = jest.fn();
-      const onMessageLost = jest.fn().mockResolvedValue(undefined);
+      const onTtlExpired = jest.fn().mockResolvedValue(undefined);
 
       client = new KafkaClient<TestTopicMap>(
         "test-client",
         "test-group",
         ["localhost:9092"],
-        { onMessageLost },
+        { onTtlExpired },
       );
 
       mockRun.mockImplementation(async ({ eachMessage }: any) => {
@@ -67,9 +67,68 @@ describe("KafkaClient — Message TTL", () => {
       });
 
       expect(handler).not.toHaveBeenCalled();
-      expect(onMessageLost).toHaveBeenCalledWith(
-        expect.objectContaining({ topic: "test.topic" }),
+      expect(onTtlExpired).toHaveBeenCalledWith(
+        expect.objectContaining({
+          topic: "test.topic",
+          messageTtlMs: 1_000,
+        }),
       );
+    });
+
+    it("expired + dlq:false → onTtlExpired called, onMessageLost NOT called", async () => {
+      const onTtlExpired = jest.fn().mockResolvedValue(undefined);
+      const onMessageLost = jest.fn();
+
+      client = new KafkaClient<TestTopicMap>(
+        "test-client",
+        "test-group",
+        ["localhost:9092"],
+        { onTtlExpired, onMessageLost },
+      );
+
+      mockRun.mockImplementation(async ({ eachMessage }: any) => {
+        await eachMessage({
+          topic: "test.topic",
+          partition: 0,
+          message: makeMsg(10_000),
+        });
+      });
+
+      await client.startConsumer(["test.topic"], jest.fn(), {
+        messageTtlMs: 1_000,
+      });
+
+      expect(onTtlExpired).toHaveBeenCalledTimes(1);
+      expect(onMessageLost).not.toHaveBeenCalled();
+    });
+
+    it("expired + dlq:true → DLQ sent, onTtlExpired NOT called", async () => {
+      const onTtlExpired = jest.fn();
+
+      client = new KafkaClient<TestTopicMap>(
+        "test-client",
+        "test-group",
+        ["localhost:9092"],
+        { onTtlExpired },
+      );
+
+      mockRun.mockImplementation(async ({ eachMessage }: any) => {
+        await eachMessage({
+          topic: "test.topic",
+          partition: 0,
+          message: makeMsg(10_000),
+        });
+      });
+
+      await client.startConsumer(["test.topic"], jest.fn(), {
+        messageTtlMs: 1_000,
+        dlq: true,
+      });
+
+      expect(mockSend).toHaveBeenCalledWith(
+        expect.objectContaining({ topic: "test.topic.dlq" }),
+      );
+      expect(onTtlExpired).not.toHaveBeenCalled();
     });
 
     it("routes an expired message to DLQ when dlq:true", async () => {

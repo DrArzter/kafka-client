@@ -13,6 +13,15 @@
 
 ## Done
 
+### 0.7.1
+
+- [x] **`consume()` backpressure** — `queueHighWaterMark` option in `ConsumerOptions`; when the internal `AsyncQueue` reaches the limit the partition is paused via `consumer.pause()`; resumes automatically when the queue drains below 50%; uses `consumer.assignment()` to resolve current partition numbers at pause/resume time; no-op when the option is omitted (default: unbounded)
+- [x] **`consume()` error propagation** — startup errors (e.g. broker unreachable, topic not found) now surface via `next()` / `for await` instead of being silently swallowed; `AsyncQueue.fail(err)` rejects all pending and future `next()` calls; waiting array refactored to `{resolve, reject}` tuples
+- [x] **Circuit breaker instrumentation hooks** — `onCircuitOpen(topic, partition)`, `onCircuitHalfOpen(topic, partition)`, `onCircuitClose(topic, partition)` added to `KafkaInstrumentation`; calls centralised inside `openCircuit()` closure (fires for both CLOSED→OPEN and HALF_OPEN failure→OPEN transitions) and at the HALF_OPEN→CLOSED success path in `notifyMessage`
+- [x] **`getCircuitState(topic, partition, groupId?)`** — public method on `KafkaClient` and `IKafkaClient`; returns `{ status, failures, windowSize }` snapshot for a given partition or `undefined` if no state exists; useful for health endpoints and dashboards
+- [x] **`seekToTimestamp(groupId, assignments[])`** — seeks partitions to the offset nearest to a Unix-ms timestamp via `admin.fetchTopicOffsetsByTime`; falls back to `-1` (end of topic) when no offset exists at the requested timestamp; groups assignments by topic and batches into one `admin.setOffsets` call per topic; throws if the consumer group is currently running
+- [x] **`onTtlExpired`** — new `KafkaClientOptions` callback `onTtlExpired(ctx: TtlExpiredContext)` receives `{ topic, ageMs, messageTtlMs, headers }` when a message is dropped due to TTL expiration and `dlq` is not enabled; fires instead of `onMessageLost` for TTL cases — `onMessageLost` is now reserved for handler errors and validation failures only; `TtlExpiredContext` interface exported from all entrypoints
+
 ### 0.7.0
 
 - [x] **`seekToOffset`** — `seekToOffset(groupId, assignments[])` seeks individual topic-partitions to explicit offsets; groups assignments by topic and calls `admin.setOffsets` per topic; throws if the consumer group is currently running to prevent racing with an active offset commit; complements `resetOffsets` for fine-grained replay scenarios

@@ -204,7 +204,7 @@ export interface ConsumerOptions<
    * the `x-timestamp` header set by the producer.
    *
    * Expired messages are routed to `{topic}.dlq` when `dlq: true`, otherwise
-   * `onMessageLost` is called. The handler is never invoked for an expired message.
+   * `onTtlExpired` is called. The handler is never invoked for an expired message.
    */
   messageTtlMs?: number;
   /**
@@ -214,6 +214,12 @@ export interface ConsumerOptions<
    * See `CircuitBreakerOptions` for the sliding-window semantics.
    */
   circuitBreaker?: CircuitBreakerOptions;
+  /**
+   * Max number of messages buffered in the `consume()` iterator queue before
+   * the partition is paused. The partition resumes when the queue drains below 50%.
+   * Only applies to `consume()`. Default: unbounded.
+   */
+  queueHighWaterMark?: number;
 }
 
 /** Configuration for consumer retry behavior. */
@@ -357,6 +363,12 @@ export interface KafkaInstrumentation {
    * Fires for both single-message and batch consumers (once per envelope).
    */
   onMessage?(envelope: EventEnvelope<any>): void;
+  /** Called when a partition circuit opens (consumer paused due to DLQ failures). */
+  onCircuitOpen?(topic: string, partition: number): void;
+  /** Called when the circuit moves to half-open (partition resumed for a probe). */
+  onCircuitHalfOpen?(topic: string, partition: number): void;
+  /** Called when the circuit closes (normal operation restored). */
+  onCircuitClose?(topic: string, partition: number): void;
 }
 
 /** Context passed to the `transaction()` callback with type-safe send methods. */
@@ -530,6 +542,37 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
   ): Promise<void>;
 
   /**
+   * Seek specific partitions to the offset nearest to a given Unix timestamp (ms).
+   * Uses `admin.fetchTopicOffsetsByTime` under the hood. Falls back to `-1` (end of
+   * topic) when no offset exists at the requested timestamp (e.g. empty partition or
+   * future timestamp).
+   *
+   * The consumer group must be inactive. Call `stopConsumer(groupId)` first.
+   *
+   * @param groupId Consumer group to seek. Defaults to the client's default groupId.
+   * @param assignments Array of `{ topic, partition, timestamp }` tuples (Unix ms).
+   */
+  seekToTimestamp(
+    groupId: string | undefined,
+    assignments: Array<{ topic: string; partition: number; timestamp: number }>,
+  ): Promise<void>;
+
+  /**
+   * Returns the current circuit breaker state for a specific topic partition.
+   * Returns `undefined` when no circuit state exists — either `circuitBreaker` is not
+   * configured for the group, or the circuit has never been tripped.
+   *
+   * @param topic Topic name.
+   * @param partition Partition index.
+   * @param groupId Consumer group. Defaults to the client's default groupId.
+   */
+  getCircuitState(
+    topic: string,
+    partition: number,
+    groupId?: string,
+  ): { status: "closed" | "open" | "half-open"; failures: number; windowSize: number } | undefined;
+
+  /**
    * Consume messages as an async iterator. Useful for scripts, migrations, and
    * one-off processing where the full `startConsumer` lifecycle is unnecessary.
    *
@@ -603,6 +646,21 @@ export interface KafkaLogger {
 }
 
 /**
+ * Context passed to `onTtlExpired` when a message is dropped because it
+ * exceeded `messageTtlMs` and `dlq` is not enabled.
+ */
+export interface TtlExpiredContext {
+  /** Topic the message was consumed from. */
+  topic: string;
+  /** Actual age of the message in ms at the time it was dropped. */
+  ageMs: number;
+  /** The configured TTL threshold (`messageTtlMs`). */
+  messageTtlMs: number;
+  /** Original Kafka message headers (correlationId, traceparent, etc.). */
+  headers: MessageHeaders;
+}
+
+/**
  * Context passed to `onMessageLost` when a message is silently dropped
  * (handler threw and `dlq` is not enabled).
  */
@@ -646,6 +704,12 @@ export interface KafkaClientOptions {
    * Use this to alert, log to external systems, or trigger fallback logic.
    */
   onMessageLost?: (ctx: MessageLostContext) => void | Promise<void>;
+  /**
+   * Called when a message is dropped due to TTL expiration (`messageTtlMs`).
+   * Fires instead of `onMessageLost` for expired messages when `dlq` is not enabled.
+   * When `dlq: true`, expired messages go to the DLQ and this callback is NOT called.
+   */
+  onTtlExpired?: (ctx: TtlExpiredContext) => void | Promise<void>;
   /**
    * Called whenever a consumer group rebalance occurs.
    * - `'assign'` — new partitions were granted to this instance.

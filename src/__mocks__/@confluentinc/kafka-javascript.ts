@@ -52,6 +52,7 @@ const mockConsumer = {
 const mockCreateTopics = jest.fn().mockResolvedValue(true);
 const mockFetchOffsets = jest.fn().mockResolvedValue([]);
 const mockFetchTopicOffsets = jest.fn().mockResolvedValue([]);
+const mockFetchTopicOffsetsByTime = jest.fn().mockResolvedValue([]);
 const mockSetOffsets = jest.fn().mockResolvedValue(undefined);
 
 const mockAdmin = {
@@ -61,6 +62,7 @@ const mockAdmin = {
   createTopics: mockCreateTopics,
   fetchOffsets: mockFetchOffsets,
   fetchTopicOffsets: mockFetchTopicOffsets,
+  fetchTopicOffsetsByTime: mockFetchTopicOffsetsByTime,
   setOffsets: mockSetOffsets,
 };
 
@@ -97,6 +99,7 @@ export {
   mockCreateTopics,
   mockFetchOffsets,
   mockFetchTopicOffsets,
+  mockFetchTopicOffsetsByTime,
   mockSetOffsets,
   mockTransaction,
   mockTxSend,

@@ -34,6 +34,7 @@ export type MessageHandlerDeps = {
   producer: Producer;
   instrumentation: KafkaInstrumentation[];
   onMessageLost: KafkaClientOptions["onMessageLost"];
+  onTtlExpired?: KafkaClientOptions["onTtlExpired"];
   onRetry?: (
     envelope: EventEnvelope<any>,
     attempt: number,
@@ -302,10 +303,10 @@ export async function handleEachMessage(
         });
         deps.onDlq?.(envelope, "ttl-expired");
       } else {
-        await deps.onMessageLost?.({
+        await deps.onTtlExpired?.({
           topic,
-          error: new Error(`TTL expired: ${ageMs}ms`),
-          attempt: 0,
+          ageMs,
+          messageTtlMs: opts.messageTtlMs!,
           headers: envelope.headers,
         });
       }
@@ -505,10 +506,10 @@ export async function handleEachBatch(
           });
           deps.onDlq?.(envelope, "ttl-expired");
         } else {
-          await deps.onMessageLost?.({
+          await deps.onTtlExpired?.({
             topic: batch.topic,
-            error: new Error(`TTL expired: ${ageMs}ms`),
-            attempt: 0,
+            ageMs,
+            messageTtlMs: opts.messageTtlMs!,
             headers: envelope.headers,
           });
         }

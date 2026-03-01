@@ -232,4 +232,81 @@ describe("KafkaClient — Circuit Breaker", () => {
 
     expect(mockConsumerPause).not.toHaveBeenCalled();
   });
+
+  describe("instrumentation hooks", () => {
+    async function setupWithInstrumentation(inst: any) {
+      const instrumented = new (
+        await import("../kafka.client")
+      ).KafkaClient<TestTopicMap>("test-client", "test-group", ["localhost:9092"], {
+        instrumentation: [inst],
+      });
+
+      let capturedEachMessage: ((p: any) => Promise<void>) | undefined;
+      const handler = jest.fn().mockRejectedValue(new Error("fail"));
+      mockRun.mockImplementation(async ({ eachMessage }: any) => {
+        capturedEachMessage = eachMessage;
+      });
+      await instrumented.startConsumer(["test.topic"], handler, {
+        dlq: true,
+        circuitBreaker: { threshold: 2, recoveryMs: 100 },
+      });
+      return { instrumented, capturedEachMessage: capturedEachMessage! };
+    }
+
+    it("onCircuitOpen fires when CLOSED → OPEN", async () => {
+      const onCircuitOpen = jest.fn();
+      const { capturedEachMessage } = await setupWithInstrumentation({ onCircuitOpen });
+
+      for (let i = 0; i < 2; i++) {
+        await capturedEachMessage({ topic: "test.topic", partition: 0, message: makeMsg() });
+      }
+
+      expect(onCircuitOpen).toHaveBeenCalledWith("test.topic", 0);
+    });
+
+    it("onCircuitHalfOpen fires after recoveryMs", async () => {
+      const onCircuitHalfOpen = jest.fn();
+      const { capturedEachMessage } = await setupWithInstrumentation({ onCircuitHalfOpen });
+
+      for (let i = 0; i < 2; i++) {
+        await capturedEachMessage({ topic: "test.topic", partition: 0, message: makeMsg() });
+      }
+
+      jest.advanceTimersByTime(100);
+      expect(onCircuitHalfOpen).toHaveBeenCalledWith("test.topic", 0);
+    });
+
+    it("onCircuitClose fires when HALF_OPEN → CLOSED", async () => {
+      const onCircuitClose = jest.fn();
+      const handler = jest
+        .fn()
+        .mockRejectedValueOnce(new Error("fail"))
+        .mockRejectedValueOnce(new Error("fail"))
+        .mockResolvedValue(undefined);
+
+      const instrumented = new (
+        await import("../kafka.client")
+      ).KafkaClient<TestTopicMap>("test-client", "test-group", ["localhost:9092"], {
+        instrumentation: [{ onCircuitClose }],
+      });
+
+      let capturedEachMessage: ((p: any) => Promise<void>) | undefined;
+      mockRun.mockImplementation(async ({ eachMessage }: any) => {
+        capturedEachMessage = eachMessage;
+      });
+      await instrumented.startConsumer(["test.topic"], handler, {
+        dlq: true,
+        circuitBreaker: { threshold: 2, recoveryMs: 100 },
+      });
+
+      for (let i = 0; i < 2; i++) {
+        await capturedEachMessage!({ topic: "test.topic", partition: 0, message: makeMsg() });
+      }
+      jest.advanceTimersByTime(100); // → HALF_OPEN
+
+      await capturedEachMessage!({ topic: "test.topic", partition: 0, message: makeMsg() });
+
+      expect(onCircuitClose).toHaveBeenCalledWith("test.topic", 0);
+    });
+  });
 });
