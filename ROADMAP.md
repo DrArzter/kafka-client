@@ -13,6 +13,13 @@
 
 ## Done
 
+### Refactoring / post-0.7.2 / 0.7.3
+
+- [x] **`MetricsManager`** — extracted all metrics/instrumentation logic from `KafkaClient` into `kafka.client/infra/metrics-manager.ts`; owns `_topicMetrics`, all `notifyXxx` methods, `getMetrics` / `resetMetrics`; circuit-breaker callbacks injected as constructor deps so `KafkaClient` stays the sole owner of the `CircuitBreakerManager`
+- [x] **`InFlightTracker`** — extracted in-flight handler tracking and drain-wait from `KafkaClient` into `kafka.client/infra/inflight-tracker.ts`; accepts a `warn` callback (not a logger reference) so tests that replace `client.logger` after construction pick up the new logger correctly
+- [x] **`kafka.client/` subdirectories** — flat module files reorganised into four domain folders: `admin/` (ops), `producer/` (ops), `consumer/` (ops, queue, handler, retry-topic, dlq-replay, pipeline, subscribe-retry), `infra/` (circuit-breaker, inflight-tracker, metrics-manager); `src/client/consumer/` (pipeline + subscribe-retry) merged into `kafka.client/consumer/` — those files were exclusively used by `KafkaClient` internals
+- [x] **`__tests__/` subdirectories** — 27 flat spec files reorganised into `consumer/` (14 files), `producer/` (4), `admin/` (2), `infra/` (6); `helpers.ts` stays at root; `metrics.spec.ts` split into `metrics-counters.spec.ts` + `metrics-observability.spec.ts`
+
 ### 0.7.2
 
 - [x] **`sendTombstone(topic, key, headers?)`** — sends a null-value Kafka record to compact a specific key out of a log-compacted topic; skips envelope headers, schema validation, and Lamport clock stamping; both `beforeSend` and `afterSend` instrumentation hooks still fire so tracing works correctly

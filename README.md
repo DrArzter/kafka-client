@@ -1866,13 +1866,27 @@ Both suites run in CI on every push to `main` and on pull requests.
 
 ```text
 src/
-├── client/         # Core — KafkaClient, types, envelope, consumer pipeline, topic(), errors (0 framework deps)
-├── nest/           # NestJS adapter — Module, Explorer, decorators, health
-├── testing/        # Testing utilities — mock client, testcontainer wrapper
-├── core.ts         # Standalone entrypoint (@drarzter/kafka-client/core)
-├── otel.ts         # OpenTelemetry entrypoint (@drarzter/kafka-client/otel)
-├── testing.ts      # Testing entrypoint (@drarzter/kafka-client/testing)
-└── index.ts        # Full entrypoint — core + NestJS adapter
+├── client/                    # Core — 0 framework deps
+│   ├── kafka.client/
+│   │   ├── index.ts           # KafkaClient class
+│   │   ├── admin/             # AdminOps
+│   │   ├── producer/          # payload builders, schema registry
+│   │   ├── consumer/          # consumer ops, handler, retry-topic, DLQ replay, queue, pipeline
+│   │   └── infra/             # CircuitBreakerManager, InFlightTracker, MetricsManager
+│   ├── message/               # EventEnvelope, topic(), headers
+│   ├── __tests__/
+│   │   ├── helpers.ts
+│   │   ├── consumer/          # consumer, batch, retry, dedup, TTL, DLQ replay, …
+│   │   ├── producer/          # producer, transactions, schema, topic
+│   │   ├── admin/             # admin, consumer lag
+│   │   └── infra/             # circuit breaker, errors, instrumentation, OTel, metrics
+│   └── types.ts, errors.ts, …
+├── nest/                      # NestJS adapter — Module, Explorer, decorators, health
+├── testing/                   # Testing utilities — mock client, testcontainer wrapper
+├── core.ts                    # Standalone entrypoint (@drarzter/kafka-client/core)
+├── otel.ts                    # OpenTelemetry entrypoint (@drarzter/kafka-client/otel)
+├── testing.ts                 # Testing entrypoint (@drarzter/kafka-client/testing)
+└── index.ts                   # Full entrypoint — core + NestJS adapter
 ```
 
 All exported types and methods have JSDoc comments — your IDE will show inline docs and autocomplete.
