@@ -31,6 +31,11 @@ import type {
   KafkaLogger,
 } from "../../types";
 
+/**
+ * Dependencies injected into retry topic consumers by `KafkaClient`.
+ * Provides infrastructure (producer, logger, instrumentation), lifecycle callbacks,
+ * and factories for creating consumers and transactional producers per retry level.
+ */
 export type RetryTopicDeps = {
   logger: KafkaLogger;
   producer: Producer;

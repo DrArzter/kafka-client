@@ -45,6 +45,14 @@ Type-safe Kafka client for Node.js. Framework-agnostic core with a first-class N
 - [Seek to timestamp](#seek-to-timestamp)
 - [Message TTL](#message-ttl)
 - [DLQ replay](#dlq-replay)
+- [Read snapshot](#read-snapshot)
+- [Offset checkpointing](#offset-checkpointing)
+  - [checkpointOffsets](#checkpointoffsets)
+  - [restoreFromCheckpoint](#restorefromcheckpoint)
+- [Windowed batch consumer](#windowed-batch-consumer)
+- [Header-based routing](#header-based-routing)
+- [Lag-based producer throttling](#lag-based-producer-throttling)
+- [Transactional consumer](#transactional-consumer)
 - [Admin API](#admin-api)
 - [Graceful shutdown](#graceful-shutdown)
 - [Consumer handles](#consumer-handles)
@@ -1430,6 +1438,253 @@ const filtered = await kafka.replayDlq('orders', {
 
 `replayDlq` creates a temporary consumer group that reads the DLQ topic up to the high-watermark at the time of the call — messages published after replay starts are not included. DLQ metadata headers (`x-dlq-original-topic`, `x-dlq-error-message`, `x-dlq-error-stack`, `x-dlq-failed-at`, `x-dlq-attempt-count`) are stripped from the replayed messages; all other headers (e.g. `x-correlation-id`) are preserved.
 
+## Read snapshot
+
+Read any topic from the beginning to its current high-watermark and return a `Map<key, EventEnvelope<T>>` with the **latest value per key**. Useful for bootstrapping in-memory state at service startup without an external cache:
+
+```typescript
+// Build a key → latest-value index for a compacted topic
+const orders = await kafka.readSnapshot('orders.state');
+orders.get('order-123'); // EventEnvelope with the latest payload for that key
+```
+
+Tombstone records (null-value messages) remove the key from the map, consistent with log-compaction semantics:
+
+```typescript
+const snapshot = await kafka.readSnapshot('orders.state', {
+  onTombstone: (key) => console.log(`Key deleted: ${key}`),
+});
+```
+
+Optional schema validation skips invalid messages with a warning instead of throwing:
+
+```typescript
+import { z } from 'zod';
+
+const OrderSchema = z.object({ orderId: z.string(), amount: z.number() });
+
+const snapshot = await kafka.readSnapshot('orders.state', {
+  schema: OrderSchema,
+});
+```
+
+`readSnapshot` uses a short-lived temporary consumer that is **not** registered in the client's consumer map — it disconnects as soon as all partitions reach their high-watermark. The call resolves with the complete snapshot; it does not stream.
+
+| Option | Description |
+| ------ | ----------- |
+| `schema` | Zod / Valibot / ArkType (any `.parse()` shape) — invalid messages are skipped with a warning |
+| `onTombstone` | Called for each tombstone key before it is removed from the map |
+
+## Offset checkpointing
+
+Save and restore consumer group offsets via a dedicated Kafka topic. Useful for point-in-time recovery, blue/green deployments, and disaster recovery without resetting to `earliest`/`latest`.
+
+### checkpointOffsets
+
+Snapshot the current committed offsets of a consumer group into a Kafka topic:
+
+```typescript
+// Checkpoint the default group
+const result = await kafka.checkpointOffsets(undefined, 'checkpoints');
+// {
+//   groupId: 'orders-group',
+//   topics: ['orders', 'payments'],
+//   partitionCount: 4,
+//   savedAt: 1710000000000,
+// }
+
+// Checkpoint a specific group
+await kafka.checkpointOffsets('payments-group', 'checkpoints');
+```
+
+Each call appends a new record to the checkpoint topic keyed by `groupId`, with `x-checkpoint-timestamp` and `x-checkpoint-group-id` headers. The checkpoint topic acts as an append-only audit log — use a **non-compacted** topic to retain history.
+
+Requires `connectProducer()` to have been called before checkpointing.
+
+### restoreFromCheckpoint
+
+Restore a consumer group's committed offsets from the nearest checkpoint:
+
+```typescript
+// Restore to the latest checkpoint
+const result = await kafka.restoreFromCheckpoint(undefined, 'checkpoints');
+// {
+//   groupId: 'orders-group',
+//   offsets: [{ topic: 'orders', partition: 0, offset: '1500' }, ...],
+//   restoredAt: 1710000000000,
+//   checkpointAge: 3600000, // ms since the checkpoint was saved
+// }
+
+// Restore to the nearest checkpoint before a specific timestamp
+const ts = new Date('2024-06-01T12:00:00Z').getTime();
+await kafka.restoreFromCheckpoint(undefined, 'checkpoints', { timestamp: ts });
+```
+
+Checkpoint selection rules:
+
+1. If `timestamp` is omitted — the **latest** checkpoint is selected.
+2. If `timestamp` is given — the newest checkpoint whose `savedAt ≤ timestamp` is selected.
+3. If all checkpoints are newer than `timestamp` — falls back to the **oldest** checkpoint with a warning.
+4. Throws if no checkpoint exists for the group.
+
+**Important:** the consumer group must be stopped before calling `restoreFromCheckpoint`. An error is thrown if any consumer in the group is currently running.
+
+`restoreFromCheckpoint` uses a short-lived temporary consumer to read all checkpoint records up to the current high-watermark, then calls `admin.setOffsets` for every topic-partition in the selected checkpoint.
+
+| Option | Description |
+| ------ | ----------- |
+| `timestamp` | Target Unix ms. Omit to restore the latest checkpoint |
+
+## Windowed batch consumer
+
+Accumulate messages into a buffer and flush a handler when either a **size** or **time** trigger fires — whichever comes first. Gives explicit control over both batch size and processing latency, unlike `startBatchConsumer` which delivers broker-sized batches of unpredictable size:
+
+```typescript
+const handle = await kafka.startWindowConsumer(
+  'orders',
+  async (envelopes, meta) => {
+    console.log(`Flushing ${envelopes.length} orders (trigger: ${meta.trigger})`);
+    await db.bulkInsert(envelopes.map((e) => e.payload));
+  },
+  {
+    maxMessages: 100,  // flush when 100 messages accumulate
+    maxMs: 5_000,      // or after 5 s, whichever fires first
+  },
+);
+```
+
+`WindowMeta` is passed to the handler on every flush:
+
+| Field | Description |
+| ----- | ----------- |
+| `trigger` | `"size"` — buffer reached `maxMessages`; `"time"` — `maxMs` elapsed |
+| `windowStart` | Unix ms of the first message in the flushed window |
+| `windowEnd` | Unix ms when the flush was initiated |
+
+On `handle.stop()` any buffered messages are flushed before the consumer disconnects — no messages are lost on clean shutdown.
+
+`retryTopics: true` is rejected at startup with a clear error — the retry topic chain is incompatible with windowed accumulation.
+
+| Option | Default | Description |
+| ------ | ------- | ----------- |
+| `maxMessages` | required | Flush when the buffer reaches this many messages |
+| `maxMs` | required | Flush after this many ms since the first buffered message |
+| All `ConsumerOptions` fields | — | Standard consumer options apply (`retry`, `dlq`, `deduplication`, etc.) |
+
+## Header-based routing
+
+Dispatch messages to different handlers based on the value of a Kafka header — no `if/switch` boilerplate in a catch-all handler. Useful when one topic carries multiple event types distinguished by a header like `x-event-type`:
+
+```typescript
+await kafka.startRoutedConsumer(['events'], {
+  header: 'x-event-type',
+  routes: {
+    'order.created':   async (e) => handleOrderCreated(e.payload),
+    'order.cancelled': async (e) => handleOrderCancelled(e.payload),
+    'order.shipped':   async (e) => handleOrderShipped(e.payload),
+  },
+  fallback: async (e) => logger.warn('Unknown event type', e.headers),
+});
+```
+
+Messages are dispatched to the handler whose key matches `envelope.headers[header]`. If the header is absent or its value has no matching route:
+
+- The `fallback` handler is called if provided.
+- The message is silently skipped if `fallback` is omitted.
+
+All standard `ConsumerOptions` apply uniformly across every route — retry, DLQ, deduplication, circuit breaker, interceptors, etc.:
+
+```typescript
+await kafka.startRoutedConsumer(
+  ['events'],
+  {
+    header: 'x-event-type',
+    routes: {
+      'payment.processed': async (e) => processPayment(e.payload),
+      'payment.failed':    async (e) => handleFailure(e.payload),
+    },
+  },
+  {
+    retry: { maxRetries: 3, backoffMs: 500 },
+    dlq: true,
+    deduplication: { strategy: 'drop' },
+  },
+);
+```
+
+The returned `ConsumerHandle` works the same as `startConsumer` — `handle.stop()` stops the consumer cleanly.
+
+## Lag-based producer throttling
+
+Delay `sendMessage`, `sendBatch`, and `sendTombstone` automatically when a consumer group falls behind. Provides backpressure without an external store — the lag is measured via the built-in admin API:
+
+```typescript
+const kafka = new KafkaClient('my-service', 'orders-group', brokers, {
+  lagThrottle: {
+    maxLag: 10_000,         // delay sends when lag exceeds 10 000 messages
+    pollIntervalMs: 5_000,  // check lag every 5 s (default)
+    maxWaitMs: 30_000,      // give up waiting after 30 s and send anyway (default)
+  },
+});
+
+await kafka.connectProducer(); // starts the background polling loop
+```
+
+While the observed lag exceeds `maxLag`, every send waits in a `100 ms` spin-loop until the lag drops or `maxWaitMs` is reached. When `maxWaitMs` is exceeded a warning is logged and the send proceeds — this is best-effort throttling, not hard backpressure.
+
+| Option | Default | Description |
+| ------ | ------- | ----------- |
+| `maxLag` | required | Total lag threshold (sum across all partitions) |
+| `groupId` | client default group | Consumer group whose lag is monitored |
+| `pollIntervalMs` | `5000` | How often to call `getConsumerLag()` in the background |
+| `maxWaitMs` | `30000` | Maximum time (ms) a single send waits before proceeding anyway |
+
+The polling timer is started by `connectProducer()` and cleared by `disconnect()` or `disconnectProducer()`. Poll errors are silently ignored — a failing admin call never blocks sends.
+
+## Transactional consumer
+
+Consume messages with **exactly-once semantics** for read-process-write pipelines. Each message is processed inside a Kafka transaction: outgoing sends and the source offset commit succeed or fail atomically — no partial writes, no duplicates on restart:
+
+```typescript
+await kafka.startTransactionalConsumer(
+  ['orders'],
+  async (envelope, tx) => {
+    // Both sends and the offset commit are part of one atomic transaction
+    await tx.send('invoices', { orderId: envelope.payload.orderId, amount: envelope.payload.amount });
+    await tx.send('notifications', { userId: envelope.payload.userId, message: 'Order confirmed' });
+    // tx commits automatically when this function returns
+  },
+);
+```
+
+The handler receives a `TransactionalHandlerContext` with two methods:
+
+| Method | Description |
+| ------ | ----------- |
+| `tx.send(topic, message, options?)` | Stage a single message inside the transaction |
+| `tx.sendBatch(topic, messages, options?)` | Stage multiple messages inside the transaction |
+
+**On handler success** — staged sends + source offset commit are committed atomically via `tx.sendOffsets()` + `tx.commit()`. Downstream consumers only see the messages after the commit.
+
+**On handler failure** — `tx.abort()` is called automatically. No staged sends become visible. The source message offset is not committed, so Kafka redelivers the message on the next poll.
+
+```typescript
+await kafka.startTransactionalConsumer(
+  ['payments'],
+  async (envelope, tx) => {
+    const result = await processPayment(envelope.payload);
+    // Only route to the audit topic if payment succeeded
+    await tx.send('payments.audit', { paymentId: result.id, status: 'ok' });
+  },
+  {
+    groupId: 'payments-eos',
+    deduplication: { strategy: 'drop' }, // standard ConsumerOptions apply
+  },
+);
+```
+
+`retryTopics: true` is rejected at startup — EOS redelivery on failure is already guaranteed by the transaction. `autoCommit` is always `false` (managed internally).
+
 ## Admin API
 
 Inspect consumer groups, topic metadata, and delete records via the built-in admin client — no separate connection needed.
@@ -1874,6 +2129,7 @@ src/
 ├── client/                          # Core library — zero framework dependencies
 │   ├── types.ts                     # All public interfaces: KafkaClientOptions, ConsumerOptions,
 │   │                                #   SendOptions, EventEnvelope, ConsumerHandle, BatchMeta,
+│   │                                #   RoutingOptions, TransactionalHandlerContext,
 │   │                                #   KafkaInstrumentation, ConsumerInterceptor, SchemaLike, …
 │   ├── errors.ts                    # KafkaProcessingError, KafkaRetryExhaustedError, KafkaValidationError
 │   │
@@ -1885,7 +2141,10 @@ src/
 │   ├── kafka.client/
 │   │   ├── index.ts                 # KafkaClient class — public API, producer/consumer lifecycle,
 │   │   │                            #   Lamport clock, ALS correlation ID, graceful shutdown,
-│   │   │                            #   Lamport clock recovery (clockRecovery option)
+│   │   │                            #   clockRecovery, readSnapshot(), checkpointOffsets(),
+│   │   │                            #   restoreFromCheckpoint(), startWindowConsumer(),
+│   │   │                            #   startRoutedConsumer(), startTransactionalConsumer(),
+│   │   │                            #   lagThrottle poller, waitIfThrottled()
 │   │   │
 │   │   ├── admin/
 │   │   │   └── ops.ts               # AdminOps: listConsumerGroups(), describeTopics(),
@@ -1938,6 +2197,11 @@ src/
 │       │   ├── deduplication.spec.ts     # Lamport clock dedup, strategies (drop/dlq/topic)
 │       │   ├── interceptors.spec.ts      # ConsumerInterceptor before/after/onError hooks
 │       │   ├── dlq-replay.spec.ts        # replayDlq(), dryRun, filter, targetTopic
+│       │   ├── read-snapshot.spec.ts     # readSnapshot(), tombstones, multi-partition, schema, HWM
+│       │   ├── checkpoint.spec.ts        # checkpointOffsets(), restoreFromCheckpoint(), timestamp selection
+│       │   ├── window-consumer.spec.ts   # startWindowConsumer(), size/time triggers, shutdown flush
+│       │   ├── router.spec.ts            # startRoutedConsumer(), route dispatch, fallback, skip
+│       │   ├── transactional-consumer.spec.ts  # startTransactionalConsumer(), EOS commit/abort, tx.send
 │       │   ├── ttl.spec.ts               # messageTtlMs, onTtlExpired, TTL→DLQ routing
 │       │   ├── message-lost.spec.ts      # onMessageLost — handler error, validation, DLQ failure
 │       │   ├── handler-timeout.spec.ts   # handlerTimeoutMs warning
@@ -1946,7 +2210,8 @@ src/
 │       │   ├── producer.spec.ts          # sendMessage(), sendBatch(), sendTombstone(), compression
 │       │   ├── transaction.spec.ts       # transaction(), tx.send(), tx.sendBatch(), rollback
 │       │   ├── schema.spec.ts            # Schema validation on send/consume, strictSchemas
-│       │   └── topic.spec.ts             # topic() descriptor, TopicsFrom, schema registry
+│       │   ├── topic.spec.ts             # topic() descriptor, TopicsFrom, schema registry
+│       │   └── lag-throttle.spec.ts      # lagThrottle option, threshold, maxWaitMs, poll errors
 │       ├── admin/
 │       │   ├── admin.spec.ts             # listConsumerGroups(), describeTopics(), deleteRecords(),
 │       │   │                             #   resetOffsets(), seekToOffset(), seekToTimestamp()

@@ -18,10 +18,21 @@ import type {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
+/**
+ * Coerce an unknown thrown value to an `Error` instance.
+ * Returns the value as-is if it is already an `Error`; otherwise wraps it with `String(error)`.
+ * @param error The value caught in a `catch` clause.
+ * @returns A guaranteed `Error` instance.
+ */
 export function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+/**
+ * Return a Promise that resolves after `ms` milliseconds.
+ * Used for exponential backoff between retry attempts.
+ * @param ms Delay in milliseconds.
+ */
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -149,6 +160,14 @@ export function buildDlqPayload(
   return { topic: dlqTopic, messages: [{ value: rawMessage, headers }] };
 }
 
+/**
+ * Produce a message to `<topic>.dlq`, stamping standard DLQ headers.
+ * Falls back to `onMessageLost` when the DLQ produce itself fails.
+ * @param topic Original topic the message was consumed from.
+ * @param rawMessage Raw JSON string of the original message.
+ * @param deps Logger, producer, and optional `onMessageLost` callback.
+ * @param meta Error, attempt count, and original headers to attach as DLQ metadata headers.
+ */
 export async function sendToDlq(
   topic: string,
   rawMessage: string,
@@ -445,6 +464,11 @@ export async function notifyInterceptorsOnError<
 
 // ── Retry pipeline ──────────────────────────────────────────────────
 
+/**
+ * Input context passed to `executeWithRetry`.
+ * Bundles the envelope(s), raw message bytes, interceptors, and retry/DLQ policy
+ * so the retry loop has everything it needs without relying on closure state.
+ */
 export interface ExecuteWithRetryContext<T extends TopicMapConstraint<T>> {
   envelope: EventEnvelope<any> | EventEnvelope<any>[];
   rawMessages: string[];

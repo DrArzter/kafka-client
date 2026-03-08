@@ -4,6 +4,11 @@ import type { KafkaLogger, DlqReplayOptions } from "../../types";
 import { subscribeWithRetry } from "./subscribe-retry";
 import { decodeHeaders } from "../../message/envelope";
 
+/**
+ * Dependencies injected into `replayDlqTopic` by `KafkaClient`.
+ * Abstracts broker access (offset fetching, producing, consumer creation) so the
+ * replay logic can be unit-tested without a real Kafka connection.
+ */
 export type DlqReplayDeps = {
   logger: KafkaLogger;
   fetchTopicOffsets: (topic: string) => Promise<Array<{ partition: number; low: string; high: string }>>;

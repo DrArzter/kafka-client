@@ -23,6 +23,15 @@ export const HEADER_LAMPORT_CLOCK = "x-lamport-clock";
  *
  * On **consume**, the library extracts those headers and assembles
  * an `EventEnvelope` that is passed to the handler.
+ *
+ * @example
+ * ```ts
+ * await kafka.startConsumer(['orders'], async (envelope: EventEnvelope<Order>) => {
+ *   console.log(envelope.payload.orderId);  // typed payload
+ *   console.log(envelope.correlationId);    // auto-propagated
+ *   console.log(envelope.eventId);          // unique message ID
+ * });
+ * ```
  */
 export interface EventEnvelope<T> {
   /** Deserialized + validated message body. */
@@ -56,12 +65,29 @@ interface EnvelopeCtx {
 
 const envelopeStorage = new AsyncLocalStorage<EnvelopeCtx>();
 
-/** Read the current envelope context (correlationId / traceparent) from ALS. */
+/**
+ * Read the current envelope context (correlationId / traceparent) from ALS.
+ * Returns `undefined` outside of a Kafka consumer handler.
+ * @example
+ * ```ts
+ * const ctx = getEnvelopeContext();
+ * if (ctx) console.log('correlationId:', ctx.correlationId);
+ * ```
+ */
 export function getEnvelopeContext(): EnvelopeCtx | undefined {
   return envelopeStorage.getStore();
 }
 
-/** Execute `fn` inside an envelope context so nested sends inherit correlationId. */
+/**
+ * Execute `fn` inside an envelope context so nested sends inherit correlationId.
+ * Automatically called by the consumer pipeline — use this in tests or manual flows.
+ * @example
+ * ```ts
+ * await runWithEnvelopeContext({ correlationId: 'abc-123' }, async () => {
+ *   await kafka.sendMessage('orders.created', payload); // inherits correlationId
+ * });
+ * ```
+ */
 export function runWithEnvelopeContext<R>(ctx: EnvelopeCtx, fn: () => R): R {
   return envelopeStorage.run(ctx, fn);
 }

@@ -15,6 +15,11 @@ export class AsyncQueue<V> {
     private readonly onDrained: () => void = () => {},
   ) {}
 
+  /**
+   * Enqueue an item. If a consumer is already awaiting the next item, delivers it immediately.
+   * When the internal buffer reaches `highWaterMark`, calls `onFull` to signal backpressure.
+   * @param item The value to enqueue.
+   */
   push(item: V): void {
     if (this.waiting.length > 0) {
       this.waiting.shift()!.resolve({ value: item, done: false });
@@ -27,18 +32,33 @@ export class AsyncQueue<V> {
     }
   }
 
+  /**
+   * Terminate the queue with an error. All pending and future `next()` calls will reject.
+   * @param err The error to propagate to all waiting consumers.
+   */
   fail(err: Error): void {
     this.closed = true;
     this.error = err;
     for (const { reject } of this.waiting.splice(0)) reject(err);
   }
 
+  /**
+   * Signal end-of-stream. All pending `next()` calls resolve with `{ done: true }`,
+   * and future `next()` calls resolve immediately with `{ done: true }`.
+   */
   close(): void {
     this.closed = true;
     for (const { resolve } of this.waiting.splice(0))
       resolve({ value: undefined as any, done: true });
   }
 
+  /**
+   * Pull the next item from the queue, conforming to the `AsyncIterator` protocol.
+   * Rejects if the queue has been failed. Resolves with `{ done: true }` if it has been closed.
+   * Suspends (returns a pending Promise) when the queue is empty and not yet closed.
+   * When items drain below `highWaterMark / 2`, calls `onDrained` to resume backpressure.
+   * @returns A Promise resolving to an `IteratorResult<V>`.
+   */
   next(): Promise<IteratorResult<V>> {
     if (this.error) return Promise.reject(this.error);
     if (this.items.length > 0) {

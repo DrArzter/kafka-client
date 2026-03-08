@@ -5,6 +5,12 @@ export class InFlightTracker {
 
   constructor(private readonly warn: (msg: string) => void) {}
 
+  /**
+   * Wrap an async handler so its lifetime is counted against the in-flight total.
+   * Resolvers registered with `waitForDrain` are notified when the count reaches zero.
+   * @param fn The async function to track.
+   * @returns The same promise returned by `fn`.
+   */
   track<R>(fn: () => Promise<R>): Promise<R> {
     this.inFlightTotal++;
     return fn().finally(() => {
@@ -13,6 +19,12 @@ export class InFlightTracker {
     });
   }
 
+  /**
+   * Resolve when all tracked handlers have completed, or after `timeoutMs` elapses.
+   * Logs a warning (via the injected `warn` callback) if the timeout is hit before draining.
+   * Returns immediately if there are no in-flight handlers.
+   * @param timeoutMs Maximum time to wait in milliseconds before resolving anyway.
+   */
   waitForDrain(timeoutMs: number): Promise<void> {
     if (this.inFlightTotal === 0) return Promise.resolve();
     return new Promise<void>((resolve) => {

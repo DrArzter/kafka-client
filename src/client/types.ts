@@ -45,7 +45,18 @@ export type MessageHeaders = Record<string, string>;
  */
 export type CompressionType = "none" | "gzip" | "snappy" | "lz4" | "zstd";
 
-/** Options for sending a single message. */
+/**
+ * Options for sending a single message.
+ *
+ * @example
+ * ```ts
+ * await kafka.sendMessage('orders.created', { orderId: '123', amount: 99 }, {
+ *   key: 'order-123',
+ *   headers: { 'x-source': 'checkout-service' },
+ *   compression: 'snappy',
+ * });
+ * ```
+ */
 export interface SendOptions {
   /** Partition key for message routing. */
   key?: string;
@@ -65,7 +76,17 @@ export interface SendOptions {
   compression?: CompressionType;
 }
 
-/** Shape of each item in a `sendBatch` call. */
+/**
+ * Shape of each item in a `sendBatch` call.
+ *
+ * @example
+ * ```ts
+ * await kafka.sendBatch('orders.created', [
+ *   { value: { orderId: '1', amount: 10 }, key: 'order-1' },
+ *   { value: { orderId: '2', amount: 20 }, key: 'order-2', headers: { 'x-priority': 'high' } },
+ * ]);
+ * ```
+ */
 export interface BatchMessageItem<V> {
   value: V;
   /**
@@ -81,7 +102,14 @@ export interface BatchMessageItem<V> {
   eventId?: string;
 }
 
-/** Options for a `sendBatch` call (applies to all messages in the batch). */
+/**
+ * Options for a `sendBatch` call (applies to all messages in the batch).
+ *
+ * @example
+ * ```ts
+ * await kafka.sendBatch('metrics', messages, { compression: 'zstd' });
+ * ```
+ */
 export interface BatchSendOptions {
   /**
    * Compression codec for this batch.
@@ -91,7 +119,19 @@ export interface BatchSendOptions {
   compression?: CompressionType;
 }
 
-/** Metadata exposed to batch consumer handlers. */
+/**
+ * Metadata exposed to batch consumer handlers.
+ *
+ * @example
+ * ```ts
+ * await kafka.startBatchConsumer(['events'], async (envelopes, meta) => {
+ *   console.log(`Partition ${meta.partition}, HWM ${meta.highWatermark}`);
+ *   await db.insertMany(envelopes.map(e => e.payload));
+ *   meta.resolveOffset(envelopes.at(-1)!.offset);
+ *   await meta.commitOffsetsIfNecessary();
+ * }, { autoCommit: false });
+ * ```
+ */
 export interface BatchMeta {
   /** Partition number for this batch. */
   partition: number;
@@ -112,6 +152,14 @@ export interface BatchMeta {
 
 /**
  * Options for Lamport Clock-based message deduplication.
+ *
+ * @example
+ * ```ts
+ * await kafka.startConsumer(['payments'], handler, {
+ *   deduplication: { strategy: 'dlq' },
+ *   dlq: true,
+ * });
+ * ```
  *
  * The producer stamps every outgoing message with a monotonically increasing
  * `x-lamport-clock` header. The consumer tracks the last processed value per
@@ -148,6 +196,19 @@ export interface DeduplicationOptions {
 /**
  * Options for the per-partition circuit breaker.
  *
+ * @example
+ * ```ts
+ * await kafka.startConsumer(['payments'], handler, {
+ *   circuitBreaker: {
+ *     threshold: 5,
+ *     recoveryMs: 30_000,
+ *     windowSize: 20,
+ *     halfOpenSuccesses: 2,
+ *   },
+ *   dlq: true,
+ * });
+ * ```
+ *
  * The circuit breaker tracks recent message outcomes in a **sliding window** and
  * opens (pauses the partition) when too many failures accumulate:
  *
@@ -181,7 +242,21 @@ export interface CircuitBreakerOptions {
   halfOpenSuccesses?: number;
 }
 
-/** Options for configuring a Kafka consumer. */
+/**
+ * Options for configuring a Kafka consumer.
+ *
+ * @example
+ * ```ts
+ * await kafka.startConsumer(['orders.created'], handler, {
+ *   groupId: 'billing-service',
+ *   retry: { maxRetries: 5, backoffMs: 1000 },
+ *   dlq: true,
+ *   deduplication: { strategy: 'drop' },
+ *   circuitBreaker: { threshold: 3, recoveryMs: 60_000 },
+ *   interceptors: [loggingInterceptor],
+ * });
+ * ```
+ */
 export interface ConsumerOptions<
   T extends TopicMapConstraint<T> = TTopicMessageMap,
 > {
@@ -272,7 +347,16 @@ export interface ConsumerOptions<
   onTtlExpired?: (ctx: TtlExpiredContext) => void | Promise<void>;
 }
 
-/** Configuration for consumer retry behavior. */
+/**
+ * Configuration for consumer retry behavior.
+ *
+ * @example
+ * ```ts
+ * await kafka.startConsumer(['orders'], handler, {
+ *   retry: { maxRetries: 5, backoffMs: 500, maxBackoffMs: 10_000 },
+ * });
+ * ```
+ */
 export interface RetryOptions {
   /** Maximum number of retry attempts before giving up. */
   maxRetries: number;
@@ -288,6 +372,17 @@ export interface RetryOptions {
  *
  * Interceptors are per-consumer. For client-wide hooks (e.g. OTel),
  * use `KafkaInstrumentation` instead.
+ *
+ * @example
+ * ```ts
+ * const logger: ConsumerInterceptor = {
+ *   async before(envelope) { console.log('Processing', envelope.eventId); },
+ *   async after(envelope)  { console.log('Done',       envelope.eventId); },
+ *   async onError(envelope, err) { console.error('Failed', err.message); },
+ * };
+ *
+ * await kafka.startConsumer(['orders'], handler, { interceptors: [logger] });
+ * ```
  */
 export interface ConsumerInterceptor<
   T extends TopicMapConstraint<T> = TTopicMessageMap,
@@ -313,6 +408,25 @@ export interface ConsumerInterceptor<
  *     async context (e.g. `context.with(spanCtx, fn)` for OpenTelemetry). Multiple
  *     wraps from different instrumentations are composed in declaration order,
  *     so the first instrumentation's wrap is the outermost.
+ *
+ * @example
+ * ```ts
+ * // Cleanup-only (legacy form):
+ * beforeConsume(envelope) {
+ *   const timer = startTimer();
+ *   return () => timer.end();
+ * }
+ *
+ * // Wrap form — run handler inside an OTel span context:
+ * beforeConsume(envelope) {
+ *   const ctx = propagator.extract(ROOT_CONTEXT, envelope.headers);
+ *   const span = tracer.startSpan(envelope.topic, {}, ctx);
+ *   return {
+ *     wrap: (fn) => context.with(trace.setSpan(ctx, span), fn),
+ *     cleanup: () => span.end(),
+ *   };
+ * }
+ * ```
  */
 export type BeforeConsumeResult =
   | (() => void)
@@ -332,7 +446,85 @@ export type DlqReason =
   | "lamport-clock-duplicate"
   | "ttl-expired";
 
-/** Options for `replayDlq`. */
+/**
+ * Options for `readSnapshot`.
+ *
+ * @example
+ * ```ts
+ * const snapshot = await kafka.readSnapshot('users.state', {
+ *   schema: UserSchema,
+ *   onTombstone: (key) => console.log(`Key ${key} was compacted away`),
+ * });
+ * ```
+ */
+export interface ReadSnapshotOptions {
+  /**
+   * Schema to validate each message payload against (Zod, Valibot, ArkType, or any `.parse()` shape).
+   * Messages that fail validation are skipped with a warning log — they do not throw.
+   */
+  schema?: SchemaLike;
+  /**
+   * Called when a tombstone record (null-value message) is encountered.
+   * The corresponding key is removed from the snapshot automatically.
+   * Use this for auditing or logging which keys were compacted away.
+   */
+  onTombstone?: (key: string) => void;
+}
+
+/** A single partition offset entry stored in a checkpoint record. */
+export interface CheckpointEntry {
+  topic: string;
+  partition: number;
+  offset: string;
+}
+
+/** Result returned by a successful `checkpointOffsets` call. */
+export interface CheckpointResult {
+  /** Consumer group whose offsets were saved. */
+  groupId: string;
+  /** Topics included in the checkpoint. */
+  topics: string[];
+  /** Total number of topic-partition pairs saved. */
+  partitionCount: number;
+  /** Unix timestamp (ms) when the checkpoint was created. */
+  savedAt: number;
+}
+
+/** Options for `restoreFromCheckpoint`. */
+export interface RestoreCheckpointOptions {
+  /**
+   * Target Unix timestamp (ms). The newest checkpoint whose `savedAt` is **≤ this value**
+   * is selected. Defaults to the latest available checkpoint when omitted.
+   */
+  timestamp?: number;
+}
+
+/** Result returned by a successful `restoreFromCheckpoint` call. */
+export interface CheckpointRestoreResult {
+  /** Consumer group that was repositioned. */
+  groupId: string;
+  /** The committed offsets restored from the checkpoint. */
+  offsets: CheckpointEntry[];
+  /** Unix timestamp (ms) recorded when the checkpoint was originally saved. */
+  restoredAt: number;
+  /** Age of the restored checkpoint in milliseconds (now − `restoredAt`). */
+  checkpointAge: number;
+}
+
+/**
+ * Options for `replayDlq`.
+ *
+ * @example
+ * ```ts
+ * await kafka.replayDlq('orders.created', {
+ *   targetTopic: 'orders.retry-manual',
+ *   dryRun: false,
+ *   filter: (headers, value) =>
+ *     headers['x-dlq-reason'] === 'handler-error' &&
+ *     JSON.parse(value).amount > 0,
+ * });
+ * ```
+ */
 export interface DlqReplayOptions {
   /**
    * Override the target topic to re-publish to.
@@ -372,6 +564,24 @@ export interface KafkaMetrics {
  * Use this for cross-cutting concerns like tracing and metrics.
  *
  * @see `otelInstrumentation()` from `@drarzter/kafka-client/otel`
+ *
+ * @example
+ * ```ts
+ * const tracing: KafkaInstrumentation = {
+ *   beforeSend(topic, headers) {
+ *     headers['traceparent'] = getCurrentTraceId();
+ *   },
+ *   beforeConsume(envelope) {
+ *     const span = tracer.startSpan(envelope.topic);
+ *     return { cleanup: () => span.end() };
+ *   },
+ *   onDlq(envelope, reason) {
+ *     metrics.increment('kafka.dlq', { topic: envelope.topic, reason });
+ *   },
+ * };
+ *
+ * const kafka = new KafkaClient(config, groupId, { instrumentation: [tracing] });
+ * ```
  */
 export interface KafkaInstrumentation {
   /** Called before sending — can mutate `headers` (e.g. inject `traceparent`). */
@@ -421,7 +631,19 @@ export interface KafkaInstrumentation {
   onCircuitClose?(topic: string, partition: number): void;
 }
 
-/** Context passed to the `transaction()` callback with type-safe send methods. */
+/**
+ * Context passed to the `transaction()` callback with type-safe send methods.
+ *
+ * @example
+ * ```ts
+ * await kafka.transaction(async (tx) => {
+ *   await tx.send('inventory.reserved', { itemId: 'a', qty: 1 });
+ *   await tx.sendBatch('audit.log', [
+ *     { value: { action: 'reserve', itemId: 'a' } },
+ *   ]);
+ * });
+ * ```
+ */
 export interface TransactionContext<T extends TopicMapConstraint<T>> {
   send<K extends keyof T>(
     topic: K,
@@ -446,7 +668,135 @@ export interface TransactionContext<T extends TopicMapConstraint<T>> {
   ): Promise<void>;
 }
 
-/** Handle returned by `startConsumer` / `startBatchConsumer`. */
+/**
+ * Transactional context passed to each `startTransactionalConsumer` handler invocation.
+ *
+ * Every call to `send` or `sendBatch` on this object is part of the same Kafka
+ * transaction as the source message offset commit. Either all sends and the offset
+ * commit succeed atomically, or the transaction is aborted and the source message
+ * is redelivered.
+ *
+ * @example
+ * ```ts
+ * await kafka.startTransactionalConsumer(['orders.created'], async (envelope, tx) => {
+ *   await tx.send('inventory.reserved', { orderId: envelope.payload.orderId, qty: 1 });
+ *   await tx.sendBatch('audit.log', [{ value: { action: 'reserve', orderId: envelope.payload.orderId } }]);
+ * });
+ * ```
+ */
+export interface TransactionalHandlerContext<T extends TopicMapConstraint<T>> {
+  /**
+   * Send a message as part of this message's transaction.
+   * The send is staged — it only becomes visible to consumers after the transaction commits.
+   */
+  send<K extends keyof T>(
+    topic: K,
+    message: T[K],
+    options?: SendOptions,
+  ): Promise<void>;
+
+  /**
+   * Send multiple messages as part of this message's transaction.
+   * All messages are staged together and become visible only after commit.
+   */
+  sendBatch<K extends keyof T>(
+    topic: K,
+    messages: Array<BatchMessageItem<T[K]>>,
+    options?: BatchSendOptions,
+  ): Promise<void>;
+}
+
+/**
+ * Routing configuration for `startRoutedConsumer`.
+ *
+ * Messages are dispatched to the handler whose key matches the value of `header`.
+ * Unmatched messages are forwarded to `fallback` if provided, or silently skipped.
+ *
+ * @example
+ * ```ts
+ * await kafka.startRoutedConsumer(['events'], {
+ *   header: 'x-event-type',
+ *   routes: {
+ *     'order.created':   async (e) => handleOrderCreated(e.payload),
+ *     'order.cancelled': async (e) => handleOrderCancelled(e.payload),
+ *   },
+ *   fallback: async (e) => logger.warn('Unknown event type', e.headers),
+ * });
+ * ```
+ */
+export interface RoutingOptions<E> {
+  /** Header whose value determines which handler is invoked. */
+  header: string;
+  /**
+   * Map of header value → handler.
+   * The handler with the matching key is called for each message.
+   */
+  routes: Record<string, (envelope: EventEnvelope<E>) => Promise<void>>;
+  /**
+   * Called when no route matches the header value (or the header is absent).
+   * If omitted, unmatched messages are silently skipped.
+   */
+  fallback?: (envelope: EventEnvelope<E>) => Promise<void>;
+}
+
+/**
+ * Metadata passed to the `startWindowConsumer` handler on each flush.
+ *
+ * @example
+ * ```ts
+ * await kafka.startWindowConsumer('events', async (batch, meta) => {
+ *   console.log(`Flush: ${batch.length} events, trigger=${meta.trigger}`);
+ *   console.log(`Window: ${meta.windowEnd - meta.windowStart} ms`);
+ *   await db.insertMany(batch.map(e => e.payload));
+ * }, { maxMessages: 100, maxMs: 5_000 });
+ * ```
+ */
+export interface WindowMeta {
+  /** What triggered this flush: accumulated `maxMessages` messages, or the `maxMs` timer. */
+  trigger: "size" | "time";
+  /** Unix timestamp (ms) of the first message that entered the current window. */
+  windowStart: number;
+  /** Unix timestamp (ms) when the flush was initiated. */
+  windowEnd: number;
+}
+
+/**
+ * Options for `startWindowConsumer`.
+ *
+ * Extends `ConsumerOptions` — all standard consumer settings apply.
+ * `retryTopics`, `retryTopicAssignmentTimeoutMs`, and `queueHighWaterMark`
+ * are excluded: they are incompatible with windowed accumulation.
+ */
+export interface WindowConsumerOptions<
+  T extends TopicMapConstraint<T> = TTopicMessageMap,
+> extends Omit<
+  ConsumerOptions<T>,
+  "retryTopics" | "retryTopicAssignmentTimeoutMs" | "queueHighWaterMark"
+> {
+  /**
+   * Maximum number of messages to accumulate before flushing.
+   * When the buffer reaches this size the handler is called immediately,
+   * regardless of how much time has elapsed since the first message.
+   */
+  maxMessages: number;
+  /**
+   * Maximum time (ms) to wait after the first message before flushing.
+   * When this timer expires the handler is called with whatever messages
+   * have accumulated so far — even if the buffer is not full.
+   */
+  maxMs: number;
+}
+
+/**
+ * Handle returned by `startConsumer` / `startBatchConsumer`.
+ *
+ * @example
+ * ```ts
+ * const handle = await kafka.startConsumer(['orders'], handler);
+ * // later, on shutdown:
+ * await handle.stop();
+ * ```
+ */
 export interface ConsumerHandle {
   /** The consumer group ID this consumer is running under. */
   groupId: string;
@@ -492,17 +842,36 @@ export interface TopicDescription {
 
 /** Interface describing all public methods of the Kafka client. */
 export interface IKafkaClient<T extends TopicMapConstraint<T>> {
+  /**
+   * @example
+   * ```ts
+   * const status = await kafka.checkStatus();
+   * if (status.status === 'down') console.error(status.error);
+   * ```
+   */
   checkStatus(): Promise<KafkaHealthResult>;
 
   /**
    * List all consumer groups known to the broker.
    * @returns Array of `{ groupId, state }` summaries.
+   *
+   * @example
+   * ```ts
+   * const groups = await kafka.listConsumerGroups();
+   * console.log(groups.map(g => `${g.groupId}: ${g.state}`));
+   * ```
    */
   listConsumerGroups(): Promise<ConsumerGroupSummary[]>;
 
   /**
    * Describe topics — returns partition layout, leader, replicas, and ISR for each topic.
    * @param topics Topic names to describe. Omit to describe all topics visible to this client.
+   *
+   * @example
+   * ```ts
+   * const [desc] = await kafka.describeTopics(['orders.created']);
+   * console.log(desc.partitions.length); // number of partitions
+   * ```
    */
   describeTopics(topics?: string[]): Promise<TopicDescription[]>;
 
@@ -513,6 +882,14 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
    *
    * @param topic Topic name.
    * @param partitions Array of `{ partition, offset }` — records before each offset are deleted.
+   *
+   * @example
+   * ```ts
+   * await kafka.deleteRecords('orders.created', [
+   *   { partition: 0, offset: '1000' },
+   *   { partition: 1, offset: '500'  },
+   * ]);
+   * ```
    */
   deleteRecords(
     topic: string,
@@ -524,11 +901,29 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
    * Lag = (broker high-watermark offset) − (last committed offset).
    * - A committed offset of `-1` (no offset committed yet) counts as full lag.
    * - Defaults to the client's default `groupId` when none is provided.
+   *
+   * @example
+   * ```ts
+   * const lag = await kafka.getConsumerLag();
+   * const total = lag.reduce((sum, p) => sum + p.lag, 0);
+   * console.log(`Total lag: ${total} messages`);
+   * ```
    */
   getConsumerLag(
     groupId?: string,
   ): Promise<Array<{ topic: string; partition: number; lag: number }>>;
 
+  /**
+   * @example
+   * ```ts
+   * const handle = await kafka.startConsumer(['orders.created'], async (envelope) => {
+   *   await processOrder(envelope.payload);
+   * }, { retry: { maxRetries: 3 }, dlq: true });
+   *
+   * // on shutdown:
+   * await handle.stop();
+   * ```
+   */
   startConsumer<K extends Array<keyof T>>(
     topics: K,
     handleMessage: (envelope: EventEnvelope<T[K[number]]>) => Promise<void>,
@@ -554,6 +949,15 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
     options?: ConsumerOptions<T>,
   ): Promise<ConsumerHandle>;
 
+  /**
+   * @example
+   * ```ts
+   * await kafka.startBatchConsumer(['metrics'], async (envelopes, meta) => {
+   *   await db.insertMany(envelopes.map(e => e.payload));
+   *   meta.resolveOffset(envelopes.at(-1)!.offset);
+   * }, { autoCommit: false });
+   * ```
+   */
   startBatchConsumer<K extends Array<keyof T>>(
     topics: K,
     handleBatch: (
@@ -589,12 +993,122 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
   ): Promise<ConsumerHandle>;
 
   /**
+   * Subscribe to a topic and accumulate messages into a window, flushing the handler
+   * when **either** `maxMessages` messages have accumulated **or** `maxMs` milliseconds
+   * have elapsed since the first message in the current window — whichever fires first.
+   *
+   * This is semantically different from `startBatchConsumer`, which delivers
+   * broker-sized batches of unpredictable size. A window consumer gives you control
+   * over both the size and the latency of each batch — useful for micro-batching
+   * writes to a database, aggregating events before processing, or rate-limiting a
+   * downstream API.
+   *
+   * On `handle.stop()`, any messages remaining in the buffer are flushed before the
+   * consumer disconnects, so no messages are lost on clean shutdown.
+   *
+   * @param topic Topic to consume.
+   * @param handler Called with each flushed window and a `WindowMeta` describing the trigger.
+   * @param options Window size/timeout and standard consumer options.
+   *
+   * @example
+   * ```ts
+   * await kafka.startWindowConsumer('events', async (batch, meta) => {
+   *   console.log(`Flushing ${batch.length} events (trigger: ${meta.trigger})`);
+   *   await db.insertMany(batch.map(e => e.payload));
+   * }, { maxMessages: 100, maxMs: 5_000 });
+   * ```
+   */
+  startWindowConsumer<K extends keyof T & string>(
+    topic: K,
+    handler: (
+      envelopes: EventEnvelope<T[K]>[],
+      meta: WindowMeta,
+    ) => Promise<void>,
+    options: WindowConsumerOptions<T>,
+  ): Promise<ConsumerHandle>;
+
+  /**
+   * Subscribe to one or more topics and dispatch each message to a handler based
+   * on the value of a specific Kafka header. Eliminates boilerplate `if/switch`
+   * statements inside a catch-all handler when one topic carries multiple event types.
+   *
+   * Messages whose header value does not match any route key are forwarded to `fallback`
+   * if provided, or silently skipped otherwise.
+   *
+   * Accepts the same `ConsumerOptions` as `startConsumer` — retry, DLQ, deduplication,
+   * circuit breaker, interceptors, etc. all apply to every route.
+   *
+   * @param topics Array of topic keys or `RegExp` patterns.
+   * @param routing Header name, route map, and optional fallback handler.
+   * @param options Standard consumer options.
+   * @returns A handle with `{ groupId, stop() }`.
+   *
+   * @example
+   * ```ts
+   * await kafka.startRoutedConsumer(['domain.events'], {
+   *   header: 'x-event-type',
+   *   routes: {
+   *     'order.created':   async (e) => handleOrderCreated(e.payload),
+   *     'order.cancelled': async (e) => handleOrderCancelled(e.payload),
+   *   },
+   *   fallback: async (e) => logger.warn('Unknown event type', e.headers),
+   * });
+   * ```
+   */
+  startRoutedConsumer<K extends Array<keyof T>>(
+    topics: K,
+    routing: RoutingOptions<T[K[number]]>,
+    options?: ConsumerOptions<T>,
+  ): Promise<ConsumerHandle>;
+
+  /**
+   * Subscribe to topics and consume messages with **exactly-once semantics** for
+   * read-process-write pipelines.
+   *
+   * Each message is processed inside a Kafka transaction: the handler receives a
+   * `TransactionalHandlerContext` with `send` / `sendBatch` methods that stage
+   * outgoing messages inside the transaction. When the handler resolves, the source
+   * offset commit and all staged sends are committed atomically. A handler error
+   * aborts the transaction and the source message is redelivered — no sends become
+   * visible to downstream consumers.
+   *
+   * Incompatible with `retryTopics: true` — throws at startup if set.
+   * `autoCommit` is always `false` (managed by the transaction).
+   *
+   * @param topics Array of topic keys.
+   * @param handler Called for each message with the decoded envelope and a transaction context.
+   * @param options Standard consumer options (`retry`, `dlq`, `deduplication`, etc.).
+   * @returns A handle with `{ groupId, stop() }`.
+   *
+   * @example
+   * ```ts
+   * await kafka.startTransactionalConsumer(['orders.created'], async (envelope, tx) => {
+   *   await tx.send('inventory.reserved', { orderId: envelope.payload.orderId, qty: 1 });
+   * });
+   * ```
+   */
+  startTransactionalConsumer<K extends Array<keyof T>>(
+    topics: K,
+    handler: (
+      envelope: EventEnvelope<T[K[number]]>,
+      tx: TransactionalHandlerContext<T>,
+    ) => Promise<void>,
+    options?: ConsumerOptions<T>,
+  ): Promise<ConsumerHandle>;
+
+  /**
    * Stop consumer(s).
    * - `stopConsumer(groupId)` — disconnect and remove the consumer for a specific group.
    * - `stopConsumer()` — disconnect and remove all consumers.
    */
   stopConsumer(groupId?: string): Promise<void>;
 
+  /**
+   * @example
+   * ```ts
+   * await kafka.sendMessage('orders.created', { orderId: '123', amount: 99 });
+   * ```
+   */
   sendMessage<K extends keyof T>(
     topic: K,
     message: T[K],
@@ -613,6 +1127,11 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
    * @param topic Topic name or descriptor.
    * @param key Partition key identifying the record to tombstone.
    * @param headers Optional custom Kafka headers.
+   *
+   * @example
+   * ```ts
+   * await kafka.sendTombstone('users.state', 'user-42');
+   * ```
    */
   sendTombstone(
     topic: string,
@@ -620,14 +1139,38 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
     headers?: MessageHeaders,
   ): Promise<void>;
 
+  /**
+   * @example
+   * ```ts
+   * await kafka.sendBatch('orders.created', [
+   *   { value: { orderId: '1', amount: 10 }, key: 'order-1' },
+   *   { value: { orderId: '2', amount: 20 }, key: 'order-2' },
+   * ]);
+   * ```
+   */
   sendBatch<K extends keyof T>(
     topic: K,
     messages: Array<BatchMessageItem<T[K]>>,
     options?: BatchSendOptions,
   ): Promise<void>;
 
+  /**
+   * @example
+   * ```ts
+   * await kafka.transaction(async (tx) => {
+   *   await tx.send('orders.created',    { orderId: '123', amount: 99 });
+   *   await tx.send('inventory.reserved', { itemId: 'a',  qty: 1 });
+   * });
+   * ```
+   */
   transaction(fn: (ctx: TransactionContext<T>) => Promise<void>): Promise<void>;
 
+  /**
+   * @example
+   * ```ts
+   * const id = kafka.getClientId(); // e.g. 'my-service'
+   * ```
+   */
   getClientId(): ClientId;
 
   /**
@@ -637,6 +1180,14 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
    *   if no events have been observed for that topic yet.
    *
    * Counters accumulate since client creation or the last `resetMetrics()` call.
+   *
+   * @example
+   * ```ts
+   * const { processedCount, dlqCount, retryCount } = kafka.getMetrics();
+   * console.log(`Processed: ${processedCount}, DLQ: ${dlqCount}`);
+   *
+   * const topicMetrics = kafka.getMetrics('orders.created');
+   * ```
    */
   getMetrics(topic?: string): Readonly<KafkaMetrics>;
 
@@ -644,6 +1195,12 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
    * Reset internal event counters to zero.
    * - `resetMetrics()` — reset all topics.
    * - `resetMetrics(topic)` — reset a single topic only.
+   *
+   * @example
+   * ```ts
+   * kafka.resetMetrics();                   // reset all
+   * kafka.resetMetrics('orders.created');   // reset one topic
+   * ```
    */
   resetMetrics(topic?: string): void;
 
@@ -655,6 +1212,18 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
    * itself is not modified — messages remain there after replay.
    *
    * @returns `{ replayed, skipped }` — counts of re-published vs skipped messages.
+   *
+   * @example
+   * ```ts
+   * const { replayed, skipped } = await kafka.replayDlq('orders.created');
+   * console.log(`Replayed ${replayed}, skipped ${skipped}`);
+   *
+   * // dry-run with filter:
+   * await kafka.replayDlq('orders.created', {
+   *   dryRun: true,
+   *   filter: (headers) => headers['x-dlq-reason'] === 'handler-error',
+   * });
+   * ```
    */
   replayDlq(
     topic: string,
@@ -672,6 +1241,12 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
    * @param topic Topic to reset.
    * @param position `'earliest'` seeks to the first available offset; `'latest'`
    *   seeks past the last message (consumer will only see new messages).
+   *
+   * @example
+   * ```ts
+   * await kafka.stopConsumer('billing-service');
+   * await kafka.resetOffsets('billing-service', 'orders.created', 'earliest');
+   * ```
    */
   resetOffsets(
     groupId: string | undefined,
@@ -688,6 +1263,14 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
    *
    * @param groupId Consumer group to seek. Defaults to the client's default groupId.
    * @param assignments Array of `{ topic, partition, offset }` tuples.
+   *
+   * @example
+   * ```ts
+   * await kafka.seekToOffset('billing-service', [
+   *   { topic: 'orders.created', partition: 0, offset: '1000' },
+   *   { topic: 'orders.created', partition: 1, offset: '500'  },
+   * ]);
+   * ```
    */
   seekToOffset(
     groupId: string | undefined,
@@ -704,6 +1287,14 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
    *
    * @param groupId Consumer group to seek. Defaults to the client's default groupId.
    * @param assignments Array of `{ topic, partition, timestamp }` tuples (Unix ms).
+   *
+   * @example
+   * ```ts
+   * const midnight = new Date('2025-01-01').getTime();
+   * await kafka.seekToTimestamp('billing-service', [
+   *   { topic: 'orders.created', partition: 0, timestamp: midnight },
+   * ]);
+   * ```
    */
   seekToTimestamp(
     groupId: string | undefined,
@@ -718,12 +1309,103 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
    * @param topic Topic name.
    * @param partition Partition index.
    * @param groupId Consumer group. Defaults to the client's default groupId.
+   *
+   * @example
+   * ```ts
+   * const state = kafka.getCircuitState('orders.created', 0);
+   * if (state?.status === 'open') console.warn('Circuit open!', state.failures);
+   * ```
    */
   getCircuitState(
     topic: string,
     partition: number,
     groupId?: string,
-  ): { status: "closed" | "open" | "half-open"; failures: number; windowSize: number } | undefined;
+  ):
+    | {
+        status: "closed" | "open" | "half-open";
+        failures: number;
+        windowSize: number;
+      }
+    | undefined;
+
+  /**
+   * Read a compacted topic from the beginning to its current high-watermark and
+   * return a `Map<key, EventEnvelope<T>>` with the **latest** value per key.
+   *
+   * Tombstone records (null-value messages) remove the key from the map —
+   * consistent with log-compaction semantics.
+   *
+   * Useful for bootstrapping in-memory state at service startup without an external cache:
+   * ```ts
+   * const orders = await kafka.readSnapshot('orders.state');
+   * // orders.get('order-123') → EventEnvelope with the latest payload for that key
+   * ```
+   *
+   * @param topic Topic to read. Must be a log-compacted topic (or any topic you want a key → latest-value index for).
+   * @param options Optional schema validation and tombstone callback.
+   * @returns Map keyed by the Kafka message key string; value is the last seen `EventEnvelope`.
+   */
+  readSnapshot<K extends keyof T & string>(
+    topic: K,
+    options?: ReadSnapshotOptions,
+  ): Promise<Map<string, EventEnvelope<T[K]>>>;
+
+  /**
+   * Snapshot the current committed offsets of a consumer group into a Kafka topic.
+   *
+   * Each call appends a new checkpoint record keyed by `groupId`. The checkpoint topic
+   * acts as an append-only audit log — use a non-compacted topic to retain history.
+   * Use `restoreFromCheckpoint` to rewind the group to any saved point in time.
+   *
+   * Requires `connectProducer()` to have been called.
+   *
+   * @param groupId Consumer group whose offsets to checkpoint. Defaults to the client's default group.
+   * @param checkpointTopic Topic where checkpoint records are written.
+   * @returns Summary of the saved checkpoint.
+   *
+   * @example
+   * ```ts
+   * const result = await kafka.checkpointOffsets(undefined, 'checkpoints');
+   * console.log(`Saved ${result.partitionCount} offsets at ${result.savedAt}`);
+   * ```
+   */
+  checkpointOffsets(
+    groupId: string | undefined,
+    checkpointTopic: string,
+  ): Promise<CheckpointResult>;
+
+  /**
+   * Restore a consumer group's committed offsets from the nearest checkpoint stored in `checkpointTopic`.
+   *
+   * Reads all checkpoint records for the group, selects the newest checkpoint whose `savedAt`
+   * timestamp is ≤ `options.timestamp` (or the latest checkpoint if no timestamp is given),
+   * then calls `admin.setOffsets` for every topic-partition in that checkpoint.
+   *
+   * **The consumer group must be stopped before calling this method** — throws if any consumer
+   * in the group is currently running.
+   *
+   * @param groupId Consumer group to reposition. Defaults to the client's default group.
+   * @param checkpointTopic Topic where checkpoints were written by `checkpointOffsets`.
+   * @param options.timestamp Target Unix ms. Omit to restore the latest checkpoint.
+   * @throws If no checkpoint exists for the group, or if the group is still running.
+   *
+   * @example
+   * ```ts
+   * await kafka.stopConsumer('billing-service');
+   * const result = await kafka.restoreFromCheckpoint(undefined, 'checkpoints');
+   * console.log(`Restored from checkpoint saved ${result.checkpointAge}ms ago`);
+   *
+   * // restore to the state before a specific deployment:
+   * await kafka.restoreFromCheckpoint(undefined, 'checkpoints', {
+   *   timestamp: new Date('2025-06-01T00:00:00Z').getTime(),
+   * });
+   * ```
+   */
+  restoreFromCheckpoint(
+    groupId: string | undefined,
+    checkpointTopic: string,
+    options?: RestoreCheckpointOptions,
+  ): Promise<CheckpointRestoreResult>;
 
   /**
    * Consume messages as an async iterator. Useful for scripts, migrations, and
@@ -756,6 +1438,13 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
    *
    * @param groupId Consumer group to pause. Defaults to the client's default groupId.
    * @param assignments Topic-partition pairs to pause.
+   *
+   * @example
+   * ```ts
+   * kafka.pauseConsumer(undefined, [{ topic: 'orders.created', partitions: [0, 1] }]);
+   * // ... do some backpressure work ...
+   * kafka.resumeConsumer(undefined, [{ topic: 'orders.created', partitions: [0, 1] }]);
+   * ```
    */
   pauseConsumer(
     groupId: string | undefined,
@@ -767,6 +1456,11 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
    *
    * @param groupId Consumer group to resume. Defaults to the client's default groupId.
    * @param assignments Topic-partition pairs to resume.
+   *
+   * @example
+   * ```ts
+   * kafka.resumeConsumer(undefined, [{ topic: 'orders.created', partitions: [0, 1] }]);
+   * ```
    */
   resumeConsumer(
     groupId: string | undefined,
@@ -776,6 +1470,11 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
   /**
    * Drain in-flight handlers, then disconnect all producers, consumers, and admin.
    * @param drainTimeoutMs Max ms to wait for in-flight handlers (default 30 000).
+   *
+   * @example
+   * ```ts
+   * await kafka.disconnect();
+   * ```
    */
   disconnect(drainTimeoutMs?: number): Promise<void>;
 
@@ -783,6 +1482,11 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
    * Register SIGTERM / SIGINT signal handlers that drain in-flight messages before
    * disconnecting. Call once after constructing the client in non-NestJS apps.
    * NestJS apps get drain automatically via `onModuleDestroy` → `disconnect()`.
+   *
+   * @example
+   * ```ts
+   * kafka.enableGracefulShutdown(['SIGTERM', 'SIGINT'], 30_000);
+   * ```
    */
   enableGracefulShutdown(
     signals?: NodeJS.Signals[],
@@ -795,6 +1499,22 @@ export interface IKafkaClient<T extends TopicMapConstraint<T>> {
  * Compatible with NestJS Logger, console, winston, pino, or any custom logger.
  *
  * `debug` is optional — omit it to suppress debug output in production.
+ *
+ * @example
+ * ```ts
+ * // Pass a NestJS logger:
+ * const kafka = new KafkaClient(config, groupId, { logger: this.logger });
+ *
+ * // Or a minimal pino wrapper:
+ * const kafka = new KafkaClient(config, groupId, {
+ *   logger: {
+ *     log:   (msg) => pino.info(msg),
+ *     warn:  (msg, ...a) => pino.warn(msg, ...a),
+ *     error: (msg, ...a) => pino.error(msg, ...a),
+ *     debug: (msg, ...a) => pino.debug(msg, ...a),
+ *   },
+ * });
+ * ```
  */
 export interface KafkaLogger {
   log(message: string): void;
@@ -806,6 +1526,15 @@ export interface KafkaLogger {
 /**
  * Context passed to `onTtlExpired` when a message is dropped because it
  * exceeded `messageTtlMs` and `dlq` is not enabled.
+ *
+ * @example
+ * ```ts
+ * const kafka = new KafkaClient(config, groupId, {
+ *   onTtlExpired: ({ topic, ageMs, messageTtlMs }) => {
+ *     console.warn(`Message on ${topic} expired: age=${ageMs}ms, ttl=${messageTtlMs}ms`);
+ *   },
+ * });
+ * ```
  */
 export interface TtlExpiredContext {
   /** Topic the message was consumed from. */
@@ -821,6 +1550,15 @@ export interface TtlExpiredContext {
 /**
  * Context passed to `onMessageLost` when a message is silently dropped
  * (handler threw and `dlq` is not enabled).
+ *
+ * @example
+ * ```ts
+ * const kafka = new KafkaClient(config, groupId, {
+ *   onMessageLost: ({ topic, error, attempt }) => {
+ *     alerting.fire('kafka.message-lost', { topic, error: error.message, attempt });
+ *   },
+ * });
+ * ```
  */
 export interface MessageLostContext {
   /** Topic the message was consumed from. */
@@ -833,7 +1571,20 @@ export interface MessageLostContext {
   headers: MessageHeaders;
 }
 
-/** Options for `KafkaClient` constructor. */
+/**
+ * Options for `KafkaClient` constructor.
+ *
+ * @example
+ * ```ts
+ * const kafka = new KafkaClient(kafkaConfig, 'my-service', {
+ *   transactionalId: `my-service-tx-${replicaIndex}`,
+ *   lagThrottle: { maxLag: 10_000, pollIntervalMs: 3_000 },
+ *   clockRecovery: { topics: ['orders.created'] },
+ *   onMessageLost: (ctx) => alerting.fire('kafka.message-lost', ctx),
+ *   instrumentation: [otelInstrumentation()],
+ * });
+ * ```
+ */
 export interface KafkaClientOptions {
   /** Auto-create topics via admin before the first `sendMessage`, `sendBatch`, or `transaction` for each topic. Useful for development — not recommended in production. */
   autoCreateTopics?: boolean;
@@ -897,9 +1648,43 @@ export interface KafkaClientOptions {
     /** Topic names to scan for the highest Lamport clock. */
     topics: string[];
   };
+  /**
+   * Delay `sendMessage` / `sendBatch` / `sendTombstone` when the observed lag of a
+   * consumer group exceeds `maxLag`. Resumes immediately when lag drops below the threshold.
+   *
+   * Lag is polled via `getConsumerLag()` every `pollIntervalMs` in the background;
+   * no admin call is made on each individual send.
+   *
+   * When `maxWaitMs` is exceeded the send is unblocked with a warning — this is
+   * best-effort throttling, not hard back-pressure.
+   *
+   * Requires `connectProducer()` to have been called to start the polling loop.
+   */
+  lagThrottle?: {
+    /** Consumer group whose lag is monitored. Defaults to the client's default group. */
+    groupId?: string;
+    /** Lag threshold (number of messages) above which sends are delayed. */
+    maxLag: number;
+    /** How often to poll `getConsumerLag()`. Default: `5000` ms. */
+    pollIntervalMs?: number;
+    /**
+     * Maximum time (ms) a send will wait while throttled before proceeding anyway.
+     * Default: `30_000` ms.
+     */
+    maxWaitMs?: number;
+  };
 }
 
-/** Options for consumer subscribe retry when topic doesn't exist yet. */
+/**
+ * Options for consumer subscribe retry when topic doesn't exist yet.
+ *
+ * @example
+ * ```ts
+ * await kafka.startConsumer(['orders.created'], handler, {
+ *   subscribeRetry: { retries: 10, backoffMs: 2_000 },
+ * });
+ * ```
+ */
 export interface SubscribeRetryOptions {
   /** Maximum number of subscribe attempts. Default: `5`. */
   retries?: number;

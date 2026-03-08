@@ -29,6 +29,11 @@ import type {
   RetryOptions,
 } from "../../types";
 
+/**
+ * Runtime dependencies injected into message handler functions by `KafkaClient`.
+ * Holds shared infrastructure (producer, logger, instrumentation) and per-consumer
+ * lifecycle callbacks (onMessageLost, onRetry, onDlq, etc.).
+ */
 export type MessageHandlerDeps = {
   logger: KafkaLogger;
   producer: Producer;
@@ -55,6 +60,11 @@ export type DeduplicationContext = {
   state: Map<string, number>;
 };
 
+/**
+ * Per-consumer configuration forwarded from `startConsumer` into `handleEachMessage`.
+ * Carries schema map, handler function, interceptors, retry/DLQ policy, timeout,
+ * deduplication context, TTL options, and the optional EOS routing context.
+ */
 export type EachMessageOpts = {
   schemaMap: Map<string, SchemaLike>;
   handleMessage: (envelope: EventEnvelope<any>) => Promise<void>;
@@ -152,7 +162,7 @@ async function applyDeduplication(
 }
 
 /** Parse, validate and extract an envelope from a single raw Kafka message. Returns null to skip. */
-async function parseSingleMessage(
+export async function parseSingleMessage(
   message: {
     value: Buffer | null;
     headers?: Record<string, any>;
@@ -189,6 +199,14 @@ async function parseSingleMessage(
   return extractEnvelope(validated, headers, topic, partition, message.offset);
 }
 
+/**
+ * Core single-message processing pipeline invoked by the kafkajs `eachMessage` callback.
+ * Parses, validates, deduplicates, checks TTL, runs the handler with retry/DLQ support,
+ * and manages EOS offset commits when the main consumer runs with `autoCommit: false`.
+ * @param payload Raw kafkajs `eachMessage` payload (topic, partition, message).
+ * @param opts Consumer-level options including handler, schema map, retry policy, and EOS context.
+ * @param deps Shared infrastructure dependencies.
+ */
 export async function handleEachMessage(
   payload: {
     topic: string;
@@ -345,6 +363,10 @@ export async function handleEachMessage(
   );
 }
 
+/**
+ * Per-consumer configuration forwarded from `startBatchConsumer` into `handleEachBatch`.
+ * Mirrors `EachMessageOpts` but carries a batch handler and batch-level EOS context.
+ */
 export type EachBatchOpts = {
   schemaMap: Map<string, SchemaLike>;
   handleBatch: (
@@ -382,6 +404,15 @@ export type EachBatchOpts = {
   };
 };
 
+/**
+ * Core batch processing pipeline invoked by the kafkajs `eachBatch` callback.
+ * Iterates messages, parses, validates, deduplicates, and checks TTL for each one,
+ * then calls the batch handler with the surviving envelopes and retry/DLQ support.
+ * Manages EOS offset commits when the consumer runs with `autoCommit: false`.
+ * @param payload Raw kafkajs `eachBatch` payload (batch, heartbeat, resolveOffset, commitOffsetsIfNecessary).
+ * @param opts Consumer-level options including batch handler, schema map, retry policy, and EOS context.
+ * @param deps Shared infrastructure dependencies.
+ */
 export async function handleEachBatch(
   payload: {
     batch: {

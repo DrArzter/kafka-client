@@ -15,12 +15,24 @@ type CircuitBreakerDeps = {
   instrumentation: KafkaInstrumentation[];
 };
 
+/**
+ * Per-consumer-group circuit breaker.
+ * State is tracked per `${gid}:${topic}:${partition}` key using a sliding window.
+ * Drives CLOSED → OPEN → HALF-OPEN → CLOSED transitions and pauses/resumes
+ * topic-partition consumption accordingly.
+ */
 export class CircuitBreakerManager {
   private readonly states = new Map<string, CircuitState>();
   private readonly configs = new Map<string, CircuitBreakerOptions>();
 
   constructor(private readonly deps: CircuitBreakerDeps) {}
 
+  /**
+   * Register or update circuit breaker configuration for a consumer group.
+   * Must be called before the group starts consuming for the config to take effect.
+   * @param gid Consumer group ID.
+   * @param options Circuit breaker thresholds and timing configuration.
+   */
   setConfig(gid: string, options: CircuitBreakerOptions): void {
     this.configs.set(gid, options);
   }
