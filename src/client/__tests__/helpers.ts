@@ -23,6 +23,7 @@ import {
   mockFetchOffsets,
   mockFetchTopicOffsets,
   mockFetchTopicOffsetsByTime,
+  mockSeek,
   mockCommitOffsets,
   mockAssignment,
 } from "../../__mocks__/@confluentinc/kafka-javascript";
@@ -78,6 +79,7 @@ export {
   mockFetchOffsets,
   mockFetchTopicOffsets,
   mockFetchTopicOffsetsByTime,
+  mockSeek,
   mockCommitOffsets,
   mockAssignment,
 };

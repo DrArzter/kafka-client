@@ -5,6 +5,7 @@ type Consumer = KafkaJS.Consumer;
 const { Kafka: KafkaClass, logLevel: KafkaLogLevel } = KafkaJS;
 import { TopicDescriptor, SchemaLike } from "../message/topic";
 import type { EventEnvelope } from "../message/envelope";
+import { HEADER_LAMPORT_CLOCK } from "../message/envelope";
 import type {
   ClientId,
   GroupId,
@@ -110,6 +111,8 @@ export class KafkaClient<
   private readonly txId: string;
   /** Monotonically increasing Lamport clock stamped on every outgoing message. */
   private _lamportClock = 0;
+  /** Topics to scan for the highest Lamport clock value on `connectProducer()`. */
+  private readonly clockRecoveryTopics: string[];
   /** Per-groupId deduplication state: `"topic:partition"` → last processed clock. */
   private readonly dedupStates = new Map<string, Map<string, number>>();
 
@@ -157,6 +160,7 @@ export class KafkaClient<
     this.onTtlExpired = options?.onTtlExpired;
     this.onRebalance = options?.onRebalance;
     this.txId = options?.transactionalId ?? `${clientId}-tx`;
+    this.clockRecoveryTopics = options?.clockRecovery?.topics ?? [];
 
     this.kafka = new KafkaClass({
       kafkaJS: {
@@ -371,7 +375,129 @@ export class KafkaClient<
    */
   public async connectProducer(): Promise<void> {
     await this.producer.connect();
+    await this.recoverLamportClock(this.clockRecoveryTopics);
     this.logger.log("Producer connected");
+  }
+
+  /**
+   * Recover the Lamport clock from the last message across the given topics.
+   *
+   * For each topic, fetches partition high-watermarks via admin, creates a
+   * short-lived consumer, seeks every non-empty partition to its last offset
+   * (`highWatermark − 1`), reads one message per partition, and extracts the
+   * maximum `x-lamport-clock` header value. On completion `_lamportClock` is
+   * set to that maximum so the next `++_lamportClock` yields a strictly greater
+   * value than any previously sent clock.
+   *
+   * Topics that are empty or missing are silently skipped.
+   */
+  private async recoverLamportClock(topics: string[]): Promise<void> {
+    if (topics.length === 0) return;
+
+    this.logger.log(
+      `Clock recovery: scanning ${topics.length} topic(s) for Lamport clock...`,
+    );
+    await this.adminOps.ensureConnected();
+
+    // Collect non-empty (topic, partition, lastOffset) tuples
+    const partitionsToRead: Array<{
+      topic: string;
+      partition: number;
+      lastOffset: string;
+    }> = [];
+    for (const t of topics) {
+      let offsets: Array<{ partition: number; low: string; high: string }>;
+      try {
+        offsets = await this.adminOps.admin.fetchTopicOffsets(t);
+      } catch {
+        this.logger.warn(
+          `Clock recovery: could not fetch offsets for "${t}", skipping`,
+        );
+        continue;
+      }
+      for (const { partition, high, low } of offsets) {
+        if (parseInt(high, 10) > parseInt(low, 10)) {
+          partitionsToRead.push({
+            topic: t,
+            partition,
+            lastOffset: String(parseInt(high, 10) - 1),
+          });
+        }
+      }
+    }
+
+    if (partitionsToRead.length === 0) {
+      this.logger.log(
+        "Clock recovery: all topics empty — keeping Lamport clock at 0",
+      );
+      return;
+    }
+
+    const recoveryGroupId = `${this.clientId}-clock-recovery-${Date.now()}`;
+    let maxClock = -1;
+
+    await new Promise<void>((resolve, reject) => {
+      const consumer = this.kafka.consumer({
+        kafkaJS: { groupId: recoveryGroupId },
+      });
+      const remaining = new Set(
+        partitionsToRead.map((p) => `${p.topic}:${p.partition}`),
+      );
+
+      const cleanup = () => {
+        consumer.disconnect().catch(() => {});
+      };
+
+      consumer
+        .connect()
+        .then(async () => {
+          const uniqueTopics = [
+            ...new Set(partitionsToRead.map((p) => p.topic)),
+          ];
+          await consumer.subscribe({ topics: uniqueTopics });
+          for (const { topic: t, partition, lastOffset } of partitionsToRead) {
+            consumer.seek({ topic: t, partition, offset: lastOffset });
+          }
+        })
+        .then(() =>
+          consumer.run({
+            eachMessage: async ({ topic: t, partition, message }) => {
+              const key = `${t}:${partition}`;
+              if (!remaining.has(key)) return;
+              remaining.delete(key);
+
+              const clockHeader = message.headers?.[HEADER_LAMPORT_CLOCK];
+              if (clockHeader !== undefined) {
+                const raw = Buffer.isBuffer(clockHeader)
+                  ? clockHeader.toString()
+                  : String(clockHeader);
+                const clock = Number(raw);
+                if (!isNaN(clock) && clock > maxClock) maxClock = clock;
+              }
+
+              if (remaining.size === 0) {
+                cleanup();
+                resolve();
+              }
+            },
+          }),
+        )
+        .catch((err) => {
+          cleanup();
+          reject(err);
+        });
+    });
+
+    if (maxClock >= 0) {
+      this._lamportClock = maxClock;
+      this.logger.log(
+        `Clock recovery: Lamport clock restored — next clock will be ${maxClock + 1}`,
+      );
+    } else {
+      this.logger.log(
+        "Clock recovery: no x-lamport-clock headers found — keeping clock at 0",
+      );
+    }
   }
 
   /**

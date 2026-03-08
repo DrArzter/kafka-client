@@ -13,6 +13,11 @@
 
 ## Done
 
+### 0.7.4
+
+- [x] **Lamport clock recovery on `connectProducer()`** — `clockRecovery?: { topics: string[] }` in `KafkaClientOptions`; on startup, `recoverLamportClock()` fetches partition high-watermarks via admin, creates a short-lived consumer, seeks each non-empty partition to `highWatermark − 1`, reads the `x-lamport-clock` header, and sets `_lamportClock` to the maximum value found; the next `++_lamportClock` is therefore strictly greater than any previously sent clock — eliminates the duplicate-storm scenario that occurs when a producer restarts and its in-memory clock resets to zero; topics that are empty or missing are silently skipped; the recovery consumer is not registered in `this.consumers` and is disconnected immediately after all partitions are read; `mockSeek` added to the manual Jest mock and exported from test helpers
+- [x] **Expanded project structure in README** — `## Project structure` section now lists every source file (not just directories) with a one-line description of its responsibility; covers `src/client/`, `src/nest/`, `src/testing/`, `src/integration/`, and `src/__mocks__/`
+
 ### Refactoring / post-0.7.2 / 0.7.3
 
 - [x] **`MetricsManager`** — extracted all metrics/instrumentation logic from `KafkaClient` into `kafka.client/infra/metrics-manager.ts`; owns `_topicMetrics`, all `notifyXxx` methods, `getMetrics` / `resetMetrics`; circuit-breaker callbacks injected as constructor deps so `KafkaClient` stays the sole owner of the `CircuitBreakerManager`

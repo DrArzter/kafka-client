@@ -1866,27 +1866,143 @@ Both suites run in CI on every push to `main` and on pull requests.
 
 ```text
 src/
-├── client/                    # Core — 0 framework deps
+├── index.ts                         # Full entrypoint — core + NestJS adapter
+├── core.ts                          # Standalone entrypoint (@drarzter/kafka-client/core)
+├── otel.ts                          # OpenTelemetry entrypoint (@drarzter/kafka-client/otel)
+├── testing.ts                       # Testing entrypoint (@drarzter/kafka-client/testing)
+│
+├── client/                          # Core library — zero framework dependencies
+│   ├── types.ts                     # All public interfaces: KafkaClientOptions, ConsumerOptions,
+│   │                                #   SendOptions, EventEnvelope, ConsumerHandle, BatchMeta,
+│   │                                #   KafkaInstrumentation, ConsumerInterceptor, SchemaLike, …
+│   ├── errors.ts                    # KafkaProcessingError, KafkaRetryExhaustedError, KafkaValidationError
+│   │
+│   ├── message/
+│   │   ├── envelope.ts              # extractEnvelope() — Buffer → EventEnvelope; buildHeaders()
+│   │   └── topic.ts                 # topic() builder → TopicDescriptor; global schema registry;
+│   │                                #   TopicsFrom<T> utility type
+│   │
 │   ├── kafka.client/
-│   │   ├── index.ts           # KafkaClient class
-│   │   ├── admin/             # AdminOps
-│   │   ├── producer/          # payload builders, schema registry
-│   │   ├── consumer/          # consumer ops, handler, retry-topic, DLQ replay, queue, pipeline
-│   │   └── infra/             # CircuitBreakerManager, InFlightTracker, MetricsManager
-│   ├── message/               # EventEnvelope, topic(), headers
-│   ├── __tests__/
-│   │   ├── helpers.ts
-│   │   ├── consumer/          # consumer, batch, retry, dedup, TTL, DLQ replay, …
-│   │   ├── producer/          # producer, transactions, schema, topic
-│   │   ├── admin/             # admin, consumer lag
-│   │   └── infra/             # circuit breaker, errors, instrumentation, OTel, metrics
-│   └── types.ts, errors.ts, …
-├── nest/                      # NestJS adapter — Module, Explorer, decorators, health
-├── testing/                   # Testing utilities — mock client, testcontainer wrapper
-├── core.ts                    # Standalone entrypoint (@drarzter/kafka-client/core)
-├── otel.ts                    # OpenTelemetry entrypoint (@drarzter/kafka-client/otel)
-├── testing.ts                 # Testing entrypoint (@drarzter/kafka-client/testing)
-└── index.ts                   # Full entrypoint — core + NestJS adapter
+│   │   ├── index.ts                 # KafkaClient class — public API, producer/consumer lifecycle,
+│   │   │                            #   Lamport clock, ALS correlation ID, graceful shutdown,
+│   │   │                            #   Lamport clock recovery (clockRecovery option)
+│   │   │
+│   │   ├── admin/
+│   │   │   └── ops.ts               # AdminOps: listConsumerGroups(), describeTopics(),
+│   │   │                            #   deleteRecords(), resetOffsets(), seekToOffset(),
+│   │   │                            #   seekToTimestamp(), getConsumerLag(), ensureTopic()
+│   │   │
+│   │   ├── producer/
+│   │   │   └── ops.ts               # buildPayload() — JSON serialise + schema.parse();
+│   │   │                            #   sendMessage / sendBatch / transaction / sendTombstone;
+│   │   │                            #   schema registry lookup for strictSchemas mode
+│   │   │
+│   │   ├── consumer/
+│   │   │   ├── ops.ts               # setupConsumer() — librdkafka Consumer factory, rebalance
+│   │   │   │                        #   hooks, subscribe with retries, autoCommit config;
+│   │   │   │                        #   startConsumer() / startBatchConsumer() orchestration
+│   │   │   ├── handler.ts           # handleEachMessage() / handleEachBatch() — top-level
+│   │   │   │                        #   eachMessage/eachBatch callbacks wired to pipeline;
+│   │   │   │                        #   EOS main-consumer context for retryTopics mode
+│   │   │   ├── pipeline.ts          # executeWithRetry() — dedup → TTL → interceptors →
+│   │   │   │                        #   handler → retry/DLQ/lost; sendToDlq(); sendToRetryTopic()
+│   │   │   ├── retry-topic.ts       # startRetryTopicConsumers() — spins up N level consumers;
+│   │   │   │                        #   startLevelConsumer() — pause/sleep/resume per partition;
+│   │   │   │                        #   EOS routing via sendOffsetsToTransaction
+│   │   │   ├── subscribe-retry.ts   # subscribeWithRetry() — retries consumer.subscribe() when
+│   │   │   │                        #   topic doesn't exist yet (subscribeRetry option)
+│   │   │   ├── dlq-replay.ts        # replayDlq() — temp consumer reads DLQ up to high-watermark,
+│   │   │   │                        #   strips x-dlq-* headers, re-publishes to original topic
+│   │   │   └── queue.ts             # AsyncQueue — bounded async iterator used by consume();
+│   │   │                            #   backpressure via queueHighWaterMark (pause/resume)
+│   │   │
+│   │   └── infra/
+│   │       ├── circuit-breaker.ts   # CircuitBreakerManager — per groupId:topic:partition state
+│   │       │                        #   machine (CLOSED → OPEN → HALF_OPEN); sliding failure window
+│   │       ├── metrics-manager.ts   # MetricsManager — in-process counters (processed / retry /
+│   │       │                        #   dlq / dedup) per topic; getMetrics() / resetMetrics()
+│   │       └── inflight-tracker.ts  # InFlightTracker — tracks running handlers for graceful
+│   │                                #   shutdown drain (disconnect waits for all to settle)
+│   │
+│   └── __tests__/                   # Unit tests — mocked @confluentinc/kafka-javascript
+│       ├── helpers.ts               # buildMockMessage(), mock setup, spy exports (mockSend, …)
+│       ├── consumer.spec.ts         # Legacy top-level consumer tests
+│       ├── consumer/
+│       │   ├── consumer.spec.ts          # startConsumer() core behaviour
+│       │   ├── batch-consumer.spec.ts    # startBatchConsumer(), BatchMeta, autoCommit
+│       │   ├── consumer-groups.spec.ts   # Multiple groupId, eachMessage/eachBatch conflict guard
+│       │   ├── consumer-handle.spec.ts   # ConsumerHandle.stop()
+│       │   ├── consume-iterator.spec.ts  # consume() iterator, backpressure, break/return
+│       │   ├── retry.spec.ts             # In-process retry, backoff, maxRetries
+│       │   ├── retry-topic.spec.ts       # Retry topic chain, EOS routing, level consumers
+│       │   ├── deduplication.spec.ts     # Lamport clock dedup, strategies (drop/dlq/topic)
+│       │   ├── interceptors.spec.ts      # ConsumerInterceptor before/after/onError hooks
+│       │   ├── dlq-replay.spec.ts        # replayDlq(), dryRun, filter, targetTopic
+│       │   ├── ttl.spec.ts               # messageTtlMs, onTtlExpired, TTL→DLQ routing
+│       │   ├── message-lost.spec.ts      # onMessageLost — handler error, validation, DLQ failure
+│       │   ├── handler-timeout.spec.ts   # handlerTimeoutMs warning
+│       │   └── rebalance.spec.ts         # onRebalance assign/revoke callbacks
+│       ├── producer/
+│       │   ├── producer.spec.ts          # sendMessage(), sendBatch(), sendTombstone(), compression
+│       │   ├── transaction.spec.ts       # transaction(), tx.send(), tx.sendBatch(), rollback
+│       │   ├── schema.spec.ts            # Schema validation on send/consume, strictSchemas
+│       │   └── topic.spec.ts             # topic() descriptor, TopicsFrom, schema registry
+│       ├── admin/
+│       │   ├── admin.spec.ts             # listConsumerGroups(), describeTopics(), deleteRecords(),
+│       │   │                             #   resetOffsets(), seekToOffset(), seekToTimestamp()
+│       │   └── consumer-lag.spec.ts      # getConsumerLag()
+│       └── infra/
+│           ├── circuit-breaker.spec.ts       # CircuitBreaker state machine, getCircuitState()
+│           ├── errors.spec.ts                # Error class hierarchy and properties
+│           ├── instrumentation.spec.ts       # KafkaInstrumentation hooks, wrap/cleanup composition
+│           ├── otel.spec.ts                  # otelInstrumentation(), traceparent propagation
+│           ├── metrics-counters.spec.ts      # getMetrics(), resetMetrics(), per-topic counters
+│           └── metrics-observability.spec.ts # onMessage/onRetry/onDlq/onDuplicate hooks
+│
+├── nest/                            # NestJS adapter — depends on @nestjs/common, reflect-metadata
+│   ├── kafka.module.ts              # KafkaModule.register() / registerAsync(); DynamicModule,
+│   │                                #   isGlobal, named clients; onModuleInit / onModuleDestroy
+│   ├── kafka.explorer.ts            # Auto-discovers @SubscribeTo() methods across all providers
+│   │                                #   at startup and calls startConsumer / startBatchConsumer
+│   ├── kafka.decorator.ts           # @SubscribeTo(topic, options) method decorator;
+│   │                                #   @InjectKafkaClient(name?) parameter decorator
+│   ├── kafka.health.ts              # KafkaHealthIndicator.check() — wraps kafka.checkStatus()
+│   ├── kafka.constants.ts           # DI token constants (KAFKA_CLIENT, KAFKA_OPTIONS)
+│   └── __tests__/
+│       ├── kafka.decorator.spec.ts  # @SubscribeTo / @InjectKafkaClient metadata
+│       ├── kafka.explorer.spec.ts   # Explorer discovery and subscription wiring
+│       └── kafka.health.spec.ts     # KafkaHealthIndicator up/down responses
+│
+├── testing/                         # Testing utilities — no runtime Kafka deps
+│   ├── index.ts                     # Re-exports createMockKafkaClient, KafkaTestContainer
+│   ├── mock-client.ts               # createMockKafkaClient<T>() — jest.fn() on every
+│   │                                #   IKafkaClient method with sensible defaults
+│   ├── test-container.ts            # KafkaTestContainer — thin @testcontainers/kafka wrapper;
+│   │                                #   transaction coordinator warmup, topic pre-creation
+│   └── __tests__/
+│       ├── mock-client.spec.ts      # Mock client method stubs and overrides
+│       └── test-container.spec.ts   # Container start/stop lifecycle
+│
+├── integration/                     # Integration tests — require Docker (testcontainers)
+│   ├── global-setup.ts              # Start shared Kafka container before all suites
+│   ├── global-teardown.ts           # Stop container after all suites
+│   ├── helpers.ts                   # createClient(), waitForMessages(), unique topic names
+│   ├── basic.integration.spec.ts              # Send/receive, headers, batch, fromBeginning
+│   ├── consumer.integration.spec.ts           # startConsumer(), pause/resume, stopConsumer()
+│   ├── transaction.integration.spec.ts        # Atomic sends, rollback on error
+│   ├── retry.integration.spec.ts              # In-process retry, retryTopics chain, DLQ
+│   ├── deduplication.integration.spec.ts      # Lamport clock dedup with real broker
+│   ├── consumer-lag.integration.spec.ts       # getConsumerLag() against real offsets
+│   ├── consumer-handle.integration.spec.ts    # ConsumerHandle.stop() lifecycle
+│   ├── graceful-shutdown.integration.spec.ts  # disconnect() drains in-flight handlers
+│   ├── schema.integration.spec.ts             # Schema validation send+consume round-trip
+│   ├── otel.integration.spec.ts               # OpenTelemetry span propagation end-to-end
+│   └── chaos.integration.spec.ts              # Fault injection — broker restarts, rebalances
+│
+└── __mocks__/
+    └── @confluentinc/
+        └── kafka-javascript.ts      # Manual Jest mock — Kafka, Producer, Consumer stubs;
+                                     #   mockSend, mockTxSend, mockCommit, mockSeek, …
 ```
 
 All exported types and methods have JSDoc comments — your IDE will show inline docs and autocomplete.

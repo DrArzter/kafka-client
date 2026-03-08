@@ -38,11 +38,14 @@ const mockConsumerResume = jest.fn();
 const mockCommitOffsets = jest.fn().mockResolvedValue(undefined);
 const mockAssignment = jest.fn().mockReturnValue([]);
 
+const mockSeek = jest.fn();
+
 const mockConsumer = {
   connect: jest.fn().mockResolvedValue(undefined),
   disconnect: jest.fn().mockResolvedValue(undefined),
   subscribe: mockSubscribe,
   run: mockRun,
+  seek: mockSeek,
   pause: mockConsumerPause,
   resume: mockConsumerResume,
   commitOffsets: mockCommitOffsets,
@@ -112,6 +115,7 @@ export {
   mockDisconnect,
   mockSubscribe,
   mockRun,
+  mockSeek,
   mockListTopics,
   mockCreateTopics,
   mockFetchOffsets,

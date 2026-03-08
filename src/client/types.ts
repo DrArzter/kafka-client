@@ -883,6 +883,20 @@ export interface KafkaClientOptions {
     type: "assign" | "revoke",
     partitions: Array<{ topic: string; partition: number }>,
   ) => void;
+  /**
+   * Recover the Lamport clock from the last message in the given topics on `connectProducer()`.
+   *
+   * On startup the producer creates a short-lived consumer, seeks each partition to its
+   * last message (`highWatermark − 1`), reads the `x-lamport-clock` header, then
+   * initialises `_lamportClock` to the maximum value found. This guarantees monotonic
+   * clock values across restarts without an external store.
+   *
+   * Topics that do not exist or are empty are silently skipped.
+   */
+  clockRecovery?: {
+    /** Topic names to scan for the highest Lamport clock. */
+    topics: string[];
+  };
 }
 
 /** Options for consumer subscribe retry when topic doesn't exist yet. */
