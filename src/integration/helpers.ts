@@ -88,11 +88,15 @@ export function getBrokers(): string[] {
 
 // ── Factory ─────────────────────────────────────────────────────────
 
-export function createClient(name: string): KafkaClient<TestTopics> {
+export function createClient(
+  name: string,
+  options?: import("../client/kafka.client").KafkaClientOptions,
+): KafkaClient<TestTopics> {
   return new KafkaClient<TestTopics>(
     `integration-${name}`,
     `group-${name}-${Date.now()}`,
     getBrokers(),
+    options,
   );
 }
 

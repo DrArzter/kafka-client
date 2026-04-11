@@ -51,10 +51,31 @@ export function setupMessage() {
   });
 }
 
-export function createClient() {
+/** Returns a fully-mocked logger whose methods are jest.fn(). */
+export function makeTestLogger() {
+  return {
+    log: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+    debug: jest.fn(),
+  };
+}
+
+export function createClient(
+  options?: import("../kafka.client").KafkaClientOptions,
+) {
   return new KafkaClient<TestTopicMap>("test-client", "test-group", [
     "localhost:9092",
-  ]);
+  ], options);
+}
+
+/** Mark a consumer group as running (for testing guard clauses). */
+export function setRunningConsumer(
+  client: KafkaClient<TestTopicMap>,
+  groupId: string,
+  mode: "eachMessage" | "eachBatch" = "eachMessage",
+) {
+  (client as any).ctx.runningConsumers.set(groupId, mode);
 }
 
 export {
@@ -85,7 +106,7 @@ export {
 };
 
 export { KafkaClient } from "../kafka.client";
-export type { MessageLostContext } from "../kafka.client";
+export type { MessageLostContext, KafkaClientOptions } from "../kafka.client";
 export { topic } from "../message/topic";
 export type { SchemaLike } from "../message/topic";
 export { KafkaRetryExhaustedError, KafkaValidationError } from "../errors";

@@ -1,6 +1,7 @@
 import {
   TestTopicMap,
   createClient,
+  makeTestLogger,
   mockRun,
   mockFetchTopicOffsets,
   mockConsumer,
@@ -246,8 +247,8 @@ describe("KafkaClient — readSnapshot", () => {
     mockFetchTopicOffsets.mockResolvedValueOnce([
       { partition: 0, low: "0", high: "2" },
     ]);
-    const warnSpy = jest.fn();
-    (client as any).logger.warn = warnSpy;
+    const logger = makeTestLogger();
+    const localClient = createClient({ logger });
 
     mockRun.mockImplementation(async ({ eachMessage }: any) => {
       // Invalid JSON
@@ -267,9 +268,9 @@ describe("KafkaClient — readSnapshot", () => {
       );
     });
 
-    const result = await client.readSnapshot("test.topic");
+    const result = await localClient.readSnapshot("test.topic");
 
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("skipping"));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("skipping"));
     expect(result.get("k")?.payload).toEqual({ id: "ok" });
   });
 
@@ -286,14 +287,14 @@ describe("KafkaClient — readSnapshot", () => {
       },
     };
 
-    const warnSpy = jest.fn();
-    (client as any).logger.warn = warnSpy;
+    const logger = makeTestLogger();
+    const localClient = createClient({ logger });
 
-    const result = await client.readSnapshot("test.topic", { schema });
+    const result = await localClient.readSnapshot("test.topic", { schema });
 
     expect(result.has("order-1")).toBe(true);
     expect(result.has("order-2")).toBe(false);
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("skipping"));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("skipping"));
   });
 
   it("disconnects the temp consumer after reading", async () => {

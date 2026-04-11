@@ -42,19 +42,25 @@ describe("Integration — Chaos: rebalance", () => {
     };
 
     // Both consumers join the same group — Kafka will assign one partition each
-    await consumerA.startConsumer([TOPIC], handler as any, {
+    const handleA = await consumerA.startConsumer([TOPIC], handler as any, {
       groupId,
       fromBeginning: false,
       autoCommit: true,
     });
-    await consumerB.startConsumer([TOPIC], handler as any, {
+    const handleB = await consumerB.startConsumer([TOPIC], handler as any, {
       groupId,
       fromBeginning: false,
       autoCommit: true,
     });
 
-    // Give both consumers time to join and rebalance
-    await new Promise((r) => setTimeout(r, 8_000));
+    // handle.ready() fires on the first partition assignment per consumer, but
+    // cooperative-sticky rebalancing between two peers in the same group goes
+    // through multiple JoinGroup/SyncGroup rounds that can take several seconds
+    // inside Docker/Testcontainers. A fixed sleep is appropriate here because
+    // this test is explicitly about multi-consumer rebalance behaviour — waiting
+    // for a stable group, not just the first assign event.
+    await Promise.all([handleA.ready(), handleB.ready()]); // join the group
+    await new Promise((r) => setTimeout(r, 3_000));        // let rebalance stabilise
 
     // Send first batch — both consumers should share the load
     for (let i = 1; i <= 6; i++) {
@@ -105,7 +111,7 @@ describe("Integration — Chaos: rebalance", () => {
     const { messages: messagesB, promise: promiseB } =
       waitForMessages<TestTopics[typeof TOPIC]>(1);
 
-    await client.startConsumer(
+    const handleA = await client.startConsumer(
       [TOPIC],
       async (env) => {
         messagesA.push(env.payload);
@@ -113,7 +119,7 @@ describe("Integration — Chaos: rebalance", () => {
       { groupId: groupA, fromBeginning: false },
     );
 
-    await client.startConsumer(
+    const handleB = await client.startConsumer(
       [TOPIC],
       async (env) => {
         messagesB.push(env.payload);
@@ -121,7 +127,7 @@ describe("Integration — Chaos: rebalance", () => {
       { groupId: groupB, fromBeginning: false },
     );
 
-    await new Promise((r) => setTimeout(r, 6_000));
+    await Promise.all([handleA.ready(), handleB.ready()]);
 
     await client.sendMessage(TOPIC, { seq: 100 });
     await client.sendMessage(TOPIC, { seq: 101 });
@@ -182,6 +188,7 @@ describe("Integration — Batch consumer retryTopics", () => {
     );
 
     // Batch consumer with retryTopics: true — always fails
+    // (fromBeginning: true so no warmup wait needed)
     await client.startBatchConsumer(
       [TOPIC],
       async () => {
@@ -229,7 +236,7 @@ describe("Integration — Batch consumer retryTopics", () => {
     await client.connectProducer();
 
     const received: any[] = [];
-    await client.startBatchConsumer(
+    const batchHandle = await client.startBatchConsumer(
       [TOPIC],
       async (envelopes) => {
         for (const env of envelopes) received.push(env.payload);
@@ -241,8 +248,11 @@ describe("Integration — Batch consumer retryTopics", () => {
       },
     );
 
-    // Wait for consumer + companion retry consumers to join
-    await new Promise((r) => setTimeout(r, 8_000));
+    // Wait for the main batch consumer to receive partition assignment.
+    // Companion retry consumers are started in parallel by launchRetryChain;
+    // since the test verifies successful handling (no retries), only the main
+    // consumer needs to be ready before the message is sent.
+    await batchHandle.ready();
 
     await client.sendMessage(TOPIC, { value: "batch-success" });
 
@@ -350,7 +360,7 @@ describe("Integration — Retry topic chain (retryTopics: true)", () => {
 
     const { messages, promise } = waitForMessages<TestTopics[typeof TOPIC]>(1);
 
-    await client.startConsumer(
+    const successHandle = await client.startConsumer(
       [TOPIC],
       async (env) => {
         messages.push(env.payload);
@@ -365,9 +375,9 @@ describe("Integration — Retry topic chain (retryTopics: true)", () => {
 
     // fromBeginning: false — consumer must be fully joined before the message is sent,
     // otherwise librdkafka sets auto.offset.reset = latest *after* the message is written
-    // and skips it. Wait for both the main consumer and the internal retry consumer to
-    // complete their group joins.
-    await new Promise((r) => setTimeout(r, 5_000));
+    // and skips it. The test verifies successful handling, so only the main consumer
+    // needs to be ready (retry companions are never triggered).
+    await successHandle.ready();
 
     await client.sendMessage(TOPIC, { value: "success" });
     await promise;

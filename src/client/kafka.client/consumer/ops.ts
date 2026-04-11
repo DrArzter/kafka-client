@@ -1,17 +1,15 @@
-import { KafkaJS } from "@confluentinc/kafka-javascript";
-type Consumer = KafkaJS.Consumer;
-type Kafka = KafkaJS.Kafka;
+import type { IConsumer, KafkaTransport } from "../../transport";
 import type { SchemaLike } from "../../message/topic";
 import type { KafkaClientOptions, KafkaLogger } from "../../types";
 import { resolveTopicName } from "../producer/ops";
 
 export type ConsumerOpsDeps = {
-  consumers: Map<string, Consumer>;
+  consumers: Map<string, IConsumer>;
   consumerCreationOptions: Map<
     string,
     { fromBeginning: boolean; autoCommit: boolean }
   >;
-  kafka: Kafka;
+  transport: KafkaTransport;
   onRebalance: KafkaClientOptions["onRebalance"];
   logger: KafkaLogger;
 };
@@ -30,7 +28,7 @@ export type ConsumerOpsDeps = {
  * @param groupId Kafka consumer group ID.
  * @param fromBeginning When `true`, the group starts from the earliest available offset.
  * @param autoCommit When `true`, offsets are committed automatically. Set to `false` for manual EOS commits.
- * @param deps Shared client dependencies (consumer map, Kafka instance, logger, …).
+ * @param deps Shared client dependencies (consumer map, transport, logger, …).
  * @param partitionAssigner Assignment strategy — `'cooperative-sticky'` (default), `'roundrobin'`, or `'range'`.
  * @returns The consumer instance for the group (existing or newly created).
  */
@@ -40,8 +38,9 @@ export function getOrCreateConsumer(
   autoCommit: boolean,
   deps: ConsumerOpsDeps,
   partitionAssigner?: "roundrobin" | "range" | "cooperative-sticky",
-): Consumer {
-  const { consumers, consumerCreationOptions, kafka, onRebalance, logger } =
+  onFirstAssignment?: () => void,
+): IConsumer {
+  const { consumers, consumerCreationOptions, transport, onRebalance, logger } =
     deps;
 
   if (consumers.has(groupId)) {
@@ -57,46 +56,75 @@ export function getOrCreateConsumer(
           `Use a different groupId to apply different options.`,
       );
     }
+    // Consumer already exists — treat as immediately ready (assignment already happened)
+    onFirstAssignment?.();
     return consumers.get(groupId)!;
   }
 
   consumerCreationOptions.set(groupId, { fromBeginning, autoCommit });
 
-  // Default to cooperative-sticky: minimal partition movement during rebalances.
-  // This is especially important for horizontal scaling — only the partitions that
-  // actually need to be reassigned are moved, avoiding a full stop-the-world rebalance.
-  const assigners: KafkaJS.PartitionAssigners[] = [
-    partitionAssigner === "roundrobin"
-      ? KafkaJS.PartitionAssigners.roundRobin
-      : partitionAssigner === "range"
-        ? KafkaJS.PartitionAssigners.range
-        : KafkaJS.PartitionAssigners.cooperativeSticky,
-  ];
-
-  const config: Parameters<typeof kafka.consumer>[0] = {
-    kafkaJS: { groupId, fromBeginning, autoCommit, partitionAssigners: assigners },
+  // Debounced assignment resolver for handle.ready().
+  //
+  // Rather than resolving on the *first* assign event, we debounce: the promise
+  // resolves SETTLE_MS after the *last* assign event with no subsequent assign.
+  // This correctly handles multi-consumer groups where the initial solo assignment
+  // is immediately followed by a rebalance when peers join — we wait until the
+  // group is stable.
+  //
+  // When fromBeginning is false (auto.offset.reset = latest), librdkafka fires
+  // ERR__ASSIGN_PARTITIONS BEFORE completing the async broker round-trip that
+  // establishes the initial fetch position. The settle window also covers this
+  // offset fetch so messages sent right after ready() resolves are not missed.
+  //
+  // fromBeginning: true doesn't need a settle window — seeks to offset 0
+  // happen synchronously and the consumer catches up from the beginning anyway.
+  // Debounced readiness: resolves SETTLE_MS after the last rebalance event
+  // (assign OR revoke) with no subsequent event.  We reset on revoke too because
+  // in cooperative-sticky rebalancing a REVOKE fires mid-protocol (e.g. ConsumerA
+  // loses one partition when a peer joins) and the group isn't stable until the
+  // revoke has settled and peers have received their assigns.  We guard against
+  // firing before any "assign" has been seen so the promise never resolves on a
+  // pure-revoke cycle.
+  //
+  // fromBeginning: false needs the settle window so librdkafka can complete the
+  // async broker round-trip that fetches the initial "latest" offset after each
+  // assign.  fromBeginning: true doesn't need it — seeks to offset 0 happen
+  // synchronously and the consumer will always catch up from the beginning.
+  const SETTLE_MS = fromBeginning ? 0 : 500;
+  let hasAssignment = false;
+  let settleTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleSettle = () => {
+    if (!hasAssignment) return;
+    if (settleTimer) clearTimeout(settleTimer);
+    settleTimer = setTimeout(() => {
+      settleTimer = undefined;
+      onFirstAssignment?.();
+    }, SETTLE_MS);
+  };
+  // Thin wrapper used at the call-site below — keeps the old name readable.
+  const fireOnAssignment = () => {
+    hasAssignment = true;
+    scheduleSettle();
   };
 
-  if (onRebalance) {
-    const cb = onRebalance;
-    // rebalance_cb is called by librdkafka on every partition assign/revoke.
-    // err.code -175 = ERR__ASSIGN_PARTITIONS, -174 = ERR__REVOKE_PARTITIONS.
-    // The library handles the actual assign/unassign in its finally block regardless
-    // of what this callback does, so we only need it for the side-effect notification.
-    (config as any)["rebalance_cb"] = (err: any, assignment: any[]) => {
-      const type = err.code === -175 ? "assign" : "revoke";
-      try {
-        cb(
-          type,
-          assignment.map((p) => ({ topic: p.topic, partition: p.partition })),
-        );
-      } catch (e) {
-        logger.warn(`onRebalance callback threw: ${(e as Error).message}`);
+  const consumer = transport.consumer({
+    groupId,
+    fromBeginning,
+    autoCommit,
+    partitionAssigner: partitionAssigner ?? "cooperative-sticky",
+    onRebalance: (type, assignments) => {
+      if (type === "assign") fireOnAssignment();
+      else if (type === "revoke") scheduleSettle(); // reset timer mid-rebalance
+      if (onRebalance) {
+        try {
+          onRebalance(type, assignments);
+        } catch (e) {
+          logger.warn(`onRebalance callback threw: ${(e as Error).message}`);
+        }
       }
-    };
-  }
+    },
+  });
 
-  const consumer = kafka.consumer(config);
   consumers.set(groupId, consumer);
   return consumer;
 }

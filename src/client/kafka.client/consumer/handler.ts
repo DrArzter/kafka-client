@@ -1,6 +1,6 @@
-import { KafkaJS } from "@confluentinc/kafka-javascript";
-type Producer = KafkaJS.Producer;
-type Consumer = KafkaJS.Consumer;
+import type { IProducer, IConsumer } from "../../transport";
+type Producer = IProducer;
+type Consumer = IConsumer;
 import {
   decodeHeaders,
   extractEnvelope,

@@ -64,6 +64,7 @@ const mockFetchTopicMetadata = jest
   .fn()
   .mockResolvedValue({ topics: [] });
 const mockDeleteTopicRecords = jest.fn().mockResolvedValue([]);
+const mockDeleteGroups = jest.fn().mockResolvedValue([]);
 
 const mockAdmin = {
   connect: jest.fn().mockResolvedValue(undefined),
@@ -77,6 +78,7 @@ const mockAdmin = {
   listGroups: mockListGroups,
   fetchTopicMetadata: mockFetchTopicMetadata,
   deleteTopicRecords: mockDeleteTopicRecords,
+  deleteGroups: mockDeleteGroups,
 };
 
 const Kafka = jest.fn().mockImplementation(() => ({
@@ -125,6 +127,7 @@ export {
   mockListGroups,
   mockFetchTopicMetadata,
   mockDeleteTopicRecords,
+  mockDeleteGroups,
   mockTransaction,
   mockTxSend,
   mockTxCommit,

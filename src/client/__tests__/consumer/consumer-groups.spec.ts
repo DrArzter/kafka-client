@@ -37,12 +37,12 @@ describe("KafkaClient — Consumer Groups", () => {
       const kafkaInstance = (require("@confluentinc/kafka-javascript") as any)
         .KafkaJS.Kafka.mock.results[0].value;
       expect(kafkaInstance.consumer).toHaveBeenCalledTimes(2);
-      expect(kafkaInstance.consumer).toHaveBeenCalledWith({
-        kafkaJS: { groupId: "group-a", fromBeginning: false, autoCommit: true, partitionAssigners: ["cooperative-sticky"] },
-      });
-      expect(kafkaInstance.consumer).toHaveBeenCalledWith({
-        kafkaJS: { groupId: "group-b", fromBeginning: false, autoCommit: true, partitionAssigners: ["cooperative-sticky"] },
-      });
+      expect(kafkaInstance.consumer).toHaveBeenCalledWith(
+        expect.objectContaining({ kafkaJS: expect.objectContaining({ groupId: "group-a", fromBeginning: false, autoCommit: true, partitionAssigners: ["cooperative-sticky"] }) }),
+      );
+      expect(kafkaInstance.consumer).toHaveBeenCalledWith(
+        expect.objectContaining({ kafkaJS: expect.objectContaining({ groupId: "group-b", fromBeginning: false, autoCommit: true, partitionAssigners: ["cooperative-sticky"] }) }),
+      );
     });
 
     it("should throw when startConsumer is called twice with the same groupId", async () => {
@@ -62,14 +62,16 @@ describe("KafkaClient — Consumer Groups", () => {
 
       const kafkaInstance = (require("@confluentinc/kafka-javascript") as any)
         .KafkaJS.Kafka.mock.results[0].value;
-      expect(kafkaInstance.consumer).toHaveBeenCalledWith({
-        kafkaJS: {
-          groupId: "test-group",
-          fromBeginning: false,
-          autoCommit: true,
-          partitionAssigners: ["cooperative-sticky"],
-        },
-      });
+      expect(kafkaInstance.consumer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kafkaJS: expect.objectContaining({
+            groupId: "test-group",
+            fromBeginning: false,
+            autoCommit: true,
+            partitionAssigners: ["cooperative-sticky"],
+          }),
+        }),
+      );
     });
 
     it("should disconnect all consumers on disconnect", async () => {
@@ -98,14 +100,16 @@ describe("KafkaClient — Consumer Groups", () => {
 
       const kafkaInstance = (require("@confluentinc/kafka-javascript") as any)
         .KafkaJS.Kafka.mock.results[0].value;
-      expect(kafkaInstance.consumer).toHaveBeenCalledWith({
-        kafkaJS: {
-          groupId: "batch-group",
-          fromBeginning: false,
-          autoCommit: true,
-          partitionAssigners: ["cooperative-sticky"],
-        },
-      });
+      expect(kafkaInstance.consumer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kafkaJS: expect.objectContaining({
+            groupId: "batch-group",
+            fromBeginning: false,
+            autoCommit: true,
+            partitionAssigners: ["cooperative-sticky"],
+          }),
+        }),
+      );
     });
   });
 

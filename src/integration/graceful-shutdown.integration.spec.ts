@@ -11,7 +11,7 @@ describe("Integration — Graceful shutdown with drain", () => {
     let handlerCompleted = false;
     let handlerStarted = false;
 
-    await client.startConsumer(
+    const handle = await client.startConsumer(
       [TOPIC],
       async () => {
         handlerStarted = true;
@@ -22,8 +22,8 @@ describe("Integration — Graceful shutdown with drain", () => {
       { fromBeginning: false },
     );
 
-    // Wait for the consumer to join the group
-    await new Promise((r) => setTimeout(r, 5_000));
+    // Wait for the consumer to join the group and receive partition assignment
+    await handle.ready();
 
     await client.sendMessage(TOPIC, { seq: 1 });
 
@@ -67,19 +67,20 @@ describe("Integration — Graceful shutdown with drain", () => {
     const TOPIC = "test.graceful" satisfies keyof TestTopics;
 
     const warnings: string[] = [];
-    const client = createClient("graceful-timeout");
-    // Inject a custom logger to capture warnings
-    (client as any).logger = {
-      log: () => {},
-      warn: (msg: string) => warnings.push(msg),
-      error: () => {},
-    };
+    const client = createClient("graceful-timeout", {
+      logger: {
+        log: () => {},
+        warn: (msg: string) => warnings.push(msg),
+        error: () => {},
+        debug: () => {},
+      },
+    });
 
     await client.connectProducer();
 
     let handlerStarted = false;
 
-    await client.startConsumer(
+    const handle = await client.startConsumer(
       [TOPIC],
       async () => {
         handlerStarted = true;
@@ -89,7 +90,7 @@ describe("Integration — Graceful shutdown with drain", () => {
       { fromBeginning: false },
     );
 
-    await new Promise((r) => setTimeout(r, 5_000));
+    await handle.ready();
 
     await client.sendMessage(TOPIC, { seq: 2 });
 

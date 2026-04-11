@@ -1,6 +1,6 @@
-import { KafkaJS } from "@confluentinc/kafka-javascript";
-type Consumer = KafkaJS.Consumer;
-type Producer = KafkaJS.Producer;
+import type { IConsumer, IProducer } from "../../transport";
+type Consumer = IConsumer;
+type Producer = IProducer;
 import {
   decodeHeaders,
   extractEnvelope,
@@ -57,6 +57,12 @@ export type RetryTopicDeps = {
   runningConsumers: Map<string, "eachMessage" | "eachBatch">;
   /** Factory that creates and connects a transactional producer for EOS routing. */
   createRetryTxProducer: (transactionalId: string) => Promise<Producer>;
+  /**
+   * Called immediately after each retry level consumer successfully starts and
+   * receives partition assignments. Allows the caller to register the group ID
+   * incrementally so partial startup failures still leave started consumers tracked.
+   */
+  onLevelStarted?: (groupId: string) => void;
 };
 
 /**
@@ -373,6 +379,11 @@ async function startLevelConsumer(
     assignmentTimeoutMs,
   );
 
+  // Notify the caller that this level is fully started so it can be tracked
+  // immediately. This ensures partial failures leave already-started consumers
+  // registered and reachable by stopConsumer.
+  deps.onLevelStarted?.(levelGroupId);
+
   logger.log(
     `Retry level ${level}/${retry.maxRetries} consumer started for: ${originalTopics.join(", ")} (group: ${levelGroupId})`,
   );
@@ -407,28 +418,35 @@ export async function startRetryTopicConsumers(
   deps: RetryTopicDeps,
   assignmentTimeoutMs?: number,
 ): Promise<string[]> {
-  const levelGroupIds: string[] = [];
+  // Pre-allocate to preserve level order in the returned array.
+  const levelGroupIds = new Array<string>(retry.maxRetries);
 
-  for (let level = 1; level <= retry.maxRetries; level++) {
-    const levelTopics = originalTopics.map((t) => `${t}.retry.${level}`);
-    const levelGroupId = `${originalGroupId}-retry.${level}`;
+  // Launch all level consumers in parallel. Sequential startup was the main
+  // cause of slow NestJS onModuleInit: N levels × waitForPartitionAssignment
+  // (default 10 s each) = up to N × 10 s of blocking startup time.
+  await Promise.all(
+    Array.from({ length: retry.maxRetries }, async (_, i) => {
+      const level = i + 1;
+      const levelTopics = originalTopics.map((t) => `${t}.retry.${level}`);
+      const levelGroupId = `${originalGroupId}-retry.${level}`;
 
-    await startLevelConsumer(
-      level,
-      levelTopics,
-      levelGroupId,
-      originalTopics,
-      handleMessage,
-      retry,
-      dlq,
-      interceptors,
-      schemaMap,
-      deps,
-      assignmentTimeoutMs,
-    );
+      await startLevelConsumer(
+        level,
+        levelTopics,
+        levelGroupId,
+        originalTopics,
+        handleMessage,
+        retry,
+        dlq,
+        interceptors,
+        schemaMap,
+        deps,
+        assignmentTimeoutMs,
+      );
 
-    levelGroupIds.push(levelGroupId);
-  }
+      levelGroupIds[i] = levelGroupId;
+    }),
+  );
 
   return levelGroupIds;
 }

@@ -1,6 +1,8 @@
 import {
   TestTopicMap,
   createClient,
+  makeTestLogger,
+  setRunningConsumer,
   mockFetchOffsets,
   mockFetchTopicOffsets,
   mockRun,
@@ -181,7 +183,7 @@ describe("KafkaClient — restoreFromCheckpoint", () => {
 
   it("throws when the consumer group is still running", async () => {
     // Register a running consumer
-    (client as any).runningConsumers.set("test-group", "eachMessage");
+    setRunningConsumer(client, "test-group");
 
     await expect(
       client.restoreFromCheckpoint("test-group", "my.checkpoints"),
@@ -278,10 +280,10 @@ describe("KafkaClient — restoreFromCheckpoint", () => {
 
     setupCheckpointConsumer([oldest, newer]);
 
-    const warnSpy = jest.fn();
-    (client as any).logger.warn = warnSpy;
+    const logger = makeTestLogger();
+    const localClient = createClient({ logger });
 
-    const result = await client.restoreFromCheckpoint(
+    const result = await localClient.restoreFromCheckpoint(
       "test-group",
       "my.checkpoints",
       {
@@ -290,7 +292,7 @@ describe("KafkaClient — restoreFromCheckpoint", () => {
     );
 
     expect(result.restoredAt).toBe(oldest.savedAt);
-    expect(warnSpy).toHaveBeenCalledWith(
+    expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining("oldest available"),
     );
   });
@@ -356,15 +358,15 @@ describe("KafkaClient — restoreFromCheckpoint", () => {
       });
     });
 
-    const warnSpy = jest.fn();
-    (client as any).logger.warn = warnSpy;
+    const logger = makeTestLogger();
+    const localClient = createClient({ logger });
 
-    const result = await client.restoreFromCheckpoint(
+    const result = await localClient.restoreFromCheckpoint(
       "test-group",
       "my.checkpoints",
     );
 
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("malformed"));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("malformed"));
     expect(result.offsets).toEqual(valid.offsets);
   });
 

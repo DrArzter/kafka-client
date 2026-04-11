@@ -1,5 +1,5 @@
-import { KafkaJS } from "@confluentinc/kafka-javascript";
-type Consumer = KafkaJS.Consumer;
+import type { IConsumer } from "../../transport";
+type Consumer = IConsumer;
 import type { KafkaLogger, DlqReplayOptions } from "../../types";
 import { subscribeWithRetry } from "./subscribe-retry";
 import { decodeHeaders } from "../../message/envelope";
@@ -13,8 +13,17 @@ export type DlqReplayDeps = {
   logger: KafkaLogger;
   fetchTopicOffsets: (topic: string) => Promise<Array<{ partition: number; low: string; high: string }>>;
   send: (topic: string, messages: Array<{ value: string; headers: Record<string, string> }>) => Promise<void>;
-  createConsumer: (groupId: string) => Consumer;
-  cleanupConsumer: (consumer: Consumer, groupId: string) => void;
+  /**
+   * Create a consumer for the given group.
+   * @param groupId Consumer group ID.
+   * @param fromBeginning When `true`, `auto.offset.reset=earliest` (no committed offsets on a temp group).
+   */
+  createConsumer: (groupId: string, fromBeginning: boolean) => Consumer;
+  /**
+   * Disconnect the consumer and, when `deleteGroup` is `true`, delete the group
+   * from the broker (used for ephemeral temp groups that should not accumulate).
+   */
+  cleanupConsumer: (consumer: Consumer, groupId: string, deleteGroup: boolean) => void;
   dlqHeaderKeys: Set<string>;
 };
 
@@ -24,33 +33,52 @@ export type DlqReplayDeps = {
  * Messages are consumed from `<topic>.dlq` and re-published to `<topic>`.
  * The original topic is determined by the `x-dlq-original-topic` header.
  * The `x-dlq-*` headers are stripped before re-publishing.
+ *
+ * ### Group ID strategy (driven by `options.fromBeginning`):
+ * - `fromBeginning: true` (default) — a new ephemeral group `<topic>.dlq-replay-<ts>` is used
+ *   on every call so there are no committed offsets; reads all messages from the beginning
+ *   every time. The group is deleted from the broker after the replay finishes.
+ * - `fromBeginning: false` — a stable group `<topic>.dlq-replay` is used; committed offsets
+ *   persist between calls so only messages added since the previous call are replayed.
  */
 export async function replayDlqTopic(
   topic: string,
-  options: DlqReplayOptions = {},
   deps: DlqReplayDeps,
+  options: DlqReplayOptions = {},
 ): Promise<{ replayed: number; skipped: number }> {
   const dlqTopic = `${topic}.dlq`;
 
   const partitionOffsets = await deps.fetchTopicOffsets(dlqTopic);
-  const activePartitions = partitionOffsets.filter((p) => parseInt(p.high, 10) > 0);
+  // Only process partitions that have readable messages (high > low).
+  // Checking high > 0 is insufficient: a topic truncated by retention policy
+  // can have high > 0 but low == high (zero readable messages), causing an
+  // infinite wait when consuming up to high − 1.
+  const activePartitions = partitionOffsets.filter(
+    (p) => Number.parseInt(p.high, 10) > Number.parseInt(p.low, 10),
+  );
   if (activePartitions.length === 0) {
     deps.logger.log(`replayDlq: "${dlqTopic}" is empty — nothing to replay`);
     return { replayed: 0, skipped: 0 };
   }
 
   const highWatermarks = new Map(
-    activePartitions.map(({ partition, high }) => [partition, parseInt(high, 10)]),
+    activePartitions.map(({ partition, high }) => [partition, Number.parseInt(high, 10)]),
   );
   const processedOffsets = new Map<number, number>();
   let replayed = 0;
   let skipped = 0;
 
-  const tempGroupId = `${dlqTopic}-replay-${Date.now()}`;
+  const fromBeginning = options.fromBeginning ?? true;
+  // Ephemeral group when replaying from the beginning so no committed offsets
+  // interfere with the seek. The group is deleted after use.
+  // Stable group when replaying only new messages; committed offsets persist.
+  const groupId = fromBeginning
+    ? `${dlqTopic}-replay-${Date.now()}`
+    : `${dlqTopic}-replay`;
 
   await new Promise<void>((resolve, reject) => {
-    const consumer = deps.createConsumer(tempGroupId);
-    const cleanup = () => deps.cleanupConsumer(consumer, tempGroupId);
+    const consumer = deps.createConsumer(groupId, fromBeginning);
+    const cleanup = () => deps.cleanupConsumer(consumer, groupId, fromBeginning);
 
     consumer
       .connect()
@@ -60,7 +88,7 @@ export async function replayDlqTopic(
           eachMessage: async ({ partition, message }) => {
             if (!message.value) return;
 
-            const offset = parseInt(message.offset, 10);
+            const offset = Number.parseInt(message.offset, 10);
             processedOffsets.set(partition, offset);
 
             const headers = decodeHeaders(message.headers);

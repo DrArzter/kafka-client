@@ -1,5 +1,5 @@
-import type { KafkaJS } from "@confluentinc/kafka-javascript";
-type Producer = KafkaJS.Producer;
+import type { IProducer } from "../../transport";
+type Producer = IProducer;
 import type { EventEnvelope } from "../../message/envelope";
 import { extractEnvelope } from "../../message/envelope";
 import { KafkaRetryExhaustedError, KafkaValidationError } from "../../errors";

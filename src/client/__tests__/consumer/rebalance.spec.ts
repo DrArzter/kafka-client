@@ -154,19 +154,39 @@ describe("KafkaClient — onRebalance hook", () => {
   });
 
   describe("when onRebalance is not provided", () => {
-    it("does not add rebalance_cb to the consumer config", async () => {
+    it("still adds rebalance_cb so that handle.ready() can fire on first assignment", async () => {
       const { getConfig } = buildKafkaMockCapturingConsumerConfig();
 
       const client = new KafkaClient<TestTopicMap>(
         "no-rb-client",
         "no-rb-group",
         ["localhost:9092"],
+        // intentionally no onRebalance — ready() still needs the callback
+      );
+
+      await client.startConsumer(["test.topic"], jest.fn());
+
+      // rebalance_cb is always wired so handle.ready() can resolve on first "assign" event
+      expect(typeof getConfig().rebalance_cb).toBe("function");
+    });
+
+    it("does not call the client-level onRebalance when none was provided", async () => {
+      const { getConfig } = buildKafkaMockCapturingConsumerConfig();
+      const onRebalance = jest.fn();
+
+      // A different client WITH onRebalance — just to confirm the no-callback case is isolated
+      const client = new KafkaClient<TestTopicMap>(
+        "no-rb2-client",
+        "no-rb2-group",
+        ["localhost:9092"],
         // intentionally no onRebalance
       );
 
       await client.startConsumer(["test.topic"], jest.fn());
 
-      expect(getConfig().rebalance_cb).toBeUndefined();
+      // Trigger assign — should not throw and should not call our spy
+      expect(() => getConfig().rebalance_cb({ code: -175 }, [])).not.toThrow();
+      expect(onRebalance).not.toHaveBeenCalled();
     });
   });
 });

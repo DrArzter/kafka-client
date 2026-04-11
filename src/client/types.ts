@@ -345,6 +345,25 @@ export interface ConsumerOptions<
    * when both are set. Use this to handle TTL expiry differently per consumer group.
    */
   onTtlExpired?: (ctx: TtlExpiredContext) => void | Promise<void>;
+  /**
+   * Called when a message is silently dropped after all retries are exhausted
+   * and `dlq` is not enabled.
+   *
+   * **Per-consumer override**: takes precedence over `KafkaClientOptions.onMessageLost`
+   * when both are set. Use this for consumer-specific alerting or dead-message logging.
+   */
+  onMessageLost?: (ctx: MessageLostContext) => void | Promise<void>;
+  /**
+   * Called before each retry attempt (both in-process and retry-topic paths).
+   *
+   * **Per-consumer override**: fires in addition to any global instrumentation hooks.
+   * Use this for per-consumer retry metrics or structured logging.
+   */
+  onRetry?: (
+    envelope: EventEnvelope<any>,
+    attempt: number,
+    maxRetries: number,
+  ) => void | Promise<void>;
 }
 
 /**
@@ -542,6 +561,13 @@ export interface DlqReplayOptions {
    * @param value Raw message value (JSON string).
    */
   filter?: (headers: MessageHeaders, value: string) => boolean;
+  /**
+   * Seek to the earliest available offset before consuming, regardless of any
+   * previously committed offsets for the replay consumer group.
+   * Default: `true` — full replay of all DLQ messages on every call.
+   * Set to `false` to replay only messages added since the previous `replayDlq` call.
+   */
+  fromBeginning?: boolean;
 }
 
 /**
@@ -802,6 +828,20 @@ export interface ConsumerHandle {
   groupId: string;
   /** Stop this consumer. Equivalent to calling `client.stopConsumer(groupId)`. */
   stop(): Promise<void>;
+  /**
+   * Resolves once the consumer has received its first partition assignment from
+   * the broker (i.e. it has joined the group and is ready to receive messages).
+   *
+   * Use this in tests and startup probes instead of a fixed `setTimeout` delay:
+   *
+   * @example
+   * ```ts
+   * const handle = await kafka.startConsumer(['orders'], handler);
+   * await handle.ready(); // wait for partition assignment — no fixed sleep needed
+   * await kafka.sendMessage('orders', payload);
+   * ```
+   */
+  ready(): Promise<void>;
 }
 
 /** Result returned by `KafkaClient.checkStatus()`. */
@@ -1673,6 +1713,23 @@ export interface KafkaClientOptions {
      */
     maxWaitMs?: number;
   };
+  /**
+   * Custom transport implementation.
+   *
+   * By default `KafkaClient` uses `ConfluentTransport` which wraps
+   * `@confluentinc/kafka-javascript` (librdkafka). Inject a different
+   * `KafkaTransport` to target an alternative broker library, or to supply
+   * a deterministic fake in unit tests without mocking the confluentinc module.
+   *
+   * @example
+   * ```ts
+   * // In tests — no jest.mock() needed
+   * const kafka = new KafkaClient('svc', 'grp', [], {
+   *   transport: new FakeTransport(),
+   * });
+   * ```
+   */
+  transport?: import("./transport").KafkaTransport;
 }
 
 /**

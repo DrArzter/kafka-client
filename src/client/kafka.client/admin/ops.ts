@@ -1,5 +1,5 @@
-import { KafkaJS } from "@confluentinc/kafka-javascript";
-type Admin = KafkaJS.Admin;
+import type { IAdmin } from "../../transport";
+type Admin = IAdmin;
 import type {
   ClientId,
   ConsumerGroupSummary,
@@ -72,7 +72,7 @@ export class AdminOps {
       partition,
       offset: position === "earliest" ? low : high,
     }));
-    await (this.deps.admin as any).setOffsets({ groupId: gid, topic, partitions });
+    await this.deps.admin.setOffsets({ groupId: gid, topic, partitions });
     this.deps.logger.log(
       `Offsets reset to ${position} for group "${gid}" on topic "${topic}"`,
     );
@@ -102,7 +102,7 @@ export class AdminOps {
       byTopic.set(topic, list);
     }
     for (const [topic, partitions] of byTopic) {
-      await (this.deps.admin as any).setOffsets({ groupId: gid, topic, partitions });
+      await this.deps.admin.setOffsets({ groupId: gid, topic, partitions });
       this.deps.logger.log(
         `Offsets set for group "${gid}" on "${topic}": ${JSON.stringify(partitions)}`,
       );
@@ -139,11 +139,11 @@ export class AdminOps {
       const offsets: Array<{ partition: number; offset: string }> =
         await Promise.all(
           parts.map(async ({ partition, timestamp }) => {
-            const results = await (this.deps.admin as any).fetchTopicOffsetsByTime(
+            const results = await this.deps.admin.fetchTopicOffsetsByTimestamp(
               topic,
               timestamp,
             );
-            const found = (results as Array<{ partition: number; offset: string }>).find(
+            const found = results.find(
               (r) => r.partition === partition,
             );
             return { partition, offset: found?.offset ?? "-1" };
@@ -234,22 +234,34 @@ export class AdminOps {
    */
   public async describeTopics(topics?: string[]): Promise<TopicDescription[]> {
     await this.ensureConnected();
-    const result = await (this.deps.admin as any).fetchTopicMetadata(
+    const result = await this.deps.admin.fetchTopicMetadata(
       topics ? { topics } : undefined,
     );
-    return (result.topics as any[]).map((t: any) => ({
+    return result.topics.map((t) => ({
       name: t.name,
-      partitions: (t.partitions as any[]).map((p: any) => ({
+      partitions: t.partitions.map((p) => ({
         partition: p.partitionId ?? p.partition,
         leader: p.leader,
-        replicas: (p.replicas as any[]).map((r: any) =>
+        replicas: (p.replicas ?? []).map((r) =>
           typeof r === "number" ? r : r.nodeId,
         ),
-        isr: (p.isr as any[]).map((r: any) =>
+        isr: (p.isr ?? []).map((r) =>
           typeof r === "number" ? r : r.nodeId,
         ),
       })),
     }));
+  }
+
+  /**
+   * Delete consumer groups from the broker.
+   * Groups must be empty (no active members) before deletion.
+   * Silently skips unknown group IDs.
+   * @param groupIds Consumer group IDs to delete.
+   */
+  public async deleteGroups(groupIds: string[]): Promise<void> {
+    if (groupIds.length === 0) return;
+    await this.ensureConnected();
+    await this.deps.admin.deleteGroups(groupIds);
   }
 
   /**

@@ -961,6 +961,8 @@ Options for `sendMessage()` — the third argument:
 | `batch` | `false` | (decorator only) Use `startBatchConsumer` instead of `startConsumer` |
 | `partitionAssigner` | `'cooperative-sticky'` | Partition assignment strategy: `'cooperative-sticky'` (minimal movement on rebalance, best for horizontal scaling), `'roundrobin'` (even distribution), `'range'` (contiguous partition ranges) |
 | `onTtlExpired` | — | Per-consumer override of the client-level `onTtlExpired` callback; takes precedence when set. Receives `TtlExpiredContext` — same shape as the client-level hook |
+| `onMessageLost` | — | Per-consumer override of the client-level `onMessageLost` callback; takes precedence when set. Use for consumer-specific dead-message alerting or structured logging |
+| `onRetry` | — | Per-consumer retry callback; fires **in addition to** the built-in metrics hook (does not replace it). Same signature as `KafkaInstrumentation.onRetry` |
 | `subscribeRetry.retries` | `5` | Max attempts for `consumer.subscribe()` when topic doesn't exist yet |
 | `subscribeRetry.backoffMs` | `5000` | Delay between subscribe retry attempts (ms) |
 
@@ -1422,6 +1424,7 @@ Options:
 | `targetTopic` | `x-dlq-original-topic` header | Override the destination topic |
 | `dryRun` | `false` | Count messages without sending |
 | `filter` | — | `(headers) => boolean` — skip messages where the callback returns `false` |
+| `fromBeginning` | `true` | `true` = full replay every call; `false` = incremental (only new messages since the last call) |
 
 ```typescript
 // Dry run — see how many messages would be replayed
@@ -1434,9 +1437,12 @@ const result = await kafka.replayDlq('orders', { targetTopic: 'orders.v2' });
 const filtered = await kafka.replayDlq('orders', {
   filter: (headers) => headers['x-correlation-id'] === 'corr-123',
 });
+
+// Incremental replay — only messages added since the last call
+const incremental = await kafka.replayDlq('orders', { fromBeginning: false });
 ```
 
-`replayDlq` creates a temporary consumer group that reads the DLQ topic up to the high-watermark at the time of the call — messages published after replay starts are not included. DLQ metadata headers (`x-dlq-original-topic`, `x-dlq-error-message`, `x-dlq-error-stack`, `x-dlq-failed-at`, `x-dlq-attempt-count`) are stripped from the replayed messages; all other headers (e.g. `x-correlation-id`) are preserved.
+`replayDlq` reads the DLQ topic up to the high-watermark at the time of the call — messages published after replay starts are not included. By default (`fromBeginning: true`) an ephemeral group ID is used on each call so all messages are always replayed; the group is deleted from the broker after use. With `fromBeginning: false` a stable group ID persists committed offsets between calls, enabling incremental replay. DLQ metadata headers (`x-dlq-original-topic`, `x-dlq-error-message`, `x-dlq-error-stack`, `x-dlq-failed-at`, `x-dlq-attempt-count`) are stripped from the replayed messages; all other headers (e.g. `x-correlation-id`) are preserved.
 
 ## Read snapshot
 
@@ -1761,18 +1767,24 @@ await kafka.disconnect(10_000); // wait up to 10 s, then force disconnect
 
 ## Consumer handles
 
-`startConsumer()` and `startBatchConsumer()` return a `ConsumerHandle` instead of `void`. Use it to stop a specific consumer without needing to remember the group ID:
+`startConsumer()` and `startBatchConsumer()` return a `ConsumerHandle` instead of `void`. Use it to stop a specific consumer or wait for it to be ready:
 
 ```typescript
-const handle = await kafka.startConsumer(['orders'], handler);
+const handle = await kafka.startConsumer(['orders'], handler, { fromBeginning: false });
 
 console.log(handle.groupId); // e.g. "my-group"
+
+// Wait until Kafka has assigned at least one partition to this consumer.
+// Safe to call before sending test messages — eliminates fixed setTimeout delays.
+await handle.ready();
 
 // Later — stop only this consumer, producer stays connected
 await handle.stop();
 ```
 
 `handle.stop()` is equivalent to `kafka.stopConsumer(handle.groupId)`. Useful in lifecycle methods or when you need to conditionally stop one consumer while others keep running.
+
+`handle.ready()` resolves once the broker fires the first partition-assignment event. For `fromBeginning: false` consumers it adds a 500 ms settle window so librdkafka can complete the async `latest` offset fetch before you send; for `fromBeginning: true` consumers it resolves immediately on assignment. In unit tests with `FakeTransport`, `subscribe()` fires the assignment synchronously, so `handle.ready()` resolves in the same tick.
 
 ## onMessageLost
 

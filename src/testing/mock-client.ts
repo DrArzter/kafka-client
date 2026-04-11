@@ -94,10 +94,12 @@ export function createMockKafkaClient<T extends TopicMapConstraint<T>>(
     startConsumer: resolved({
       groupId: "mock-group",
       stop: mock().mockResolvedValue(undefined),
+      ready: mock().mockResolvedValue(undefined),
     }),
     startBatchConsumer: resolved({
       groupId: "mock-group",
       stop: mock().mockResolvedValue(undefined),
+      ready: mock().mockResolvedValue(undefined),
     }),
     stopConsumer: resolved(undefined),
     consume: returning(

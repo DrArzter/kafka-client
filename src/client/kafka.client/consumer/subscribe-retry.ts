@@ -1,9 +1,9 @@
-import type { KafkaJS } from "@confluentinc/kafka-javascript";
+import type { IConsumer } from "../../transport";
 import type { KafkaLogger, SubscribeRetryOptions } from "../../types";
 import { toError, sleep } from "./pipeline";
 
 export async function subscribeWithRetry(
-  consumer: KafkaJS.Consumer,
+  consumer: IConsumer,
   topics: (string | RegExp)[],
   logger: KafkaLogger,
   retryOpts?: SubscribeRetryOptions,

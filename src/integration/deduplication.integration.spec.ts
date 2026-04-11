@@ -1,9 +1,6 @@
 import "reflect-metadata";
 import { TestTopics, createClient, waitForMessages } from "./helpers";
 
-/** Wait for partition assignment to complete before sending messages. */
-const waitForAssignment = () => new Promise((r) => setTimeout(r, 4_000));
-
 /**
  * Integration tests for Lamport Clock deduplication.
  *
@@ -22,7 +19,7 @@ describe("Integration — Deduplication (Lamport Clock)", () => {
 
     const { messages, promise } = waitForMessages<TestTopics["test.dedup"]>(3);
 
-    await client.startConsumer(
+    const handle = await client.startConsumer(
       ["test.dedup"],
       async (envelope) => {
         messages.push(envelope.payload);
@@ -33,7 +30,7 @@ describe("Integration — Deduplication (Lamport Clock)", () => {
         deduplication: {},
       } as any,
     );
-    await waitForAssignment();
+    await handle.ready();
 
     await client.sendMessage("test.dedup", { value: "msg-1" });
     await client.sendMessage("test.dedup", { value: "msg-2" });
@@ -55,7 +52,7 @@ describe("Integration — Deduplication (Lamport Clock)", () => {
     const clocks: string[] = [];
     const { messages, promise } = waitForMessages<TestTopics["test.dedup"]>(2);
 
-    await client.startConsumer(
+    const handle = await client.startConsumer(
       ["test.dedup"],
       async (envelope) => {
         const clock = envelope.headers["x-lamport-clock"];
@@ -64,7 +61,7 @@ describe("Integration — Deduplication (Lamport Clock)", () => {
       },
       { fromBeginning: false } as any,
     );
-    await waitForAssignment();
+    await handle.ready();
 
     await client.sendMessage("test.dedup", { value: "a" });
     await client.sendMessage("test.dedup", { value: "b" });
@@ -95,7 +92,7 @@ describe("Integration — Deduplication (Lamport Clock)", () => {
     const { messages: freshMessages, promise: freshPromise } =
       waitForMessages<TestTopics["test.dedup"]>(3);
 
-    await consumerClient.startConsumer(
+    const handle = await consumerClient.startConsumer(
       ["test.dedup"],
       async (envelope) => {
         received.push(envelope.payload.value);
@@ -106,7 +103,7 @@ describe("Integration — Deduplication (Lamport Clock)", () => {
         deduplication: { strategy: "drop" },
       },
     );
-    await waitForAssignment();
+    await handle.ready();
 
     // Producer A: sends 3 messages → clocks 1, 2, 3 (all fresh)
     await producerA.sendMessage("test.dedup", { value: "A-1" });
@@ -162,7 +159,7 @@ describe("Integration — Deduplication (Lamport Clock)", () => {
       TestTopics["test.dedup.duplicates"]
     >(3, 20_000);
 
-    await consumerClient.startConsumer(
+    const handleMain = await consumerClient.startConsumer(
       ["test.dedup"],
       async (envelope) => {
         received.push(envelope.payload.value);
@@ -174,7 +171,7 @@ describe("Integration — Deduplication (Lamport Clock)", () => {
       },
     );
 
-    await dupWatcher.startConsumer(
+    const handleWatcher = await dupWatcher.startConsumer(
       ["test.dedup.duplicates"],
       async (envelope) => {
         duplicates.push(envelope.payload.value);
@@ -182,7 +179,7 @@ describe("Integration — Deduplication (Lamport Clock)", () => {
       },
       { fromBeginning: false },
     );
-    await waitForAssignment();
+    await Promise.all([handleMain.ready(), handleWatcher.ready()]);
 
     // Producer A: clocks 1, 2, 3 → all pass through
     await producerA.sendMessage("test.dedup", { value: "A-1" });
@@ -238,7 +235,7 @@ describe("Integration — Deduplication (Lamport Clock)", () => {
       TestTopics["test.dedup.dlq"]
     >(2, 20_000);
 
-    await consumerClient.startConsumer(
+    const handleMain = await consumerClient.startConsumer(
       ["test.dedup"],
       async (envelope) => {
         received.push(envelope.payload.value);
@@ -251,7 +248,7 @@ describe("Integration — Deduplication (Lamport Clock)", () => {
       },
     );
 
-    await dlqWatcher.startConsumer(
+    const handleWatcher = await dlqWatcher.startConsumer(
       ["test.dedup.dlq"],
       async (envelope) => {
         dlqPayloads.push({
@@ -262,7 +259,7 @@ describe("Integration — Deduplication (Lamport Clock)", () => {
       },
       { fromBeginning: false },
     );
-    await waitForAssignment();
+    await Promise.all([handleMain.ready(), handleWatcher.ready()]);
 
     // Producer A: clocks 1, 2 → pass through
     await producerA.sendMessage("test.dedup", { value: "A-1" });

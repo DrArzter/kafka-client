@@ -4,16 +4,43 @@
 
 ## Upcoming
 
-- **Transactional consume-produce** — `startTransactionalConsumer(topics, handler)` where the handler receives `(envelope, tx)`; the user's `tx.send(outTopic, payload)` and the source offset commit are wrapped in a single Kafka transaction, giving user-facing EOS for read-process-write pipelines; complements the existing internal EOS used by the retry topic chain
-
 ### Larger features
 
 - **Benchmarks** — compare throughput / latency: raw `@confluentinc/kafka-javascript` → `@drarzter/kafka-client` → `@nestjs/microservices` Kafka transport; quantify abstraction overhead
-- **Transport abstraction** — `KafkaTransport` interface to decouple `KafkaClient` from `@confluentinc/kafka-javascript`; swap transports without touching business code
 
 ---
 
 ## Done
+
+### 0.9.2
+
+- [x] **`handle.ready()` on `ConsumerHandle`** — `startConsumer()` and `startBatchConsumer()` now return a `ready(): Promise<void>` that resolves once the broker fires the first partition-assignment event; backed by the `rebalance_cb (ERR__ASSIGN_PARTITIONS)` path already used for `onRebalance`; for `fromBeginning: false` consumers a 500 ms debounced settle window is added so librdkafka can complete the async `latest` offset fetch — the timer resets on both `assign` and `revoke` events so it correctly handles cooperative-sticky multi-round rebalances; for `fromBeginning: true` consumers the settle is skipped (seeks to offset 0 are synchronous); `FakeConsumer.subscribe()` fires the assignment callback synchronously so `handle.ready()` resolves in the same tick in unit tests; `createMockKafkaClient` stubs include `ready: jest.fn().mockResolvedValue(undefined)`; all integration tests that previously used `await new Promise(r => setTimeout(r, 5_000))` warmup delays replaced with `await handle.ready()` / `await Promise.all([handleA.ready(), handleB.ready()])`
+
+### 0.9.1
+
+- [x] **`FakeTransport` in `@drarzter/kafka-client/testing`** — `FakeTransport` implements `KafkaTransport`; inject via `KafkaClientOptions.transport` to test producer/consumer logic without `jest.mock()`; `FakeProducer.sent` / `sentTo(topic)` capture all records; `FakeConsumer.deliver(topic, payload)` pushes a message through the `eachMessage` handler; `FakeTransaction` tracks `staged`/`committed`/`aborted` state and flushes to `FakeProducer.sent` on commit; `FakeAdmin` exposes `existingTopics`, `setOffsetsCalls`, `deletedGroups` for assertion; `FakeTransport.deliver(topic, payload)` is a convenience wrapper that finds the subscribed consumer automatically; 10 new tests in `fake-transport.spec.ts` covering: envelope headers, batch send, tombstone, isolation between clients, consumer delivery, header forwarding, `onMessageLost` (global and per-consumer override), transaction commit, transaction abort
+
+### 0.9.0
+
+- [x] **`KafkaTransport` abstraction** — `@confluentinc/kafka-javascript` is now isolated behind five interfaces in `src/client/transport.ts`: `KafkaTransport`, `IProducer`, `IConsumer`, `IAdmin`, `ITransaction`; the only concrete implementation is `ConfluentTransport` in `kafka.client/confluent-transport.ts`, which adapts the librdkafka KafkaJS-compat layer and handles all `kafkaJS: { ... }` wrapping, `rebalance_cb` wiring, and `PartitionAssigners` mapping; `KafkaClientOptions.transport` accepts a custom implementation — inject a `FakeTransport` in tests without `jest.mock()`; `KafkaClientContext` fields `kafka: KafkaJS.Kafka`, `producer: KafkaJS.Producer`, `consumers: Map<…, KafkaJS.Consumer>` are replaced by `transport: KafkaTransport`, `producer: IProducer`, `consumers: Map<…, IConsumer>`; all `as any` admin casts (`setOffsets`, `fetchTopicOffsetsByTime`, `deleteGroups`, `fetchTopicMetadata`) removed — `IAdmin` types these methods properly; `ConsumerWithAssignment` workaround removed — `IConsumer.assignment()` is now a typed method; `ConsumerOpsDeps.kafka` replaced by `ConsumerOpsDeps.transport`; `@confluentinc/kafka-javascript` import now appears only in `confluent-transport.ts` and the Jest mock
+
+### 0.8.2
+
+- [x] **God-class split** — `kafka.client/index.ts` (~2 300 lines) decomposed into focused modules: `producer/lifecycle.ts` (`connectProducer`, `disconnect`, `ensureTopic`, `createRetryTxProducer`, Lamport poller, timeout wrapper), `producer/send.ts` (`sendMessage`, `sendBatch`, `sendTombstone`, `transaction`, lag throttle), `consumer/setup.ts` (`setupConsumer`, `ensureConsumerTopics`, `messageDepsFor`, `resolveDeduplicationContext`, `makeEosMainContext`, `launchRetryChain`), `consumer/start.ts` (`startConsumer`, `startBatchConsumer`, `startTransactionalConsumer`), `consumer/stop.ts` (`stopConsumer`, `pause/resumeConsumer`, `pause/resumeTopicAllPartitions`), `consumer/snapshot.ts` (`readSnapshot`, `checkpointOffsets`, `restoreFromCheckpoint`), `consumer/window.ts` (`startWindowConsumer`), `consumer/routed.ts` (`startRoutedConsumer`); `KafkaClient` becomes a ~500-line facade over a `KafkaClientContext<T>` object; `context.ts` defines the shared state type
+- [x] **Module-scoped context type aliases** — `SnapshotCtx<T>` and `StopCtx<T>` are `Pick<KafkaClientContext<T>, ...>` aliases used as function parameter types in `snapshot.ts` and `stop.ts`; enforces that each module only touches its declared context surface and keeps the dependency boundary explicit for future contributors
+- [x] **Test DI for logger** — `makeTestLogger()` helper in `test/__tests__/helpers.ts` returns a fully-mocked `KafkaLogger`; tests that previously patched `(client as any).ctx.logger.warn` now inject the logger at construction time via `createClient({ logger })`; `setRunningConsumer()` helper replaces the remaining `(client as any).ctx.runningConsumers.set` usages, keeping internal-state access in one named place
+- [x] **Per-consumer `onMessageLost` / `onRetry` overrides** — added to `ConsumerOptions`; `onMessageLost` replaces the client-wide callback for that consumer; `onRetry` composes with the metrics hook (`notifyRetry` fires first, then the consumer-level callback); `messageDepsFor` accepts an options argument to wire the overrides
+
+### 0.8.1
+
+- [x] **Orphaned consumer groups on broker** — `readSnapshot`, `restoreFromCheckpoint`, `recoverLamportClock` now call `admin.deleteGroups([tempGroupId])` in a `finally` block after each one-shot consumer disconnects; added `AdminOps.deleteGroups()` and the corresponding Jest mock
+- [x] **`replayDlq` idempotency** — added `fromBeginning?: boolean` to `DlqReplayOptions` (default `true` = full replay every call for backward compat); `false` uses a stable group ID so committed offsets persist between calls, enabling incremental replay of only new DLQ messages; ephemeral groups (full replay) are deleted from the broker after use
+- [x] **`replayDlq` hangs on retention-truncated DLQ topics** — active-partition filter changed from `high > 0` to `high > low`; a topic truncated by retention can have `high > 0` but `low == high` (zero readable messages), which previously caused the consumer to wait forever
+- [x] **Serial retry-consumer startup** — `startRetryTopicConsumers` now launches all N level consumers in parallel via `Promise.all`; eliminates up to `N × 10 s` of sequential `waitForPartitionAssignment` blocking during NestJS `onModuleInit`
+- [x] **Orphaned companion consumers on partial retry-chain startup failure** — `companionGroupIds` is initialised to `[]` before `startRetryTopicConsumers` is called; each level registers itself immediately via an `onLevelStarted` callback in `RetryTopicDeps`; `stopConsumer` can now tear down partially-started chains
+- [x] **`enableGracefulShutdown` left process alive** — `.finally(() => process.exit(0))` added after `disconnect()` so the process always exits after draining, even when other event-loop handles remain
+- [x] **`consumer.assignment()` untyped `any` cast** — introduced `ConsumerWithAssignment` local interface extending `KafkaJS.Consumer` with an explicit `assignment()` signature; both call sites in `pauseTopicAllPartitions` / `resumeTopicAllPartitions` now cast to it instead of `as any`
+- [x] **`startWindowConsumer` shutdown flush swallows errors** — handler errors during `stop()` flush now propagate to `onMessageLost` for each buffered envelope (in addition to the existing warning log)
 
 ### 0.8.0
 
