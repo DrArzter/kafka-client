@@ -1,4 +1,4 @@
-import type { IConsumer } from "../../transport";
+import type { IConsumer } from "../../transport.interface";
 type Consumer = IConsumer;
 import type { KafkaLogger, DlqReplayOptions } from "../../types";
 import { subscribeWithRetry } from "./subscribe-retry";

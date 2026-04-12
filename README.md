@@ -2129,6 +2129,31 @@ The integration suite spins up a single-node KRaft Kafka container and tests sen
 
 Both suites run in CI on every push to `main` and on pull requests.
 
+## File naming conventions
+
+Hyphens within a multi-word name; dot separates the name from its role suffix.
+
+| Suffix | Role |
+| --- | --- |
+| `.types` | Data/option shapes — configs, options, result objects |
+| `.interface` | Contract interfaces — capability boundaries, polymorphism points |
+| `.manager` | Stateful manager class |
+| `.tracker` | Tracking/counting utility |
+| `.module` | NestJS module |
+| `.explorer` | NestJS metadata scanner |
+| `.decorator` | NestJS decorator definitions |
+| `.health` | Health indicator |
+| `.constants` | Constant values and DI tokens |
+| `.mock` | Jest/Vitest spy double |
+| `.fake` | Standalone fake implementation |
+| `.container` | Test infrastructure wrapper |
+| `.spec` | Unit test |
+| `.integration.spec` | Integration test |
+
+A suffix is added only when it carries information the name alone does not. When the filename already expresses the role — `handler.ts` is a handler, `pipeline.ts` is a pipeline, `queue.ts` is a queue — no suffix is needed.
+
+---
+
 ## Project structure
 
 ```text
@@ -2188,11 +2213,11 @@ src/
 │   │   │                            #   backpressure via queueHighWaterMark (pause/resume)
 │   │   │
 │   │   └── infra/
-│   │       ├── circuit-breaker.ts   # CircuitBreakerManager — per groupId:topic:partition state
+│   │       ├── circuit-breaker.manager.ts  # CircuitBreakerManager — per groupId:topic:partition state
 │   │       │                        #   machine (CLOSED → OPEN → HALF_OPEN); sliding failure window
-│   │       ├── metrics-manager.ts   # MetricsManager — in-process counters (processed / retry /
+│   │       ├── metrics.manager.ts          # MetricsManager — in-process counters (processed / retry /
 │   │       │                        #   dlq / dedup) per topic; getMetrics() / resetMetrics()
-│   │       └── inflight-tracker.ts  # InFlightTracker — tracks running handlers for graceful
+│   │       └── inflight.tracker.ts         # InFlightTracker — tracks running handlers for graceful
 │   │                                #   shutdown drain (disconnect waits for all to settle)
 │   │
 │   └── __tests__/                   # Unit tests — mocked @confluentinc/kafka-javascript
@@ -2252,13 +2277,13 @@ src/
 │
 ├── testing/                         # Testing utilities — no runtime Kafka deps
 │   ├── index.ts                     # Re-exports createMockKafkaClient, KafkaTestContainer
-│   ├── mock-client.ts               # createMockKafkaClient<T>() — jest.fn() on every
+│   ├── client.mock.ts               # createMockKafkaClient<T>() — jest.fn() on every
 │   │                                #   IKafkaClient method with sensible defaults
-│   ├── test-container.ts            # KafkaTestContainer — thin @testcontainers/kafka wrapper;
+│   ├── test.container.ts            # KafkaTestContainer — thin @testcontainers/kafka wrapper;
 │   │                                #   transaction coordinator warmup, topic pre-creation
 │   └── __tests__/
-│       ├── mock-client.spec.ts      # Mock client method stubs and overrides
-│       └── test-container.spec.ts   # Container start/stop lifecycle
+│       ├── client.mock.spec.ts      # Mock client method stubs and overrides
+│       └── test.container.spec.ts   # Container start/stop lifecycle
 │
 ├── integration/                     # Integration tests — require Docker (testcontainers)
 │   ├── global-setup.ts              # Start shared Kafka container before all suites

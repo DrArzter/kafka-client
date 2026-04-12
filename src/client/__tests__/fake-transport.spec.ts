@@ -7,7 +7,7 @@
  */
 
 import { KafkaClient } from "../kafka.client";
-import { FakeTransport } from "../../testing/fake-transport";
+import { FakeTransport } from "../../testing/transport.fake";
 
 // ── Topic map used in these tests ─────────────────────────────────────────────
 

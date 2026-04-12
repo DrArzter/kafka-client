@@ -19,7 +19,7 @@ import type {
   IGroupTopicOffsets,
   IGroupDescription,
   ITopicMetadata,
-} from "../transport";
+} from "../transport.interface";
 
 // ── ConfluentTransaction ──────────────────────────────────────────────────────
 

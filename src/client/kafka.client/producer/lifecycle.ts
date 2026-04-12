@@ -1,4 +1,4 @@
-import type { IProducer } from "../../transport";
+import type { IProducer } from "../../transport.interface";
 type Producer = IProducer;
 
 import type { KafkaClientContext } from "../context";

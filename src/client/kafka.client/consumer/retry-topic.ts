@@ -1,4 +1,4 @@
-import type { IConsumer, IProducer } from "../../transport";
+import type { IConsumer, IProducer } from "../../transport.interface";
 type Consumer = IConsumer;
 type Producer = IProducer;
 import {

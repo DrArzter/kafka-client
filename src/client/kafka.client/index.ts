@@ -1,4 +1,4 @@
-import type { KafkaTransport } from "../transport";
+import type { KafkaTransport } from "../transport.interface";
 import { ConfluentTransport } from "./confluent-transport";
 import type { TopicDescriptor, SchemaLike } from "../message/topic";
 import type { EventEnvelope } from "../message/envelope";
@@ -35,9 +35,9 @@ export * from "../types";
 import { getOrCreateConsumer } from "./consumer/ops";
 import { AdminOps } from "./admin/ops";
 import { replayDlqTopic } from "./consumer/dlq-replay";
-import { MetricsManager } from "./infra/metrics-manager";
-import { InFlightTracker } from "./infra/inflight-tracker";
-import { CircuitBreakerManager } from "./infra/circuit-breaker";
+import { MetricsManager } from "./infra/metrics.manager";
+import { InFlightTracker } from "./infra/inflight.tracker";
+import { CircuitBreakerManager } from "./infra/circuit-breaker.manager";
 import { AsyncQueue } from "./consumer/queue";
 import { toError } from "./consumer/pipeline";
 

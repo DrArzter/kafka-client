@@ -1,12 +1,12 @@
-export { createMockKafkaClient, type MockKafkaClient } from "./mock-client";
+export { createMockKafkaClient, type MockKafkaClient } from "./client.mock";
 export {
   KafkaTestContainer,
   type KafkaTestContainerOptions,
-} from "./test-container";
+} from "./test.container";
 export {
   FakeTransport,
   FakeProducer,
   FakeConsumer,
   FakeAdmin,
   FakeTransaction,
-} from "./fake-transport";
+} from "./transport.fake";

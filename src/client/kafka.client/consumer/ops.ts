@@ -1,4 +1,4 @@
-import type { IConsumer, KafkaTransport } from "../../transport";
+import type { IConsumer, KafkaTransport } from "../../transport.interface";
 import type { SchemaLike } from "../../message/topic";
 import type { KafkaClientOptions, KafkaLogger } from "../../types";
 import { resolveTopicName } from "../producer/ops";

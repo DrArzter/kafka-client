@@ -1,4 +1,4 @@
-import type { IAdmin } from "../../transport";
+import type { IAdmin } from "../../transport.interface";
 type Admin = IAdmin;
 import type {
   ClientId,

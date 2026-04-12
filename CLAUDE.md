@@ -9,7 +9,7 @@ Type-safe Kafka client wrapper for NestJS built on `@confluentinc/kafka-javascri
 | Field | Value |
 |---|---|
 | npm name | `@drarzter/kafka-client` |
-| version | `0.9.2` |
+| version | `0.9.3` |
 | underlying driver | `@confluentinc/kafka-javascript` ^1.8.0 |
 | build tool | `tsup` (esbuild + tsc for `.d.ts`) |
 | test runner | Jest + ts-jest |
@@ -40,12 +40,12 @@ src/
   testing.ts                      # re-export of src/testing/index.ts
 
   client/
-    types.ts                      # ALL shared TypeScript types (1000+ lines)
+    types.ts                      # barrel — re-exports types/* (common, producer, consumer, admin, config, interfaces)
     errors.ts                     # KafkaProcessingError, KafkaValidationError, KafkaRetryExhaustedError
     message/
       envelope.ts                 # EventEnvelope, header constants, ALS context, buildEnvelopeHeaders, decodeHeaders, extractEnvelope
       topic.ts                    # TopicDescriptor, topic() factory, SchemaLike, TopicsFrom
-    transport.ts                  # KafkaTransport interface + IProducer, IConsumer, IAdmin, ITransaction, payload types
+    transport.interface.ts        # KafkaTransport interface + IProducer, IConsumer, IAdmin, ITransaction, payload types
     kafka.client/
       index.ts                    # KafkaClient facade (~500 lines) — delegates to impl modules via KafkaClientContext<T>
       context.ts                  # KafkaClientContext<T> — shared state object passed to all impl functions
@@ -71,9 +71,9 @@ src/
         lifecycle.ts              # connectProducerImpl, disconnectImpl, ensureTopic, createRetryTxProducer, startLagThrottlePoller, recoverLamportClockImpl, wrapWithTimeoutWarning
         send.ts                   # sendMessageImpl, sendBatchImpl, sendTombstoneImpl, transactionImpl, waitIfThrottled, preparePayload
       infra/
-        circuit-breaker.ts        # CircuitBreakerManager (per-partition sliding window)
-        inflight-tracker.ts       # InFlightTracker (graceful shutdown)
-        metrics-manager.ts        # MetricsManager (processedCount, retryCount, dlqCount, dedupCount)
+        circuit-breaker.manager.ts  # CircuitBreakerManager (per-partition sliding window)
+        inflight.tracker.ts         # InFlightTracker (graceful shutdown)
+        metrics.manager.ts          # MetricsManager (processedCount, retryCount, dlqCount, dedupCount)
 
   nest/
     kafka.module.ts               # KafkaModule.register() / registerAsync()
@@ -83,8 +83,9 @@ src/
     kafka.constants.ts            # getKafkaClientToken(), KAFKA_CLIENT token
 
   testing/
-    mock-client.ts                # createMockKafkaClient<T>()
-    test-container.ts             # KafkaTestContainer (Testcontainers wrapper)
+    client.mock.ts                # createMockKafkaClient<T>()
+    transport.fake.ts             # FakeTransport
+    test.container.ts             # KafkaTestContainer (Testcontainers wrapper)
     index.ts
 
   integration/                    # Integration specs (require real Kafka via Testcontainers)
@@ -536,6 +537,81 @@ Auto-detects Jest or Vitest. Pass a `mockFactory` for other frameworks.
 
 ---
 
+## File naming conventions
+
+**Rule:** hyphens within a multi-word name, dot separates the name from its role suffix.
+
+```text
+circuit-breaker.manager.ts   ← "circuit-breaker" = name (compound noun)
+                               ".manager"         = role suffix
+```
+
+When the filename already expresses the role — `handler.ts` is a handler, `pipeline.ts` is a pipeline — no suffix is added. A suffix is only useful when separating a *subject* from a *role* that isn't obvious from the name alone.
+
+### Recognised suffixes
+
+| Suffix | Role | Examples |
+| --- | --- | --- |
+| `.types` | Data/option shapes — configs, options, result objects, context bags | `producer.types.ts`, `consumer.types.ts` |
+| `.interface` | Contract interfaces — capability/role boundaries, polymorphism points | `transport.interface.ts`, `producer.interface.ts` |
+| `.manager` | Stateful manager class | `metrics.manager.ts`, `circuit-breaker.manager.ts` |
+| `.tracker` | Tracking/counting utility | `inflight.tracker.ts` |
+| `.module` | NestJS module | `kafka.module.ts` |
+| `.explorer` | NestJS metadata scanner | `kafka.explorer.ts` |
+| `.decorator` | NestJS decorator definitions | `kafka.decorator.ts` |
+| `.health` | Health indicator | `kafka.health.ts` |
+| `.constants` | Constant values and DI tokens | `kafka.constants.ts` |
+| `.mock` | Jest/Vitest spy double | `client.mock.ts` |
+| `.fake` | Standalone fake implementation | `transport.fake.ts` |
+| `.container` | Test infrastructure wrapper | `test.container.ts` |
+| `.spec` | Unit test | `consumer.spec.ts` |
+| `.integration.spec` | Integration test | `consumer.integration.spec.ts` |
+
+**Additional rules:**
+
+- A suffix is added only when it carries information the name alone does not. `handler.ts`, `pipeline.ts`, `queue.ts`, `setup.ts`, `send.ts`, `lifecycle.ts` need no suffix — the name already tells you what the file does.
+- `.types` files export **only** `type` / `interface` / `export type { … }` — no functions, classes, or `const`s.
+- `common.ts` is an intentional exception: shared primitives that don't belong to a single domain.
+- Barrel/re-export files (`types.ts`, `client.ts`, `index.ts`) keep their names regardless of content.
+
+**Current layout:**
+
+```text
+src/client/
+  transport.interface.ts            ← KafkaTransport, IProducer, IConsumer, IAdmin, ITransaction
+  types.ts                          ← barrel (re-exports types/*)
+  types/
+    common.ts                       ← shared primitives (exception)
+    producer.types.ts               ← SendOptions, BatchMessageItem, BatchSendOptions
+    consumer.types.ts               ← ConsumerOptions, ConsumerHandle, BatchMeta, RetryOptions, …
+    admin.types.ts                  ← snapshot/checkpoint/dlq/health types
+    config.types.ts                 ← KafkaClientOptions
+    producer.interface.ts           ← IKafkaProducer<T>
+    consumer.interface.ts           ← IKafkaConsumer<T>
+    admin.interface.ts              ← IKafkaAdmin<T>
+    lifecycle.interface.ts          ← IKafkaLifecycle
+    client.ts                       ← IKafkaClient<T> extends all four (barrel)
+  kafka.client/
+    infra/
+      circuit-breaker.manager.ts    ← CircuitBreakerManager
+      inflight.tracker.ts           ← InFlightTracker
+      metrics.manager.ts            ← MetricsManager
+
+src/nest/
+  kafka.module.ts
+  kafka.explorer.ts
+  kafka.decorator.ts
+  kafka.health.ts
+  kafka.constants.ts
+
+src/testing/
+  client.mock.ts                    ← createMockKafkaClient
+  transport.fake.ts                 ← FakeTransport
+  test.container.ts                 ← KafkaTestContainer
+```
+
+---
+
 ## Build
 
 ```bash
@@ -547,6 +623,15 @@ npm run prepublishOnly  # runs build
 
 tsup entry points: `src/index.ts`, `src/core.ts`, `src/testing.ts`, `src/otel.ts`.
 NestJS, OTel, Testcontainers are all `external` (not bundled).
+
+## Release checklist
+
+Before bumping the version, committing, or pushing:
+
+1. `npm test` — all unit tests must pass
+2. `npm run test:integration` — all integration tests must pass (requires Docker)
+3. Bump version in `package.json` and `CLAUDE.md`
+4. Only then commit and push
 
 ---
 

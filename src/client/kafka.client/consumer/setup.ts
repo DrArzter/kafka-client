@@ -1,4 +1,4 @@
-import type { IConsumer, IProducer } from "../../transport";
+import type { IConsumer, IProducer } from "../../transport.interface";
 import type { SchemaLike } from "../../message/topic";
 import type { EventEnvelope } from "../../message/envelope";
 import type { KafkaClientContext } from "../context";

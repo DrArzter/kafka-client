@@ -1,4 +1,4 @@
-import type { KafkaTransport, IProducer, IConsumer } from "../transport";
+import type { KafkaTransport, IProducer, IConsumer } from "../transport.interface";
 import type { SchemaLike } from "../message/topic";
 import type {
   ClientId,
@@ -6,10 +6,10 @@ import type {
   KafkaInstrumentation,
   KafkaLogger,
 } from "../types";
-import type { CircuitBreakerManager } from "./infra/circuit-breaker";
+import type { CircuitBreakerManager } from "./infra/circuit-breaker.manager";
 import type { AdminOps } from "./admin/ops";
-import type { MetricsManager } from "./infra/metrics-manager";
-import type { InFlightTracker } from "./infra/inflight-tracker";
+import type { MetricsManager } from "./infra/metrics.manager";
+import type { InFlightTracker } from "./infra/inflight.tracker";
 import type { BuildSendPayloadDeps } from "./producer/ops";
 import type { ConsumerOpsDeps } from "./consumer/ops";
 import type { RetryTopicDeps } from "./consumer/retry-topic";
