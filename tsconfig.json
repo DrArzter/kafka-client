@@ -15,7 +15,8 @@
     "module": "commonjs",
     "target": "ES2023",
     "experimentalDecorators": true,
-    "emitDecoratorMetadata": true
+    "emitDecoratorMetadata": true,
+    "ignoreDeprecations": "6.0"
   },
   "exclude": ["node_modules", "dist"],
   "include": ["src"]

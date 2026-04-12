@@ -215,7 +215,7 @@ export class FakeConsumer implements IConsumer {
         value: message.value,
         headers: message.headers ?? {},
         offset,
-        key: message.key,
+        key: message.key ?? null,
       },
     });
   }
@@ -452,7 +452,7 @@ export class FakeTransport implements KafkaTransport {
               Object.entries(options.headers).map(([k, v]) => [k, [v]]),
             )
           : {},
-        key: options.key !== undefined ? Buffer.from(options.key) : undefined,
+        key: options.key !== undefined ? Buffer.from(options.key) : null,
       },
       options.partition ?? 0,
       options.offset ?? "0",

@@ -149,7 +149,7 @@ export class AdminOps {
             return { partition, offset: found?.offset ?? "-1" };
           }),
         );
-      await (this.deps.admin as any).setOffsets({ groupId: gid, topic, partitions: offsets });
+      await this.deps.admin.setOffsets({ groupId: gid, topic, partitions: offsets });
       this.deps.logger.log(
         `Offsets set by timestamp for group "${gid}" on "${topic}": ${JSON.stringify(offsets)}`,
       );
@@ -240,8 +240,8 @@ export class AdminOps {
     return result.topics.map((t) => ({
       name: t.name,
       partitions: t.partitions.map((p) => ({
-        partition: p.partitionId ?? p.partition,
-        leader: p.leader,
+        partition: p.partitionId ?? p.partition ?? 0,
+        leader: p.leader ?? 0,
         replicas: (p.replicas ?? []).map((r) =>
           typeof r === "number" ? r : r.nodeId,
         ),

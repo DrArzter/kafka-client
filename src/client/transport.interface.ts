@@ -25,7 +25,7 @@ export type ITopicPartitions = { topic: string; partitions: number[] };
 /** A single message in a produce request. */
 export type IProducerMessage = {
   value: string | null;
-  key?: string;
+  key?: string | null;
   headers?: Record<string, string | Buffer | string[]>;
 };
 
@@ -77,7 +77,7 @@ export type IMessage = {
   /** Header map as returned by librdkafka — values may be arrays. */
   headers: Record<string, any>;
   offset: string;
-  key?: Buffer | null;
+  key: Buffer | null;
 };
 
 /** Payload passed to the `eachMessage` handler. */
@@ -92,7 +92,7 @@ export type IMessageBatch = {
   topic: string;
   partition: number;
   messages: IMessage[];
-  highWatermark?: string;
+  highWatermark: string;
 };
 
 /** Payload passed to the `eachBatch` handler. */

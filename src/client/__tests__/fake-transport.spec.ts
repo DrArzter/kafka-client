@@ -45,8 +45,8 @@ describe("FakeTransport — producer", () => {
     await client.connectProducer();
 
     await client.sendBatch("orders.created", [
-      { message: { orderId: "o1", amount: 10 } },
-      { message: { orderId: "o2", amount: 20 } },
+      { value: { orderId: "o1", amount: 10 } },
+      { value: { orderId: "o2", amount: 20 } },
     ]);
 
     expect(transport.mainProducer.sentTo("orders.created")).toHaveLength(2);

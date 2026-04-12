@@ -12,6 +12,16 @@
 
 ## Done
 
+### 0.9.4
+
+- [x] **Type fixes** — resolved 11 pre-existing `tsc --noEmit` errors: `IProducerMessage.key` widened to `string | null`; `IMessage.key` made required `Buffer | null`; `IMessageBatch.highWatermark` made required; `StopCtx<T>` Pick extended with `defaultGroupId`; `describeTopics` partition/leader fallback to `0`; spurious `as any` on `setOffsets` removed; `FakeTransport` key coerced to `null`; `fake-transport.spec.ts` corrected `message` → `value` in `sendBatch` call
+- [x] **Dependency upgrades** — TypeScript 5.9 → 6.0.2; ESLint 9.x → 10.2.0; all other deps bumped to latest in-range versions; `tsconfig.json` adds `"ignoreDeprecations": "6.0"` to silence the `moduleResolution: node` deprecation warning now that TS 6 is in use
+
+### 0.9.3
+
+- [x] **File naming convention** — established project-wide rule: hyphens within compound names, dots between name and role suffix; renamed 6 files: `infra/circuit-breaker.ts` → `circuit-breaker.manager.ts`, `infra/inflight-tracker.ts` → `inflight.tracker.ts`, `infra/metrics-manager.ts` → `metrics.manager.ts`, `testing/fake-transport.ts` → `transport.fake.ts`, `testing/mock-client.ts` → `client.mock.ts`, `testing/test-container.ts` → `test.container.ts`; full suffix table and release checklist added to `CLAUDE.md` and `README.md`
+- [x] **Types refactor** — split monolithic `types.ts` (1 750 lines) into domain files under `types/`: `common`, `producer.types`, `consumer.types`, `admin.types`, `config.types`; split `IKafkaClient` into four role-specific sub-interfaces (`IKafkaProducer`, `IKafkaConsumer`, `IKafkaAdmin`, `IKafkaLifecycle`); renamed `transport.ts` → `transport.interface.ts`
+
 ### 0.9.2
 
 - [x] **`handle.ready()` on `ConsumerHandle`** — `startConsumer()` and `startBatchConsumer()` now return a `ready(): Promise<void>` that resolves once the broker fires the first partition-assignment event; backed by the `rebalance_cb (ERR__ASSIGN_PARTITIONS)` path already used for `onRebalance`; for `fromBeginning: false` consumers a 500 ms debounced settle window is added so librdkafka can complete the async `latest` offset fetch — the timer resets on both `assign` and `revoke` events so it correctly handles cooperative-sticky multi-round rebalances; for `fromBeginning: true` consumers the settle is skipped (seeks to offset 0 are synchronous); `FakeConsumer.subscribe()` fires the assignment callback synchronously so `handle.ready()` resolves in the same tick in unit tests; `createMockKafkaClient` stubs include `ready: jest.fn().mockResolvedValue(undefined)`; all integration tests that previously used `await new Promise(r => setTimeout(r, 5_000))` warmup delays replaced with `await handle.ready()` / `await Promise.all([handleA.ready(), handleB.ready()])`

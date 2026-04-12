@@ -9,7 +9,7 @@ Type-safe Kafka client wrapper for NestJS built on `@confluentinc/kafka-javascri
 | Field | Value |
 |---|---|
 | npm name | `@drarzter/kafka-client` |
-| version | `0.9.3` |
+| version | `0.9.4` |
 | underlying driver | `@confluentinc/kafka-javascript` ^1.8.0 |
 | build tool | `tsup` (esbuild + tsc for `.d.ts`) |
 | test runner | Jest + ts-jest |
@@ -631,7 +631,9 @@ Before bumping the version, committing, or pushing:
 1. `npm test` — all unit tests must pass
 2. `npm run test:integration` — all integration tests must pass (requires Docker)
 3. Bump version in `package.json` and `CLAUDE.md`
-4. Only then commit and push
+4. Review and update `ROADMAP.md` — mark completed items, add new entries
+5. Review and update `README.md` — ensure public API docs match the release
+6. Only then commit and push
 
 ---
 

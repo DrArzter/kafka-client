@@ -11,6 +11,7 @@ type StopCtx<T extends TopicMapConstraint<T>> = Pick<
   | "consumerCreationOptions"
   | "consumers"
   | "dedupStates"
+  | "defaultGroupId"
   | "logger"
   | "retryTxProducers"
   | "runningConsumers"
