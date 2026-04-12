@@ -639,6 +639,13 @@ Before bumping the version, committing, or pushing:
 
 ## Known constraints & gotchas
 
+### TypeScript 6.0 blocked by `@typescript-eslint`
+
+`@typescript-eslint` 8.x declares `peerDependencies: { typescript: ">=4.8.4 <6.0.0" }`. Upgrading to TypeScript 6.0 breaks `npm install` in CI with an ERESOLVE error. Hold at `typescript@^5.9.x` until `@typescript-eslint` releases a version with TS 6.0 peer dep support, then:
+
+1. `npm install typescript@latest @typescript-eslint/eslint-plugin@latest @typescript-eslint/parser@latest`
+2. Add `"ignoreDeprecations": "6.0"` to `tsconfig.json` to silence the `moduleResolution: node` deprecation warning.
+
 ### librdkafka install on Arch/CachyOS
 ```bash
 sudo pacman -S librdkafka

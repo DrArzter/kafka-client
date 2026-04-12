@@ -15,7 +15,7 @@
 ### 0.9.4
 
 - [x] **Type fixes** — resolved 11 pre-existing `tsc --noEmit` errors: `IProducerMessage.key` widened to `string | null`; `IMessage.key` made required `Buffer | null`; `IMessageBatch.highWatermark` made required; `StopCtx<T>` Pick extended with `defaultGroupId`; `describeTopics` partition/leader fallback to `0`; spurious `as any` on `setOffsets` removed; `FakeTransport` key coerced to `null`; `fake-transport.spec.ts` corrected `message` → `value` in `sendBatch` call
-- [x] **Dependency upgrades** — TypeScript 5.9 → 6.0.2; ESLint 9.x → 10.2.0; all other deps bumped to latest in-range versions; `tsconfig.json` adds `"ignoreDeprecations": "6.0"` to silence the `moduleResolution: node` deprecation warning now that TS 6 is in use
+- [x] **Dependency upgrades** — ESLint 9.x → 10.2.0; all other deps bumped to latest in-range versions; TypeScript stays at 5.9.x until `@typescript-eslint` adds TS 6.0 peer dep support
 
 ### 0.9.3
 
