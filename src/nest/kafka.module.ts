@@ -39,6 +39,18 @@ export interface KafkaModuleOptions extends KafkaModuleBaseOptions {
   onMessageLost?: KafkaClientOptions["onMessageLost"];
   /** Called whenever a consumer group rebalance occurs. @see `KafkaClientOptions.onRebalance` */
   onRebalance?: KafkaClientOptions["onRebalance"];
+  /** Transactional producer ID — must be unique per process/replica. @see `KafkaClientOptions.transactionalId` */
+  transactionalId?: KafkaClientOptions["transactionalId"];
+  /** Recover the Lamport clock from these topics on startup. @see `KafkaClientOptions.clockRecovery` */
+  clockRecovery?: KafkaClientOptions["clockRecovery"];
+  /** Delay producer sends when consumer lag exceeds a threshold. @see `KafkaClientOptions.lagThrottle` */
+  lagThrottle?: KafkaClientOptions["lagThrottle"];
+  /** Client-wide TTL expiry callback. @see `KafkaClientOptions.onTtlExpired` */
+  onTtlExpired?: KafkaClientOptions["onTtlExpired"];
+  /** Custom transport implementation (e.g. `FakeTransport` in tests). @see `KafkaClientOptions.transport` */
+  transport?: KafkaClientOptions["transport"];
+  /** Transport security (TLS + SASL, incl. MSK IAM / GCP OAUTHBEARER). @see `KafkaClientOptions.security` */
+  security?: KafkaClientOptions["security"];
 }
 
 /** Async configuration for `KafkaModule.registerAsync()` with dependency injection. */
@@ -112,6 +124,12 @@ export class KafkaModule {
         instrumentation: options.instrumentation,
         onMessageLost: options.onMessageLost,
         onRebalance: options.onRebalance,
+        transactionalId: options.transactionalId,
+        clockRecovery: options.clockRecovery,
+        lagThrottle: options.lagThrottle,
+        onTtlExpired: options.onTtlExpired,
+        transport: options.transport,
+        security: options.security,
         logger: new Logger(`KafkaClient:${options.clientId}`),
       },
     );

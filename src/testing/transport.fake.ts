@@ -17,7 +17,7 @@ import type {
   IGroupDescription,
   ITopicMetadata,
   IMessage,
-} from "../client/transport.interface";
+} from "../client/transport/transport.interface";
 
 // ── FakeTransaction ───────────────────────────────────────────────────────────
 

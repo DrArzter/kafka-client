@@ -81,6 +81,12 @@ export interface KafkaClientOptions {
   clockRecovery?: {
     /** Topic names to scan for the highest Lamport clock. */
     topics: string[];
+    /**
+     * Max time to wait for recovery before proceeding with a partial result.
+     * Guards against partitions whose last message was compacted or trimmed
+     * away between the offset fetch and the seek. Default: `30000`.
+     */
+    timeoutMs?: number;
   };
   /**
    * Delay `sendMessage` / `sendBatch` / `sendTombstone` when the observed lag of a
@@ -123,5 +129,26 @@ export interface KafkaClientOptions {
    * });
    * ```
    */
-  transport?: import("../transport.interface").KafkaTransport;
+  transport?: import("../transport/transport.interface").KafkaTransport;
+  /**
+   * Transport security: TLS and SASL authentication.
+   *
+   * Secure by default without getting in the way:
+   * - `sasl` configured with `ssl` unset → TLS is enabled automatically.
+   * - No security at all against non-local brokers → a one-time warning
+   *   (silence with `allowInsecure: true` if intentional).
+   *
+   * Supports `plain`, `scram-sha-256/512`, and `oauthbearer` — the latter
+   * enables AWS MSK IAM (`awsMskIamProvider`) and Google Cloud Managed Kafka
+   * (`gcpAccessTokenProvider`).
+   *
+   * @example
+   * ```ts
+   * security: {
+   *   sasl: { mechanism: 'scram-sha-512', username: 'svc', password: secret },
+   *   // ssl: true is implied
+   * }
+   * ```
+   */
+  security?: import("../security/security.types").KafkaSecurityOptions;
 }

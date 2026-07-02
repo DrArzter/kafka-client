@@ -1,4 +1,4 @@
-import type { IConsumer, KafkaTransport } from "../../transport.interface";
+import type { IConsumer, KafkaTransport } from "../../transport/transport.interface";
 import type { SchemaLike } from "../../message/topic";
 import type { KafkaClientOptions, KafkaLogger } from "../../types";
 import { resolveTopicName } from "../producer/ops";
@@ -39,6 +39,7 @@ export function getOrCreateConsumer(
   deps: ConsumerOpsDeps,
   partitionAssigner?: "roundrobin" | "range" | "cooperative-sticky",
   onFirstAssignment?: () => void,
+  groupInstanceId?: string,
 ): IConsumer {
   const { consumers, consumerCreationOptions, transport, onRebalance, logger } =
     deps;
@@ -112,6 +113,7 @@ export function getOrCreateConsumer(
     fromBeginning,
     autoCommit,
     partitionAssigner: partitionAssigner ?? "cooperative-sticky",
+    groupInstanceId,
     onRebalance: (type, assignments) => {
       if (type === "assign") fireOnAssignment();
       else if (type === "revoke") scheduleSettle(); // reset timer mid-rebalance

@@ -1,5 +1,6 @@
 import type { TTopicMessageMap, TopicMapConstraint, MessageHeaders } from "./common";
 import type { SendOptions, BatchMessageItem, BatchSendOptions } from "./producer.types";
+import type { DedupStore } from "./dedup.types";
 import type { TopicDescriptor, SchemaLike } from "../message/topic";
 import type { EventEnvelope } from "../message/envelope";
 
@@ -76,13 +77,13 @@ export interface RetryOptions {
  * Messages that arrive without the `x-lamport-clock` header are passed through
  * unchanged (backwards-compatible with producers that don't use this library).
  *
- * **In-session limitation**: deduplication state lives in memory and is reset
- * whenever the process restarts or `stopConsumer` is called. After a restart,
- * previously processed messages with `clock ≤ N` will be re-processed until
- * their offsets catch up to the high-watermark again. The same applies after a
- * rebalance: the instance that receives the partition begins with empty state.
- * This is a fundamental limitation of the in-memory Lamport clock approach —
- * it provides deduplication only within a single process session.
+ * **In-session limitation (default store)**: with the built-in in-memory store,
+ * deduplication state is reset whenever the process restarts or `stopConsumer`
+ * is called. After a restart, previously processed messages with `clock ≤ N`
+ * will be re-processed until their offsets catch up to the high-watermark again.
+ * The same applies after a rebalance: the instance that receives the partition
+ * begins with empty state. Provide a persistent `store` (e.g. Redis-backed) to
+ * make deduplication survive both restarts and rebalances.
  */
 export interface DeduplicationOptions {
   /**
@@ -98,6 +99,18 @@ export interface DeduplicationOptions {
    * Defaults to `<consumedTopic>.duplicates`.
    */
   duplicatesTopic?: string;
+  /**
+   * Pluggable backing store for the per-partition last-processed clock.
+   *
+   * When omitted, an in-memory store is used — state is per-client, keyed by
+   * `groupId`, and cleared on `stopConsumer` / `disconnect`. Provide a
+   * persistent `DedupStore` (e.g. Redis-backed) so deduplication survives
+   * process restarts and consumer group rebalances.
+   *
+   * Store errors are handled fail-open: on a thrown/rejected read or write the
+   * error is logged and the message is treated as not a duplicate.
+   */
+  store?: DedupStore;
 }
 
 /**
@@ -466,6 +479,25 @@ export interface ConsumerOptions<
    * - `'range'` — assigns contiguous partition ranges; can cause uneven distribution with multiple topics.
    */
   partitionAssigner?: "roundrobin" | "range" | "cooperative-sticky";
+  /**
+   * Static group membership id (`group.instance.id`).
+   *
+   * A member that restarts within the broker's `session.timeout.ms` rejoins
+   * the group with the same partitions and **no rebalance** — useful for k8s
+   * rolling restarts and short redeploys. Must be unique per member within
+   * the consumer group (e.g. derive from the pod ordinal / hostname).
+   *
+   * Not propagated to retry-chain companion consumers (they run in their own
+   * groups and rebalance independently).
+   *
+   * @example
+   * ```ts
+   * await kafka.startConsumer(['orders'], handler, {
+   *   groupInstanceId: `orders-svc-${process.env.HOSTNAME}`,
+   * });
+   * ```
+   */
+  groupInstanceId?: string;
   /**
    * Called when a message is dropped due to TTL expiration (`messageTtlMs`).
    * Fires instead of `onMessageLost` for expired messages when `dlq` is not enabled.
