@@ -13,10 +13,18 @@ export class InFlightTracker {
    */
   track<R>(fn: () => Promise<R>): Promise<R> {
     this.inFlightTotal++;
-    return fn().finally(() => {
+    const done = () => {
       this.inFlightTotal--;
       if (this.inFlightTotal === 0) this.drainResolvers.splice(0).forEach((r) => r());
-    });
+    };
+    try {
+      return fn().finally(done);
+    } catch (err) {
+      // fn threw synchronously — without this the counter would leak and
+      // waitForDrain would time out for the lifetime of the process.
+      done();
+      throw err;
+    }
   }
 
   /**

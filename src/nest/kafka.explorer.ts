@@ -11,6 +11,17 @@ interface SubscriberEntry extends KafkaSubscriberMetadata {
   methodName: string | symbol;
 }
 
+/**
+ * Process-level registry of already-wired subscriptions, keyed by provider
+ * instance. Every `KafkaModule.register()` call contributes its own
+ * `KafkaExplorer`, and each explorer scans ALL providers — without this guard
+ * a multi-client app would wire every `@SubscribeTo` handler once per
+ * registered module (duplicate consumers / "called twice" startup errors).
+ * Keyed by instance (not constructor) so separate Nest apps in one process
+ * (e.g. tests) still wire their own instances independently.
+ */
+const wiredSubscriptions = new WeakMap<object, Set<string>>();
+
 /** Discovers `@SubscribeTo()` decorators and wires them to their Kafka clients on startup. */
 @Injectable()
 export class KafkaExplorer implements OnModuleInit {
@@ -45,6 +56,16 @@ export class KafkaExplorer implements OnModuleInit {
 
       for (const entry of metadata) {
         const token = getKafkaClientToken(entry.clientName);
+
+        const entryKey = `${token}:${String(entry.methodName)}`;
+        let wired = wiredSubscriptions.get(instance);
+        if (!wired) {
+          wired = new Set();
+          wiredSubscriptions.set(instance, wired);
+        }
+        if (wired.has(entryKey)) continue; // already wired by another KafkaExplorer instance
+        wired.add(entryKey);
+
         let client: KafkaClient<any>;
 
         try {

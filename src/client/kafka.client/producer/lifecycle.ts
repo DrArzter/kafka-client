@@ -1,4 +1,4 @@
-import type { IProducer } from "../../transport.interface";
+import type { IProducer } from "../../transport/transport.interface";
 type Producer = IProducer;
 
 import type { KafkaClientContext } from "../context";
@@ -205,6 +205,7 @@ export async function recoverLamportClockImpl<T extends TopicMapConstraint<T>>(
     const remaining = new Set(
       partitionsToRead.map((p) => `${p.topic}:${p.partition}`),
     );
+    let settled = false;
     const cleanup = () => {
       consumer
         .disconnect()
@@ -213,6 +214,22 @@ export async function recoverLamportClockImpl<T extends TopicMapConstraint<T>>(
           ctx.adminOps.deleteGroups([recoveryGroupId]).catch(() => {});
         });
     };
+
+    // A seeked partition may never deliver its last message (e.g. it was
+    // compacted/retention-trimmed between the offset fetch and the seek).
+    // Without a bound, connectProducer() would hang forever — proceed with
+    // whatever maxClock was gathered instead.
+    const timeoutTimer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      ctx.logger.warn(
+        `Clock recovery: timed out after ${ctx.clockRecoveryTimeoutMs} ms with ` +
+          `${remaining.size} partition(s) unread — proceeding with partial result`,
+      );
+      cleanup();
+      resolve();
+    }, ctx.clockRecoveryTimeoutMs);
+    timeoutTimer.unref?.();
 
     consumer
       .connect()
@@ -241,7 +258,9 @@ export async function recoverLamportClockImpl<T extends TopicMapConstraint<T>>(
               if (!Number.isNaN(clock) && clock > maxClock) maxClock = clock;
             }
 
-            if (remaining.size === 0) {
+            if (remaining.size === 0 && !settled) {
+              settled = true;
+              clearTimeout(timeoutTimer);
               cleanup();
               resolve();
             }
@@ -249,6 +268,9 @@ export async function recoverLamportClockImpl<T extends TopicMapConstraint<T>>(
         }),
       )
       .catch((err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutTimer);
         cleanup();
         reject(err);
       });

@@ -1,4 +1,4 @@
-import type { IConsumer, IProducer } from "../../transport.interface";
+import type { IConsumer, IProducer } from "../../transport/transport.interface";
 type Consumer = IConsumer;
 type Producer = IProducer;
 import {
@@ -48,6 +48,8 @@ export type RetryTopicDeps = {
   ) => void;
   onDlq?: (envelope: EventEnvelope<any>, reason: DlqReason) => void;
   onMessage?: (envelope: EventEnvelope<any>) => void;
+  /** Fired on every failed handler attempt inside the retry chain — drives the circuit breaker. */
+  onFailure?: (envelope: EventEnvelope<any>) => void;
   ensureTopic: (topic: string) => Promise<void>;
   getOrCreateConsumer: (
     groupId: string,
@@ -247,6 +249,9 @@ async function startLevelConsumer(
         await consumer.commitOffsets([nextOffset]);
         return;
       }
+
+      // Drive the main group's circuit breaker from retry-chain failures too.
+      deps.onFailure?.(envelope);
 
       const exhausted = level >= currentMaxRetries;
       const reportedError =

@@ -7,6 +7,14 @@ import type { IKafkaClient, TopicMapConstraint } from "../client/types";
  */
 export type MockKafkaClient<T extends TopicMapConstraint<T>> = {
   [K in keyof IKafkaClient<T>]: IKafkaClient<T>[K] & Record<string, any>;
+} & {
+  /**
+   * Present on the concrete `KafkaClient` but not part of `IKafkaClient` —
+   * included so services typed against the class can still use the mock.
+   */
+  disconnectProducer: (() => Promise<void>) & Record<string, any>;
+  /** NestJS lifecycle hook on the concrete `KafkaClient`. */
+  onModuleDestroy: (() => Promise<void>) & Record<string, any>;
 };
 
 /** Factory that creates a no-op mock function (e.g. `() => jest.fn()`). */
@@ -82,6 +90,7 @@ export function createMockKafkaClient<T extends TopicMapConstraint<T>>(
     getClientId: returning("mock-client"),
     sendMessage: resolved(undefined),
     sendBatch: resolved(undefined),
+    sendTombstone: resolved(undefined),
     transaction: mock().mockImplementation(
       async (cb: (ctx: Record<string, unknown>) => Promise<void>) => {
         const ctx = {
@@ -97,6 +106,21 @@ export function createMockKafkaClient<T extends TopicMapConstraint<T>>(
       ready: mock().mockResolvedValue(undefined),
     }),
     startBatchConsumer: resolved({
+      groupId: "mock-group",
+      stop: mock().mockResolvedValue(undefined),
+      ready: mock().mockResolvedValue(undefined),
+    }),
+    startWindowConsumer: resolved({
+      groupId: "mock-group",
+      stop: mock().mockResolvedValue(undefined),
+      ready: mock().mockResolvedValue(undefined),
+    }),
+    startRoutedConsumer: resolved({
+      groupId: "mock-group",
+      stop: mock().mockResolvedValue(undefined),
+      ready: mock().mockResolvedValue(undefined),
+    }),
+    startTransactionalConsumer: resolved({
       groupId: "mock-group",
       stop: mock().mockResolvedValue(undefined),
       ready: mock().mockResolvedValue(undefined),
@@ -119,6 +143,15 @@ export function createMockKafkaClient<T extends TopicMapConstraint<T>>(
       dedupCount: 0,
     }),
     resetMetrics: mock(),
+    listConsumerGroups: resolved([]),
+    describeTopics: resolved([]),
+    deleteRecords: resolved(undefined),
+    readSnapshot: resolved(new Map()),
+    checkpointOffsets: resolved({ groupId: "mock-group", checkpoints: [] }),
+    restoreFromCheckpoint: resolved(undefined),
+    connectProducer: resolved(undefined),
+    disconnectProducer: resolved(undefined),
+    onModuleDestroy: resolved(undefined),
     disconnect: resolved(undefined),
     enableGracefulShutdown: mock(),
   } as unknown as MockKafkaClient<T>;

@@ -40,6 +40,19 @@ export interface IKafkaLifecycle {
   resetMetrics(topic?: string): void;
 
   /**
+   * Connect the producer, recover the Lamport clock (when `clockRecovery` is
+   * configured), and start the lag-throttle poller (when `lagThrottle` is set).
+   * Must be called before any send. NestJS apps call this automatically inside
+   * `KafkaModule.register()` / `registerAsync()`.
+   *
+   * @example
+   * ```ts
+   * await kafka.connectProducer();
+   * ```
+   */
+  connectProducer(): Promise<void>;
+
+  /**
    * Drain in-flight handlers, then disconnect all producers, consumers, and admin.
    * @param drainTimeoutMs Max ms to wait for in-flight handlers (default 30 000).
    *

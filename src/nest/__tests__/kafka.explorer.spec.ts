@@ -156,6 +156,44 @@ describe("KafkaExplorer.onModuleInit", () => {
     errorSpy.mockRestore();
   });
 
+  // 7. Two explorers sharing the same provider instance wire it only once
+  it("does not wire the same @SubscribeTo twice across two explorer instances", async () => {
+    class SharedService {
+      async handle() {}
+    }
+    // A single provider instance shared by both explorers (as happens in a
+    // multi-client app where every KafkaModule.register() contributes an
+    // explorer that scans ALL providers).
+    const instance = new SharedService();
+    attachMeta(SharedService, [
+      {
+        topics: ["shared.topic"],
+        methodName: "handle",
+        batch: undefined,
+        clientName: undefined,
+        options: undefined,
+        schemas: undefined,
+      },
+    ]);
+
+    const sharedProviders = [makeWrapper(instance)];
+    const discoveryA = {
+      getProviders: jest.fn().mockReturnValue(sharedProviders),
+    };
+    const discoveryB = {
+      getProviders: jest.fn().mockReturnValue(sharedProviders),
+    };
+    const explorerA = new KafkaExplorer(discoveryA as any, moduleRef as any);
+    const explorerB = new KafkaExplorer(discoveryB as any, moduleRef as any);
+
+    await explorerA.onModuleInit();
+    await explorerB.onModuleInit();
+
+    // Wired exactly once despite two explorers processing the same instance.
+    expect(mockClient.startConsumer).toHaveBeenCalledTimes(1);
+    expect(mockClient.startConsumer.mock.calls[0][0]).toEqual(["shared.topic"]);
+  });
+
   // 6. Schemas in decorator → merged into consumerOptions.schemas
   it("passes schemas map into consumerOptions when the entry has schemas", async () => {
     const mockSchema = { parse: (d: unknown) => d };

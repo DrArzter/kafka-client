@@ -1,4 +1,4 @@
-import type { IProducer } from "../../transport.interface";
+import type { IProducer } from "../../transport/transport.interface";
 type Producer = IProducer;
 import type { EventEnvelope } from "../../message/envelope";
 import { extractEnvelope } from "../../message/envelope";
@@ -18,15 +18,10 @@ import type {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-/**
- * Coerce an unknown thrown value to an `Error` instance.
- * Returns the value as-is if it is already an `Error`; otherwise wraps it with `String(error)`.
- * @param error The value caught in a `catch` clause.
- * @returns A guaranteed `Error` instance.
- */
-export function toError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
-}
+// Re-exported so the many existing `import { toError } from "./pipeline"` sites
+// keep working; the implementation lives in errors.ts (shared, domain-neutral).
+import { toError } from "../../errors";
+export { toError };
 
 /**
  * Return a Promise that resolves after `ms` milliseconds.
@@ -503,6 +498,8 @@ export async function executeWithRetry<T extends TopicMapConstraint<T>>(
     ) => void;
     onDlq?: (envelope: EventEnvelope<any>, reason: DlqReason) => void;
     onMessage?: (envelope: EventEnvelope<any>) => void;
+    /** Fired once per failed handler attempt — drives the circuit breaker. */
+    onFailure?: (envelope: EventEnvelope<any>) => void;
     /**
      * EOS atomic routing to `<topic>.retry.1` (main consumer only).
      * When present, replaces `sendToRetryTopic` with a Kafka transaction that
@@ -560,6 +557,10 @@ export async function executeWithRetry<T extends TopicMapConstraint<T>>(
       for (const env of envelopes) deps.onMessage?.(env);
       return;
     }
+
+    // Record the failure at the handler-error boundary so the circuit breaker
+    // sees every failed attempt — not only messages that end up in the DLQ.
+    deps.onFailure?.(envelopes[0]!);
 
     const isLastAttempt = attempt === maxAttempts;
     const reportedError =

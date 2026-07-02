@@ -115,4 +115,106 @@ describe("createMockKafkaClient", () => {
     expect(mock.enableGracefulShutdown).toBeDefined();
     expect(() => mock.enableGracefulShutdown()).not.toThrow();
   });
+
+  describe("extended surface", () => {
+    it("sendTombstone resolves without error", async () => {
+      await expect(
+        mock.sendTombstone("orders.completed", "key-1"),
+      ).resolves.toBeUndefined();
+    });
+
+    it("startWindowConsumer resolves with a ConsumerHandle", async () => {
+      const handle = await mock.startWindowConsumer(
+        "orders.created",
+        jest.fn(),
+        { maxMessages: 10, maxMs: 1000 },
+      );
+      expect(handle.groupId).toBe("mock-group");
+      expect(typeof handle.stop).toBe("function");
+    });
+
+    it("startRoutedConsumer resolves with a ConsumerHandle", async () => {
+      const handle = await mock.startRoutedConsumer(["orders.created"], {
+        header: "x-event-type",
+        routes: {},
+      });
+      expect(handle.groupId).toBe("mock-group");
+      expect(typeof handle.stop).toBe("function");
+    });
+
+    it("startTransactionalConsumer resolves with a ConsumerHandle", async () => {
+      const handle = await mock.startTransactionalConsumer(
+        ["orders.created"],
+        jest.fn(),
+      );
+      expect(handle.groupId).toBe("mock-group");
+      expect(typeof handle.stop).toBe("function");
+    });
+
+    it("listConsumerGroups resolves to []", async () => {
+      await expect(mock.listConsumerGroups()).resolves.toEqual([]);
+    });
+
+    it("describeTopics resolves to []", async () => {
+      await expect(mock.describeTopics()).resolves.toEqual([]);
+    });
+
+    it("deleteRecords resolves without error", async () => {
+      await expect(
+        mock.deleteRecords("orders.created", [{ partition: 0, offset: "5" }]),
+      ).resolves.toBeUndefined();
+    });
+
+    it("readSnapshot resolves to a Map", async () => {
+      const snapshot = await mock.readSnapshot("orders.created");
+      expect(snapshot).toBeInstanceOf(Map);
+      expect(snapshot.size).toBe(0);
+    });
+
+    it("checkpointOffsets resolves to a checkpoint result", async () => {
+      await expect(
+        mock.checkpointOffsets("mock-group", "checkpoints"),
+      ).resolves.toEqual({ groupId: "mock-group", checkpoints: [] });
+    });
+
+    it("restoreFromCheckpoint resolves without error", async () => {
+      await expect(
+        mock.restoreFromCheckpoint("mock-group", "checkpoints"),
+      ).resolves.toBeUndefined();
+    });
+
+    it("connectProducer resolves without error", async () => {
+      await expect(mock.connectProducer()).resolves.toBeUndefined();
+    });
+
+    it("disconnectProducer resolves without error", async () => {
+      await expect(mock.disconnectProducer()).resolves.toBeUndefined();
+    });
+
+    it("onModuleDestroy resolves without error", async () => {
+      await expect(mock.onModuleDestroy()).resolves.toBeUndefined();
+    });
+
+    it("exposes every extended method as a callable mock function", () => {
+      for (const name of [
+        "sendTombstone",
+        "startWindowConsumer",
+        "startRoutedConsumer",
+        "startTransactionalConsumer",
+        "listConsumerGroups",
+        "describeTopics",
+        "deleteRecords",
+        "readSnapshot",
+        "checkpointOffsets",
+        "restoreFromCheckpoint",
+        "connectProducer",
+        "disconnectProducer",
+        "onModuleDestroy",
+      ] as const) {
+        expect(mock[name]).toBeDefined();
+        expect(typeof mock[name]).toBe("function");
+        expect(typeof mock[name].mock).toBe("object");
+      }
+    });
+  });
 });

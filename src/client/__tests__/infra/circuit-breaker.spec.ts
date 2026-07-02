@@ -235,9 +235,7 @@ describe("KafkaClient — Circuit Breaker", () => {
 
   describe("instrumentation hooks", () => {
     async function setupWithInstrumentation(inst: any) {
-      const instrumented = new (
-        await import("../../kafka.client")
-      ).KafkaClient<TestTopicMap>("test-client", "test-group", ["localhost:9092"], {
+      const instrumented = new KafkaClient<TestTopicMap>("test-client", "test-group", ["localhost:9092"], {
         instrumentation: [inst],
       });
 
@@ -284,9 +282,7 @@ describe("KafkaClient — Circuit Breaker", () => {
         .mockRejectedValueOnce(new Error("fail"))
         .mockResolvedValue(undefined);
 
-      const instrumented = new (
-        await import("../../kafka.client")
-      ).KafkaClient<TestTopicMap>("test-client", "test-group", ["localhost:9092"], {
+      const instrumented = new KafkaClient<TestTopicMap>("test-client", "test-group", ["localhost:9092"], {
         instrumentation: [{ onCircuitClose }],
       });
 

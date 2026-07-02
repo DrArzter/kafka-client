@@ -10,6 +10,8 @@ import {
   mockListTopics,
   mockSetOffsets,
   mockFetchTopicOffsets,
+  mockFetchTopicOffsetsByTimestamp,
+  setRunningConsumer,
   KafkaClient,
 } from "../helpers";
 
@@ -396,6 +398,45 @@ describe("KafkaClient — Consumer Groups", () => {
           { topic: "test.topic", partition: 0, offset: "0" },
         ]),
       ).rejects.toThrow("still running");
+    });
+  });
+
+  describe("seekToTimestamp", () => {
+    it("falls back to the high watermark for partitions with no offset at the timestamp", async () => {
+      // Partition 0 has an offset at the requested timestamp; partition 1 does not.
+      mockFetchTopicOffsetsByTimestamp.mockResolvedValueOnce([
+        { partition: 0, offset: "42" },
+      ]);
+      // Fallback path reads the current high watermarks.
+      mockFetchTopicOffsets.mockResolvedValueOnce([
+        { partition: 0, low: "0", high: "50" },
+        { partition: 1, low: "0", high: "100" },
+      ]);
+
+      await client.seekToTimestamp(undefined, [
+        { topic: "test.topic", partition: 0, timestamp: 1_700_000_000_000 },
+        { topic: "test.topic", partition: 1, timestamp: 1_700_000_000_000 },
+      ]);
+
+      expect(mockSetOffsets).toHaveBeenCalledTimes(1);
+      expect(mockSetOffsets).toHaveBeenCalledWith({
+        groupId: "test-group",
+        topic: "test.topic",
+        partitions: [
+          { partition: 0, offset: "42" },
+          { partition: 1, offset: "100" }, // high watermark, not "-1"
+        ],
+      });
+    });
+
+    it("throws when the consumer group is still running", async () => {
+      setRunningConsumer(client, "test-group");
+
+      await expect(
+        client.seekToTimestamp(undefined, [
+          { topic: "test.topic", partition: 0, timestamp: 1_700_000_000_000 },
+        ]),
+      ).rejects.toThrow(/still running/);
     });
   });
 });

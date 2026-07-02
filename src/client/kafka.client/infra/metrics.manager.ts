@@ -43,16 +43,26 @@ export class MetricsManager {
   }
 
   /**
-   * Increment the DLQ counter for the envelope's topic, fire all `onDlq` instrumentation hooks,
-   * and notify the circuit breaker of a failure (when `gid` is provided).
+   * Increment the DLQ counter for the envelope's topic and fire all `onDlq` instrumentation hooks.
+   * Circuit breaker failures are recorded separately via `notifyFailure` at the
+   * handler-error boundary — dead-lettering itself is not a circuit event.
    * @param envelope The message envelope being sent to the DLQ.
    * @param reason The reason the message is being dead-lettered.
-   * @param gid Consumer group ID — used to drive circuit breaker state.
    */
-  notifyDlq(envelope: EventEnvelope<any>, reason: DlqReason, gid?: string): void {
+  notifyDlq(envelope: EventEnvelope<any>, reason: DlqReason): void {
     this.metricsFor(envelope.topic).dlqCount++;
     for (const inst of this.deps.instrumentation) inst.onDlq?.(envelope, reason);
-    if (gid) this.deps.onCircuitFailure(envelope, gid);
+  }
+
+  /**
+   * Notify the circuit breaker of a handler failure. Fired on every failed
+   * handler attempt (in-process retries and retry-topic levels included),
+   * independent of whether the message is ultimately dead-lettered.
+   * @param envelope The message envelope whose handler failed.
+   * @param gid Consumer group ID — used to drive circuit breaker state.
+   */
+  notifyFailure(envelope: EventEnvelope<any>, gid: string): void {
+    this.deps.onCircuitFailure(envelope, gid);
   }
 
   /**

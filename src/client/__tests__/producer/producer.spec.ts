@@ -430,5 +430,53 @@ describe("KafkaClient — Producer", () => {
       const sent = mockSend.mock.calls[0][0];
       expect(sent.messages[0].headers["x-lamport-clock"]).toBe("1");
     });
+
+    it("resolves with a partial result after timeoutMs when a seeked partition never delivers", async () => {
+      jest.useFakeTimers();
+
+      // Non-empty partition → recovery seeks it and waits for a message …
+      mockFetchTopicOffsets.mockResolvedValueOnce([
+        { partition: 0, low: "0", high: "5" },
+      ]);
+      // … but eachMessage is never invoked (mockRun resolves without delivering).
+      mockRun.mockResolvedValueOnce(undefined);
+
+      const logger = {
+        log: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+        debug: jest.fn(),
+      };
+
+      const c = new KafkaClient<TestTopicMap>(
+        "test-client",
+        "test-group",
+        ["localhost:9092"],
+        {
+          clockRecovery: { topics: ["test.topic"], timeoutMs: 500 },
+          logger,
+        },
+      );
+
+      let settled = false;
+      const connectPromise = c.connectProducer().then(() => {
+        settled = true;
+      });
+
+      // Let the recovery consumer connect/subscribe/seek microtasks flush;
+      // without the timeout, connectProducer() would hang forever here.
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      await jest.advanceTimersByTimeAsync(500);
+      await connectPromise;
+
+      expect(settled).toBe(true);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringMatching(/timed out after 500 ms/),
+      );
+
+      jest.useRealTimers();
+    });
   });
 });

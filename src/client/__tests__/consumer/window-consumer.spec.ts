@@ -277,4 +277,30 @@ describe("KafkaClient — startWindowConsumer", () => {
 
     jest.useRealTimers();
   });
+
+  // ── Flush failure routing ────────────────────────────────────────
+
+  it("routes every windowed envelope to onMessageLost when a size flush throws", async () => {
+    const flushError = new Error("flush boom");
+    const handler = jest.fn().mockRejectedValue(flushError);
+    const onMessageLost = jest.fn();
+
+    mockRun.mockImplementation(async ({ eachMessage }: any) => {
+      await eachMessage(makeMsg("a", "0"));
+      await eachMessage(makeMsg("b", "1")); // triggers size flush at maxMessages=2
+    });
+
+    await client.startWindowConsumer("test.topic", handler, {
+      maxMessages: 2,
+      maxMs: 60_000,
+      onMessageLost,
+    } as any);
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    // One call per lost envelope in the failed window (2 messages).
+    expect(onMessageLost).toHaveBeenCalledTimes(2);
+    expect(onMessageLost).toHaveBeenCalledWith(
+      expect.objectContaining({ topic: "test.topic", error: flushError }),
+    );
+  });
 });

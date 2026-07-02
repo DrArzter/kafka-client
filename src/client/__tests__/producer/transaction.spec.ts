@@ -191,4 +191,75 @@ describe("KafkaClient — Transaction", () => {
       expect(mockTxAbort).toHaveBeenCalled();
     });
   });
+
+  describe("transaction serialisation", () => {
+    /** A deferred whose resolve is exposed for manual control. */
+    function deferred() {
+      let resolve!: () => void;
+      const promise = new Promise<void>((r) => (resolve = r));
+      return { promise, resolve };
+    }
+
+    it("does not start the second transaction until the first commits", async () => {
+      // Warm up the tx producer once so the concurrent calls below skip the
+      // async producer-connect init and race only on the _txChain serialisation.
+      await client.transaction(async () => {});
+      jest.clearAllMocks();
+
+      const order: string[] = [];
+      const gate = deferred();
+      const fn1Started = deferred();
+
+      // ctx.txProducer.transaction() is called at the start of runTransaction —
+      // one call per transaction. Record the order in which they open.
+      mockTransaction.mockImplementation(async () => {
+        order.push("open");
+        return {
+          send: mockTxSend,
+          commit: mockTxCommit,
+          abort: mockTxAbort,
+          sendOffsets: jest.fn().mockResolvedValue(undefined),
+        };
+      });
+      mockTxCommit.mockImplementation(async () => {
+        order.push("commit");
+      });
+
+      // First tx: blocks inside fn until the gate is released.
+      const first = client.transaction(async () => {
+        order.push("fn1-start");
+        fn1Started.resolve();
+        await gate.promise;
+        order.push("fn1-end");
+      });
+
+      // Second tx fired while the first is still awaiting the gate.
+      const second = client.transaction(async () => {
+        order.push("fn2-start");
+      });
+
+      // Wait until the first transaction's handler has actually started, then
+      // assert the second has NOT begun — it is serialised behind the first.
+      await fn1Started.promise;
+
+      expect(order).toContain("fn1-start");
+      expect(order).not.toContain("fn2-start");
+      // Only the FIRST transaction has opened — the second is queued behind it.
+      expect(order.filter((e) => e === "open")).toHaveLength(1);
+      expect(mockTransaction).toHaveBeenCalledTimes(1);
+
+      // Release the first — it commits, then the second is allowed to proceed.
+      gate.resolve();
+      await Promise.all([first, second]);
+
+      // fn2 must start only after fn1 committed.
+      const commitIdx = order.indexOf("commit");
+      const fn2Idx = order.indexOf("fn2-start");
+      expect(commitIdx).toBeGreaterThan(-1);
+      expect(fn2Idx).toBeGreaterThan(commitIdx);
+
+      expect(mockTransaction).toHaveBeenCalledTimes(2);
+      expect(mockTxCommit).toHaveBeenCalledTimes(2);
+    });
+  });
 });

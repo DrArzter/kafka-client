@@ -1,4 +1,4 @@
-import type { IAdmin } from "../../transport.interface";
+import type { IAdmin } from "../../transport/transport.interface";
 type Admin = IAdmin;
 import type {
   ClientId,
@@ -146,7 +146,14 @@ export class AdminOps {
             const found = results.find(
               (r) => r.partition === partition,
             );
-            return { partition, offset: found?.offset ?? "-1" };
+            if (found) return { partition, offset: found.offset };
+            // No offset at the requested timestamp (empty partition or future
+            // timestamp) — committing a literal "-1" is not portable and can
+            // trigger an auto.offset.reset replay. Commit the actual high
+            // watermark instead so the group resumes at "new messages only".
+            const topicOffsets = await this.deps.admin.fetchTopicOffsets(topic);
+            const po = topicOffsets.find((o) => o.partition === partition);
+            return { partition, offset: po?.high ?? "0" };
           }),
         );
       await this.deps.admin.setOffsets({ groupId: gid, topic, partitions: offsets });
@@ -241,7 +248,8 @@ export class AdminOps {
       name: t.name,
       partitions: t.partitions.map((p) => ({
         partition: p.partitionId ?? p.partition ?? 0,
-        leader: p.leader ?? 0,
+        // -1 is Kafka's own "no leader" sentinel; 0 is a valid broker id
+        leader: p.leader ?? -1,
         replicas: (p.replicas ?? []).map((r) =>
           typeof r === "number" ? r : r.nodeId,
         ),

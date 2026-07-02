@@ -21,6 +21,7 @@ export class AsyncQueue<V> {
    * @param item The value to enqueue.
    */
   push(item: V): void {
+    if (this.closed) return; // late push after close()/fail() — drop, nobody will consume it
     if (this.waiting.length > 0) {
       this.waiting.shift()!.resolve({ value: item, done: false });
     } else {
