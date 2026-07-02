@@ -1,4 +1,4 @@
-import type { KafkaTransport, IProducer, IConsumer } from "../transport.interface";
+import type { KafkaTransport, IProducer, IConsumer } from "../transport/transport.interface";
 import type { SchemaLike } from "../message/topic";
 import type {
   ClientId,
@@ -20,6 +20,9 @@ import type { RetryTopicDeps } from "./consumer/retry-topic";
  * delegates every method to the relevant module.
  */
 export type KafkaClientContext<T> = {
+  /** @internal Phantom type carrier — keeps the topic-map generic flowing through impl modules. */
+  readonly __topicMap?: T;
+
   // ── Identity ──────────────────────────────────────────────────────
   readonly clientId: ClientId;
   readonly defaultGroupId: string;
@@ -31,6 +34,8 @@ export type KafkaClientContext<T> = {
   readonly numPartitions: number;
   readonly txId: string;
   readonly clockRecoveryTopics: string[];
+  /** Max time to wait for clock recovery before proceeding with a partial result. */
+  readonly clockRecoveryTimeoutMs: number;
   readonly lagThrottleOpts: KafkaClientOptions["lagThrottle"];
   readonly instrumentation: KafkaInstrumentation[];
   readonly onMessageLost: KafkaClientOptions["onMessageLost"];
@@ -46,6 +51,11 @@ export type KafkaClientContext<T> = {
   txProducerInitPromise: Promise<IProducer> | undefined;
   /** Per-transactionalId producers used by retry level consumers. */
   readonly retryTxProducers: Map<string, IProducer>;
+  /**
+   * Serialises `transaction()` calls — a transactional producer supports only
+   * one open transaction at a time, so overlapping calls queue behind this chain.
+   */
+  _txChain: Promise<void>;
 
   // ── Consumer tracking ─────────────────────────────────────────────
   readonly consumers: Map<string, IConsumer>;

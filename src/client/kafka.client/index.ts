@@ -1,5 +1,5 @@
-import type { KafkaTransport } from "../transport.interface";
-import { ConfluentTransport } from "./confluent-transport";
+import type { KafkaTransport } from "../transport/transport.interface";
+import { ConfluentTransport } from "../transport/confluent.transport";
 import type { TopicDescriptor, SchemaLike } from "../message/topic";
 import type { EventEnvelope } from "../message/envelope";
 import type {
@@ -32,14 +32,19 @@ import type {
 // Re-export all types so existing `import { ... } from './kafka.client'` keeps working
 export * from "../types";
 
+// Re-export the default deduplication store implementation.
+export { InMemoryDedupStore } from "./infra/dedup.store";
+
 import { getOrCreateConsumer } from "./consumer/ops";
 import { AdminOps } from "./admin/ops";
-import { replayDlqTopic } from "./consumer/dlq-replay";
+import { replayDlqTopic } from "./consumer/features/dlq-replay";
 import { MetricsManager } from "./infra/metrics.manager";
 import { InFlightTracker } from "./infra/inflight.tracker";
 import { CircuitBreakerManager } from "./infra/circuit-breaker.manager";
 import { AsyncQueue } from "./consumer/queue";
 import { toError } from "./consumer/pipeline";
+import { validateClientOptions } from "./validate-options";
+import { resolveSecurityOptions } from "../security/resolve-security";
 
 import type { KafkaClientContext } from "./context";
 import { connectProducerImpl, disconnectImpl } from "./producer/lifecycle";
@@ -51,8 +56,9 @@ import {
 } from "./producer/send";
 import { buildRetryTopicDeps } from "./consumer/setup";
 import { startConsumerImpl, startBatchConsumerImpl, startTransactionalConsumerImpl } from "./consumer/start";
-import { startWindowConsumerImpl } from "./consumer/window";
-import { startRoutedConsumerImpl } from "./consumer/routed";
+import { startWindowConsumerImpl } from "./consumer/features/window";
+import { startRoutedConsumerImpl } from "./consumer/features/routed";
+import { startDelayedRelayImpl } from "./consumer/features/delayed";
 import {
   stopConsumerImpl,
   pauseConsumerImpl,
@@ -64,7 +70,7 @@ import {
   readSnapshotImpl,
   checkpointOffsetsImpl,
   restoreFromCheckpointImpl,
-} from "./consumer/snapshot";
+} from "./consumer/features/snapshot";
 
 /** DLQ header keys added by the pipeline — stripped before re-publishing. */
 const DLQ_HEADER_KEYS = new Set([
@@ -109,6 +115,7 @@ export class KafkaClient<
     brokers: string[],
     options?: KafkaClientOptions,
   ) {
+    validateClientOptions(clientId, groupId, brokers, options);
     this.clientId = clientId;
 
     const logger = options?.logger ?? {
@@ -121,8 +128,9 @@ export class KafkaClient<
         console.debug(`[KafkaClient:${clientId}] ${msg}`, ...args),
     };
 
+    const security = resolveSecurityOptions(options?.security, brokers, logger);
     const transport: KafkaTransport =
-      options?.transport ?? new ConfluentTransport(clientId, brokers);
+      options?.transport ?? new ConfluentTransport(clientId, brokers, security);
     const producer = transport.producer();
 
     const runningConsumers = new Map<string, "eachMessage" | "eachBatch">();
@@ -163,6 +171,7 @@ export class KafkaClient<
       numPartitions: options?.numPartitions ?? 1,
       txId: options?.transactionalId ?? `${clientId}-tx`,
       clockRecoveryTopics: options?.clockRecovery?.topics ?? [],
+      clockRecoveryTimeoutMs: options?.clockRecovery?.timeoutMs ?? 30_000,
       lagThrottleOpts: options?.lagThrottle,
       instrumentation: options?.instrumentation ?? [],
       onMessageLost: options?.onMessageLost,
@@ -172,6 +181,7 @@ export class KafkaClient<
       producer,
       txProducer: undefined as any,
       txProducerInitPromise: undefined as any,
+      _txChain: Promise.resolve(),
       retryTxProducers: new Map(),
       consumers,
       runningConsumers,
@@ -410,6 +420,36 @@ export class KafkaClient<
     options?: ConsumerOptions<T>,
   ): Promise<ConsumerHandle> {
     return startRoutedConsumerImpl(this.ctx, topics, routing, options);
+  }
+
+  // ── Consumer: delayed delivery relay ──────────────────────────────
+
+  /**
+   * Start a relay that delivers messages produced with
+   * `SendOptions.deliverAfterMs` from `<topic>.delayed` to their target topic
+   * once their deadline passes.
+   *
+   * Forwarding is transactional (produce + source-offset commit are atomic),
+   * so no duplicates are relayed even if the relay crashes mid-forward.
+   * Delivery time is a lower bound — the relay must be running for delayed
+   * messages to be delivered at all.
+   *
+   * @param topics Target topic name(s) whose `<topic>.delayed` staging topics to relay.
+   * @param options Optional `groupId` override (default: `<defaultGroupId>-delayed-relay`).
+   *
+   * @example
+   * ```ts
+   * await kafka.startDelayedRelay(['orders.reminder']);
+   * await kafka.sendMessage('orders.reminder', payload, { deliverAfterMs: 60_000 });
+   * // → delivered to orders.reminder ~60 s later
+   * ```
+   */
+  public async startDelayedRelay(
+    topics: (keyof T & string) | Array<keyof T & string>,
+    options?: { groupId?: string },
+  ): Promise<ConsumerHandle> {
+    const list = (Array.isArray(topics) ? topics : [topics]) as string[];
+    return startDelayedRelayImpl(this.ctx, list, options);
   }
 
   // ── Consumer: transactional EOS ───────────────────────────────────
