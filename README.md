@@ -24,17 +24,25 @@ Type-safe Kafka client for Node.js. Framework-agnostic core with a first-class N
   - [Iterator: consume()](#iterator-consume)
 - [Multiple consumer groups](#multiple-consumer-groups)
 - [Partition key](#partition-key)
+  - [Typed partition keys](#typed-partition-keys)
 - [Message headers](#message-headers)
 - [Batch sending](#batch-sending)
+- [Delayed delivery](#delayed-delivery)
 - [Batch consuming](#batch-consuming)
 - [Tombstone messages](#tombstone-messages)
 - [Compression](#compression)
 - [Transactions](#transactions)
 - [Consumer interceptors](#consumer-interceptors)
 - [Instrumentation](#instrumentation)
+  - [OpenTelemetry metrics](#opentelemetry-metrics)
+- [Transport security](#transport-security)
+  - [AWS MSK IAM & GCP authentication](#aws-msk-iam--gcp-authentication)
+  - [ACL requirements](#acl-requirements)
+- [Environment configuration](#environment-configuration)
 - [Options reference](#options-reference)
 - [Error classes](#error-classes)
 - [Deduplication (Lamport Clock)](#deduplication-lamport-clock)
+  - [Pluggable deduplication store](#pluggable-deduplication-store)
 - [Retry topic chain](#retry-topic-chain)
 - [stopConsumer](#stopconsumer)
 - [Pause and resume](#pause-and-resume)
@@ -53,7 +61,10 @@ Type-safe Kafka client for Node.js. Framework-agnostic core with a first-class N
 - [Header-based routing](#header-based-routing)
 - [Lag-based producer throttling](#lag-based-producer-throttling)
 - [Transactional consumer](#transactional-consumer)
+- [Transactional outbox](#transactional-outbox)
+- [Schema Registry client](#schema-registry-client)
 - [Admin API](#admin-api)
+- [DLQ CLI](#dlq-cli)
 - [Graceful shutdown](#graceful-shutdown)
 - [Consumer handles](#consumer-handles)
 - [onMessageLost](#onmessagelost)
@@ -61,8 +72,11 @@ Type-safe Kafka client for Node.js. Framework-agnostic core with a first-class N
 - [onRebalance](#onrebalance)
 - [Consumer lag](#consumer-lag)
 - [Handler timeout warning](#handler-timeout-warning)
+- [Static group membership](#static-group-membership)
 - [Schema validation](#schema-validation)
+  - [Versioned schemas](#versioned-schemas)
   - [Context-aware validators](#context-aware-validators-schemaparsecontext)
+- [Constructor options validation](#constructor-options-validation)
 - [Health check](#health-check)
 - [Testing](#testing)
 - [Project structure](#project-structure)
@@ -107,13 +121,27 @@ Safe by default. Configurable when you need it. Escape hatches for when you know
 - **Declarative & imperative** — use `@SubscribeTo()` decorator or `startConsumer()` directly
 - **Async iterator** — `consume<K>()` returns an `AsyncIterableIterator<EventEnvelope<T[K]>>` for `for await` consumption; breaking out of the loop stops the consumer automatically
 - **Message TTL** — `messageTtlMs` drops or DLQs messages older than a configurable threshold, preventing stale events from poisoning downstream systems after a lag spike
-- **Circuit breaker** — `circuitBreaker` option applies a sliding-window breaker per topic-partition; pauses delivery on repeated DLQ failures and resumes after a configurable recovery window
+- **Circuit breaker** — `circuitBreaker` option applies a sliding-window breaker per topic-partition; pauses delivery on repeated handler failures and resumes after a configurable recovery window
 - **Seek to offset** — `seekToOffset(groupId, assignments)` seeks individual partitions to explicit offsets for fine-grained replay
 - **Tombstone messages** — `sendTombstone(topic, key)` sends a null-value record to compact a key out of a log-compacted topic; all instrumentation hooks still fire
 - **Regex topic subscription** — `startConsumer([/^orders\..+/], handler)` subscribes using a pattern; the broker routes matching topics to the consumer dynamically
 - **Compression** — per-send `compression` option (`gzip`, `snappy`, `lz4`, `zstd`) in `SendOptions` and `BatchSendOptions`
 - **Partition assignment strategy** — `partitionAssigner` in `ConsumerOptions` chooses between `cooperative-sticky` (default), `roundrobin`, and `range`
 - **Admin API** — `listConsumerGroups()`, `describeTopics()`, `deleteRecords()` for group inspection, partition metadata, and message deletion
+- **Typed partition keys** — `topic('orders').type<T>().key(m => m.orderId)` binds a partition-key extractor to a descriptor so related messages land on the same partition without passing `key` at every call site
+- **Versioned schemas** — `versionedSchema({ 1: v1, 2: v2 }, { migrate })` dispatches validation on the `x-schema-version` header and upgrades old shapes to the latest
+- **Constructor validation** — the `KafkaClient` constructor fails fast, throwing a single aggregated error that lists every invalid config value instead of surfacing a confusing driver error on first use
+- **Pluggable deduplication store** — swap the in-memory Lamport-clock store for a `DedupStore` (e.g. Redis-backed) so deduplication survives restarts and rebalances; fail-open on store errors
+- **Delayed delivery** — `sendMessage(..., { deliverAfterMs })` stages messages in `<topic>.delayed`; a `startDelayedRelay()` consumer forwards them transactionally once the deadline passes
+- **OpenTelemetry metrics** — `otelMetricsInstrumentation()` records send/consume counters and a handler-duration histogram; `otelLagGauge()` reports per-partition consumer lag as an observable gauge
+- **Transport security** — `security: { ssl, sasl }` with secure-by-default rules: SASL auto-enables TLS, plaintext to non-local brokers warns once (silenceable via `allowInsecure: true`); SASL mechanisms `plain`, `scram-sha-256`, `scram-sha-512`, `oauthbearer`
+- **AWS MSK / GCP auth** — `awsMskIamProvider({ region })` and `gcpAccessTokenProvider()` supply OAUTHBEARER tokens from the standard AWS / Google credential chains (IRSA, task roles, ADC)
+- **ACL requirements helper** — `describeRequiredAcls()` enumerates every derived topic, companion group, ephemeral group, and transactional id a service needs; render them as `kafka-acls.sh` commands or an MSK IAM policy
+- **Environment configuration** — `kafkaClientConfigFromEnv()`, `consumerOptionsFromEnv()`, and `mergeConsumerOptions()` build config from env vars with `code > env > defaults` precedence
+- **Transactional outbox** — `startOutboxRelay()` publishes rows from a DB outbox table to Kafka inside a transaction; at-least-once with stable `eventId` for downstream dedup
+- **Schema Registry client** — `SchemaRegistryClient` + `registrySchema()` keep locally-defined schemas in lockstep with a Confluent-compatible registry (validation/evolution, not Avro wire-format serde)
+- **Static group membership** — `groupInstanceId` (`group.instance.id`) skips rebalance on k8s rolling restarts within `session.timeout.ms`
+- **DLQ CLI** — `kafka-client-dlq ls | peek | replay` for inspecting and re-publishing dead letter queues from the terminal
 
 See the [Roadmap](./ROADMAP.md) for upcoming features and version history.
 
@@ -605,6 +633,36 @@ await this.kafka.sendMessage(
 );
 ```
 
+### Typed partition keys
+
+Instead of passing `key` at every call site, bind a partition-key extractor to the topic descriptor with `.key()`. The extractor runs on every send through that descriptor, so messages with the same logical key always land on the same partition — you never forget to set it. Available on both `.type<T>()` and `.schema()` descriptors:
+
+```typescript
+import { topic } from '@drarzter/kafka-client';
+
+const OrderCreated = topic('order.created')
+  .type<{ orderId: string; userId: string; amount: number }>()
+  .key((m) => m.orderId);
+
+// Key is derived automatically from the payload — no `key` needed
+await kafka.sendMessage(OrderCreated, { orderId: '123', userId: '456', amount: 100 });
+// → produced with key '123'
+
+// Works with schema descriptors too
+const PaymentTaken = topic('payment.taken')
+  .schema(z.object({ paymentId: z.string(), orderId: z.string() }))
+  .key((m) => m.orderId);
+```
+
+The extractor runs on the **original (pre-validation) payload**. An explicit `key` in `SendOptions` — or a batch item's `key` — always wins over the descriptor's extractor:
+
+```typescript
+// Explicit key overrides the extractor
+await kafka.sendMessage(OrderCreated, { orderId: '123', userId: '456', amount: 100 }, {
+  key: 'custom-partition-key',
+});
+```
+
 ## Message headers
 
 Attach metadata to messages:
@@ -641,6 +699,33 @@ await this.kafka.sendBatch('order.created', [
   { value: { orderId: '3', userId: '30', amount: 100 }, key: '3' },
 ]);
 ```
+
+## Delayed delivery
+
+Schedule a message for future delivery with `deliverAfterMs`. Instead of going straight to the target topic, the message is produced to a `<topic>.delayed` staging topic carrying `x-delayed-until` (deadline) and `x-delayed-target` headers. A **relay consumer** started via `startDelayedRelay()` holds each message until its deadline passes, then forwards it to the target topic:
+
+```typescript
+// 1. Start the relay once (per process) for the topics you delay-deliver to
+await kafka.startDelayedRelay(['order.reminder']);
+
+// 2. Send a message that should arrive in ~1 hour
+await kafka.sendMessage(
+  'order.reminder',
+  { orderId: '123', channel: 'email' },
+  { deliverAfterMs: 60 * 60 * 1000 },
+);
+// → staged in order.reminder.delayed, forwarded to order.reminder ~1 h later
+```
+
+`deliverAfterMs` also works on `sendBatch` — it applies to the whole batch:
+
+```typescript
+await kafka.sendBatch('order.reminder', messages, { deliverAfterMs: 30_000 });
+```
+
+The relay defaults to a `<defaultGroupId>-delayed-relay` consumer group; override it with `startDelayedRelay(topics, { groupId })`. Forwarding is **transactional** — the produce to the target topic and the source-offset commit happen atomically, so no duplicates are relayed even if the relay crashes mid-forward. The original key, value, and envelope headers (`x-event-id`, `x-correlation-id`, `x-lamport-clock`, `traceparent`) all survive the hop; only the `x-delayed-*` control headers are stripped.
+
+> **Delivery time is a lower bound.** The relay pauses a partition until the head-of-line message's deadline, so later messages on the same partition wait behind it (at-least semantics). Delayed messages are only delivered while the relay is running — treat it as a long-lived consumer, not a fire-and-forget scheduler.
 
 ## Batch consuming
 
@@ -821,6 +906,47 @@ const kafka = new KafkaClient('my-app', 'my-group', brokers, {
 
 `otelInstrumentation()` injects `traceparent` on send, extracts it on consume, and creates `CONSUMER` spans automatically. The span is set as the **active OTel context** for the handler's duration via `context.with()` — so `trace.getActiveSpan()` works inside your handler and any child spans are automatically parented to the consume span. Requires `@opentelemetry/api` as a peer dependency.
 
+### OpenTelemetry metrics
+
+`otelInstrumentation()` handles **traces**. For **metrics**, the same entrypoint exports `otelMetricsInstrumentation()` (counters + a duration histogram) and `otelLagGauge()` (an observable consumer-lag gauge). They share nothing with the tracing instrumentation and compose with it in any order:
+
+```typescript
+import {
+  otelInstrumentation,
+  otelMetricsInstrumentation,
+  otelLagGauge,
+} from '@drarzter/kafka-client/otel';
+
+const kafka = new KafkaClient('my-app', 'my-group', brokers, {
+  instrumentation: [otelInstrumentation(), otelMetricsInstrumentation()],
+});
+```
+
+`otelMetricsInstrumentation()` registers seven instruments under the meter `@drarzter/kafka-client` (created once per instance, not per message):
+
+| Instrument | Type | Attributes | Recorded when |
+| ---------- | ---- | ---------- | ------------- |
+| `kafka.client.messages.sent` | Counter | `topic` | a message is sent |
+| `kafka.client.messages.processed` | Counter | `topic` | a handler succeeds |
+| `kafka.client.messages.retried` | Counter | `topic` | a message is queued for retry |
+| `kafka.client.messages.dlq` | Counter | `topic`, `reason` | a message is routed to a DLQ |
+| `kafka.client.messages.duplicate` | Counter | `topic`, `strategy` | a Lamport-clock duplicate is detected |
+| `kafka.client.consume.errors` | Counter | `topic` | a handler throws |
+| `kafka.client.consume.duration` | Histogram (ms) | `topic` | measured across the handler's execution |
+
+Pass a custom meter with `otelMetricsInstrumentation({ meter })` to route instruments through your own `MeterProvider`; it defaults to `metrics.getMeter('@drarzter/kafka-client')`.
+
+`otelLagGauge()` registers an observable gauge `kafka.client.consumer.lag` (attributes `topic`, `partition`, `groupId`) that polls `getConsumerLag()` on each metric-collection cycle. It returns an **unregister disposer** — call it on shutdown to stop observing:
+
+```typescript
+const unregisterLag = otelLagGauge(kafka, { groupId: 'billing-service' });
+
+// ...later, on shutdown:
+unregisterLag();
+```
+
+`groupId` defaults to the client's constructor group (reported as an empty-string attribute), and `meter` overrides the meter as above. Lag-query failures during a collection cycle are swallowed silently — a broker hiccup reports no samples for that cycle rather than breaking metric collection. Both helpers require `@opentelemetry/api` as a peer dependency.
+
 ### Custom instrumentation
 
 `beforeConsume` can return a `BeforeConsumeResult` — either the legacy `() => void` cleanup function, or an object with `cleanup` and/or `wrap`:
@@ -917,6 +1043,204 @@ Passing a topic name that has not seen any events returns a zero-valued snapshot
 
 Counters are incremented in the same code paths that fire the corresponding hooks — they are always active regardless of whether any instrumentation is configured.
 
+## Transport security
+
+Configure TLS and SASL through the `security` option on `KafkaClientOptions`. The library applies **secure-by-default** rules so credentials never leak onto plaintext connections by accident:
+
+- **SASL auto-enables TLS.** When `sasl` is set and `ssl` is left unset, `ssl` is turned on automatically — SASL credentials always travel over TLS unless you explicitly opt out.
+- **Explicit `ssl: false` with SASL warns.** Setting `sasl` together with `ssl: false` logs a warning that credentials will cross the wire in plaintext — only safe on fully trusted networks.
+- **Plaintext to non-local brokers warns once.** With no `ssl`/`sasl` at all and at least one non-local broker (anything outside `localhost`, `127.0.0.0/8`, `::1`, `0.0.0.0`, `host.docker.internal`), a single warning is logged per client. Acknowledge and silence it with `allowInsecure: true`.
+
+Nothing here ever throws or blocks a connection — the defaults protect, you stay in control.
+
+```typescript
+import { KafkaClient } from '@drarzter/kafka-client/core';
+
+// SASL/SCRAM over TLS — ssl auto-enabled because sasl is set
+const kafka = new KafkaClient('billing-svc', 'billing-group', ['broker.example.com:9093'], {
+  security: {
+    sasl: {
+      mechanism: 'scram-sha-512',
+      username: 'billing-svc',
+      password: process.env.KAFKA_PASSWORD!,
+    },
+    // ssl: true — inferred automatically; set explicitly if you prefer
+  },
+});
+```
+
+`KafkaSecurityOptions`:
+
+| Field | Default | Description |
+| ----- | ------- | ----------- |
+| `ssl` | `true` when `sasl` set, else `false` | Enable TLS |
+| `sasl` | — | SASL authentication (see below) |
+| `allowInsecure` | `false` | Acknowledge an intentionally insecure (plaintext, non-local) setup and silence the warning. No effect when `ssl`/`sasl` are set |
+
+`sasl` is a discriminated union on `mechanism`:
+
+```typescript
+// Username / password mechanisms
+{ mechanism: 'plain' | 'scram-sha-256' | 'scram-sha-512', username: string, password: string }
+
+// Token-based (AWS MSK IAM, GCP, custom)
+{ mechanism: 'oauthbearer', oauthBearerProvider: () => Promise<OAuthBearerToken> }
+```
+
+An `OAuthBearerProvider` is an async factory the driver calls on connect and before each token expiry; it returns `{ value, principal?, lifetimeMs?, extensions? }`.
+
+### AWS MSK IAM & GCP authentication
+
+Two ready-made `oauthbearer` providers cover the common managed-Kafka cases. Both resolve credentials from the platform's standard chain — nothing to hard-code — and rely on an **optional** peer dependency you install alongside this library.
+
+**AWS MSK IAM** — `awsMskIamProvider({ region })` delegates token signing to `aws-msk-iam-sasl-signer-js`. Credentials come from the standard AWS provider chain, so EKS IRSA, ECS task roles, and env credentials all work unchanged. Authorisation is then governed by IAM policies (`kafka-cluster:*` actions) — see [ACL requirements](#acl-requirements) to generate one:
+
+```bash
+npm install aws-msk-iam-sasl-signer-js
+```
+
+```typescript
+import { KafkaClient, awsMskIamProvider } from '@drarzter/kafka-client/core';
+
+const kafka = new KafkaClient('orders-svc', 'orders-group', brokers, {
+  security: {
+    sasl: {
+      mechanism: 'oauthbearer',
+      oauthBearerProvider: awsMskIamProvider({ region: 'eu-west-1' }),
+    },
+  },
+});
+```
+
+**GCP** — `gcpAccessTokenProvider()` delegates to `google-auth-library` using Application Default Credentials, so GKE Workload Identity, attached service accounts, and `GOOGLE_APPLICATION_CREDENTIALS` all work unchanged. It supplies a raw ADC access token; verify the exact token format your cluster expects against current Google documentation:
+
+```bash
+npm install google-auth-library
+```
+
+```typescript
+import { KafkaClient, gcpAccessTokenProvider } from '@drarzter/kafka-client/core';
+
+const kafka = new KafkaClient('events-svc', 'events-group', brokers, {
+  security: {
+    sasl: {
+      mechanism: 'oauthbearer',
+      oauthBearerProvider: gcpAccessTokenProvider(),
+    },
+  },
+});
+```
+
+| Provider | Options | Optional peer dep |
+| -------- | ------- | ----------------- |
+| `awsMskIamProvider` | `{ region }` | `aws-msk-iam-sasl-signer-js` |
+| `gcpAccessTokenProvider` | `{ scopes?, principal?, tokenTtlMs? }` (defaults: `cloud-platform` scope, principal `'gcp'`, 50 min TTL) | `google-auth-library` |
+
+Neither package is a hard dependency — they are dynamically imported on first token fetch. If the package is missing, the provider throws a clear install hint rather than failing at build time.
+
+### ACL requirements
+
+The features that make this library convenient — retry topics, DLQ, delayed delivery, deduplication routing, DLQ replay, snapshots, clock recovery — quietly create **extra topics and consumer groups** (`<topic>.retry.N`, `<topic>.dlq`, `<topic>.delayed`, `<topic>.duplicates`, `<groupId>-retry.N`, timestamped ephemeral groups, transactional ids). On a locked-down cluster every one of them needs an ACL, and the last place you want to discover a missing grant is production at 3 a.m.
+
+`describeRequiredAcls()` enumerates the complete set from a declarative usage profile. Feed the result to `toKafkaAclCommands()` for `kafka-acls.sh` commands, or `toMskIamPolicy()` for an AWS MSK IAM policy document:
+
+```typescript
+import {
+  describeRequiredAcls,
+  toKafkaAclCommands,
+  toMskIamPolicy,
+} from '@drarzter/kafka-client/core';
+
+const resources = describeRequiredAcls({
+  clientId: 'billing-svc',
+  groupIds: ['billing-svc-group'],
+  produceTopics: ['invoices.created'],
+  consumeTopics: ['orders.created'],
+  features: {
+    retryTopics: { maxRetries: 3 },
+    dlq: true,
+    dlqReplay: true,
+    transactions: true,
+  },
+});
+
+// Render kafka-acls.sh commands for a principal
+for (const cmd of toKafkaAclCommands(resources, 'User:billing-svc', 'broker:9092')) {
+  console.log(cmd);
+}
+// kafka-acls.sh --bootstrap-server broker:9092 --add --allow-principal 'User:billing-svc' \
+//   --operation READ --operation DESCRIBE --topic 'orders.created'  # startConsumer
+// kafka-acls.sh ... --topic 'orders.created.dlq'   # dlq: true — failed messages routed to DLQ
+// kafka-acls.sh ... --topic 'orders.created.retry.1' ... --topic 'orders.created.retry.3'
+// kafka-acls.sh ... --group 'billing-svc-group-retry.' --resource-pattern-type prefixed
+// kafka-acls.sh ... --transactional-id 'billing-svc-group-' --resource-pattern-type prefixed
+// kafka-acls.sh ... --group 'orders.created.dlq-replay' --operation DELETE --resource-pattern-type prefixed
+// ...
+
+// Or an MSK IAM policy document
+const policy = toMskIamPolicy(resources, {
+  region: 'eu-west-1',
+  accountId: '123456789012',
+  clusterName: 'prod',
+  clusterUuid: 'abcd-1234',
+});
+```
+
+`describeRequiredAcls()` returns `AclResource[]`, each carrying `resourceType` (`topic` | `group` | `transactional-id` | `cluster`), `patternType` (`literal` | `prefixed`), `name`, `operations`, and a `reason` naming the feature that requires it. Ephemeral-group features (`dlqReplay`, `snapshots`, `clockRecovery`) request `DELETE` on a **prefixed** pattern, because those groups are timestamped and cleaned up after use.
+
+| Feature flag | Adds |
+| ------------ | ---- |
+| `dlq` | `<topic>.dlq` WRITE per consumed topic |
+| `retryTopics: { maxRetries }` | `<topic>.retry.1…N` topics; `<groupId>-retry.` prefixed groups; `<groupId>-` prefixed transactional ids |
+| `delayedDelivery` | `<topic>.delayed` topics; `<groupId>-delayed-relay` group + `-tx` id |
+| `duplicatesTopic` | `<topic>.duplicates` (or a custom topic name) WRITE |
+| `dlqReplay` | `<topic>.dlq-replay` prefixed groups (READ, DESCRIBE, **DELETE**) + DLQ READ |
+| `snapshots` | `<clientId>-snapshot-` prefixed groups (READ, DESCRIBE, **DELETE**) |
+| `clockRecovery` | `<clientId>-clock-recovery-` prefixed groups (READ, DESCRIBE, **DELETE**) |
+| `transactions` | `<clientId>-tx` transactional id |
+| `autoCreateTopics` | cluster `CREATE` (avoid in production) |
+
+`toMskIamPolicy()` maps Kafka operations to `kafka-cluster:*` actions, turns prefixed patterns into `name*` ARN wildcards, and always includes `kafka-cluster:Connect`. **Review both outputs against your organisation's least-privilege standards and current AWS documentation before applying** — they are a starting point, not a rubber stamp.
+
+## Environment configuration
+
+Build client and consumer configuration from environment variables with a strict precedence rule: **explicit code options > env vars > built-in library defaults**. The helpers only *feed* values in — anything you hard-code always wins, and any variable left unset keeps the library default.
+
+The library never reads a `.env` file itself. Load one first with Node's built-in `node --env-file=.env` (Node 20.6+) or the `dotenv` package, then call the helpers:
+
+```typescript
+import { KafkaClient, kafkaClientConfigFromEnv } from '@drarzter/kafka-client/core';
+
+const { clientId, groupId, brokers, options } = kafkaClientConfigFromEnv();
+
+const kafka = new KafkaClient(
+  clientId ?? 'my-svc',           // env value or your fallback
+  groupId ?? 'my-grp',
+  brokers ?? ['localhost:9092'],
+  {
+    ...options,                   // only the keys whose env vars were present
+    onMessageLost: alerting,      // code-level value — always applied, not env-configurable
+  },
+);
+```
+
+`kafkaClientConfigFromEnv(env?, prefix?)` reads `KAFKA_`-prefixed variables (`CLIENT_ID`, `GROUP_ID`, `BROKERS`, `AUTO_CREATE_TOPICS`, `STRICT_SCHEMAS`, `NUM_PARTITIONS`, `TRANSACTIONAL_ID`, `CLOCK_RECOVERY_*`, `LAG_THROTTLE_*`, and the security vars `SSL`, `SASL_MECHANISM`, `SASL_USERNAME`, `SASL_PASSWORD`, `ALLOW_INSECURE`). It returns `{ clientId?, groupId?, brokers?, options }`, emitting only the keys whose variables were set. Malformed booleans/numbers/enums throw with the offending variable named. `oauthbearer` cannot come from env — token providers are functions, so configure them in code.
+
+`consumerOptionsFromEnv(env?, prefix?)` reads `KAFKA_CONSUMER_`-prefixed variables into a `Partial<ConsumerOptions>` (retry, DLQ, deduplication, circuit breaker, TTL, `GROUP_INSTANCE_ID`, and more). Merge it under your code-level options with `mergeConsumerOptions()`, which applies the precedence rule — later layers win, and the nested objects (`retry`, `deduplication`, `circuitBreaker`, `subscribeRetry`) are deep-merged so a code layer can override a single field:
+
+```typescript
+import { consumerOptionsFromEnv, mergeConsumerOptions } from '@drarzter/kafka-client/core';
+
+const envDefaults = consumerOptionsFromEnv();
+await kafka.startConsumer(
+  ['orders'],
+  handler,
+  mergeConsumerOptions(envDefaults, { dlq: true }), // code layer wins on conflict
+);
+```
+
+Both helpers accept an explicit `env` object (handy in tests) and a custom variable `prefix`. See [`docs/configuration.md`](./docs/configuration.md) for the full variable reference and [`.env.example`](./.env.example) for a ready-to-copy template.
+
 ## Options reference
 
 ### Send options
@@ -931,8 +1255,9 @@ Options for `sendMessage()` — the third argument:
 | `schemaVersion` | `1` | Schema version for the payload |
 | `eventId` | auto | Override the auto-generated event ID (UUID v4) |
 | `compression` | — | Compression codec for the message set: `'gzip'`, `'snappy'`, `'lz4'`, `'zstd'`; omit to send uncompressed |
+| `deliverAfterMs` | — | Delay delivery by at least this many milliseconds via a `<topic>.delayed` staging topic; requires a running `startDelayedRelay()` (see [Delayed delivery](#delayed-delivery)) |
 
-`sendBatch()` accepts `compression` as a top-level option (not per-message); all other options are per-message inside the array items.
+`sendBatch()` accepts `compression` and `deliverAfterMs` as top-level options (not per-message); all other options are per-message inside the array items.
 
 ### Consumer options
 
@@ -951,15 +1276,17 @@ Options for `sendMessage()` — the third argument:
 | `handlerTimeoutMs` | — | Log a warning if the handler hasn't resolved within this window (ms) — does not cancel the handler |
 | `deduplication.strategy` | `'drop'` | What to do with duplicate messages: `'drop'` silently discards, `'dlq'` forwards to `{topic}.dlq` (requires `dlq: true`), `'topic'` forwards to `{topic}.duplicates` |
 | `deduplication.duplicatesTopic` | `{topic}.duplicates` | Custom destination for `strategy: 'topic'` |
+| `deduplication.store` | in-memory | Pluggable `DedupStore` for the per-partition last-processed clock; supply a persistent store (e.g. Redis) so dedup survives restarts/rebalances (see [Pluggable deduplication store](#pluggable-deduplication-store)) |
 | `messageTtlMs` | — | Drop (or DLQ) messages older than this many milliseconds at consumption time; evaluated against the `x-timestamp` header; see [Message TTL](#message-ttl) |
-| `circuitBreaker` | — | Enable circuit breaker with `{}` for zero-config defaults; requires `dlq: true`; see [Circuit breaker](#circuit-breaker) |
-| `circuitBreaker.threshold` | `5` | DLQ failures within `windowSize` that opens the circuit |
+| `circuitBreaker` | — | Enable circuit breaker with `{}` for zero-config defaults; see [Circuit breaker](#circuit-breaker) |
+| `circuitBreaker.threshold` | `5` | Failed handler attempts within `windowSize` that open the circuit |
 | `circuitBreaker.recoveryMs` | `30_000` | Milliseconds to wait in OPEN state before entering HALF_OPEN |
 | `circuitBreaker.windowSize` | `threshold × 2, min 10` | Sliding window size in messages |
 | `circuitBreaker.halfOpenSuccesses` | `1` | Consecutive successes in HALF_OPEN required to close the circuit |
 | `queueHighWaterMark` | unbounded | Max messages buffered in the `consume()` iterator queue before the partition is paused; resumes at 50% drain. Only applies to `consume()` |
 | `batch` | `false` | (decorator only) Use `startBatchConsumer` instead of `startConsumer` |
 | `partitionAssigner` | `'cooperative-sticky'` | Partition assignment strategy: `'cooperative-sticky'` (minimal movement on rebalance, best for horizontal scaling), `'roundrobin'` (even distribution), `'range'` (contiguous partition ranges) |
+| `groupInstanceId` | — | Static group membership (`group.instance.id`) — a member that restarts within `session.timeout.ms` rejoins with the same partitions and no rebalance. Must be unique per member; not propagated to retry companions. See [Static group membership](#static-group-membership) |
 | `onTtlExpired` | — | Per-consumer override of the client-level `onTtlExpired` callback; takes precedence when set. Receives `TtlExpiredContext` — same shape as the client-level hook |
 | `onMessageLost` | — | Per-consumer override of the client-level `onMessageLost` callback; takes precedence when set. Use for consumer-specific dead-message alerting or structured logging |
 | `onRetry` | — | Per-consumer retry callback; fires **in addition to** the built-in metrics hook (does not replace it). Same signature as `KafkaInstrumentation.onRetry` |
@@ -980,11 +1307,20 @@ Passed to `KafkaModule.register()` or returned from `registerAsync()` factory:
 | `autoCreateTopics` | `false` | Auto-create topics on first send (dev only) |
 | `numPartitions` | `1` | Number of partitions for auto-created topics |
 | `strictSchemas` | `true` | Validate string topic keys against schemas registered via TopicDescriptor |
+| `security` | — | TLS + SASL transport security with secure-by-default rules (`{ ssl, sasl, allowInsecure }`); see [Transport security](#transport-security) |
 | `instrumentation` | `[]` | Client-wide instrumentation hooks (e.g. OTel). Applied to both send and consume paths |
 | `transactionalId` | `${clientId}-tx` | Transactional producer ID for `transaction()` calls. Must be unique per producer instance across the cluster — two instances sharing the same ID will be fenced by Kafka. The client logs a warning when the same ID is registered twice within one process |
 | `onMessageLost` | — | Called when a message is silently dropped without DLQ — use to alert, log to external systems, or trigger fallback logic |
 | `onTtlExpired` | — | Called when a message is dropped due to TTL expiration (`messageTtlMs`) and `dlq` is not enabled; receives `{ topic, ageMs, messageTtlMs, headers }` |
 | `onRebalance` | — | Called on every partition assign/revoke event across all consumers created by this client |
+| `clockRecovery.topics` | — | Topics to scan on `connectProducer()` to recover the highest `x-lamport-clock`, so the clock stays monotonic across restarts (see [Deduplication](#deduplication-lamport-clock)) |
+| `clockRecovery.timeoutMs` | `30000` | Max time (ms) to wait for clock recovery before proceeding with a partial result |
+| `lagThrottle` | — | Delay sends when a consumer group's lag exceeds `maxLag` (see [Lag-based producer throttling](#lag-based-producer-throttling)) |
+| `lagThrottle.maxLag` | — | Lag threshold (messages) above which sends are delayed (required when `lagThrottle` is set) |
+| `lagThrottle.groupId` | default group | Consumer group whose lag is monitored |
+| `lagThrottle.pollIntervalMs` | `5000` | How often (ms) to poll `getConsumerLag()` in the background |
+| `lagThrottle.maxWaitMs` | `30000` | Max time (ms) a send waits while throttled before proceeding anyway (best-effort, not hard back-pressure) |
+| `transport` | `ConfluentTransport` | Custom `KafkaTransport` implementation — target an alternative broker library or inject a deterministic fake in tests |
 
 **Module-scoped** (default) — import `KafkaModule` in each module that needs it:
 
@@ -1147,6 +1483,50 @@ Deduplication state is **in-memory and per-consumer-instance**. Understand what 
 
 Use this feature as a lightweight first line of defence — not as a substitute for idempotent business logic.
 
+### Pluggable deduplication store
+
+The in-memory limitation above is only the **default**. Pass a `store` in `deduplication` to back the per-partition clock with any external system — Redis, a database, anything — so deduplication survives process restarts and rebalances. The store implements the `DedupStore` interface:
+
+```typescript
+import { DedupStore } from '@drarzter/kafka-client';
+
+interface DedupStore {
+  // Return the last processed clock for a group + "topic:partition", or undefined.
+  getLastClock(groupId: string, topicPartition: string): number | undefined | Promise<number | undefined>;
+  // Persist the last processed clock for a group + "topic:partition".
+  setLastClock(groupId: string, topicPartition: string, clock: number): void | Promise<void>;
+}
+```
+
+Both methods may be synchronous or return a promise. A minimal Redis-backed store:
+
+```typescript
+class RedisDedupStore implements DedupStore {
+  constructor(private readonly redis: RedisClient) {}
+
+  private key(groupId: string, topicPartition: string) {
+    return `dedup:${groupId}:${topicPartition}`;
+  }
+
+  async getLastClock(groupId: string, topicPartition: string) {
+    const raw = await this.redis.get(this.key(groupId, topicPartition));
+    return raw === null ? undefined : Number(raw);
+  }
+
+  async setLastClock(groupId: string, topicPartition: string, clock: number) {
+    await this.redis.set(this.key(groupId, topicPartition), String(clock));
+  }
+}
+
+await kafka.startConsumer(['payments'], handler, {
+  deduplication: { strategy: 'drop', store: new RedisDedupStore(redis) },
+});
+```
+
+**Failure semantics (fail-open):** if `getLastClock` or `setLastClock` throws or rejects, the error is logged and the message is treated as **not** a duplicate. A transient store outage never silently drops messages — it only weakens deduplication until the store recovers, biasing towards at-least-once delivery.
+
+When `store` is omitted, the built-in `InMemoryDedupStore` is used — the in-session behaviour described above.
+
 ## Retry topic chain
 
 > **tl;dr — recommended production setup:**
@@ -1246,9 +1626,9 @@ Pausing is non-destructive: the consumer stays connected and Kafka preserves the
 
 ## Circuit breaker
 
-Automatically pause delivery from a topic-partition when its DLQ error rate exceeds a threshold. After a recovery window the partition is resumed automatically.
+Automatically pause delivery from a topic-partition when its handler failure rate exceeds a threshold. After a recovery window the partition is resumed automatically.
 
-**`dlq: true` is required** — the breaker counts DLQ events as failures. Without it no failures are recorded and the circuit never opens.
+Failures are recorded at the handler-error boundary: every failed handler attempt counts (including in-process retries and retry-topic chain levels), independent of whether the message ends up in a DLQ. `dlq` is **not** required for the breaker to work.
 
 Zero-config start — all options have sensible defaults:
 
@@ -1287,7 +1667,7 @@ Options:
 
 | Option | Default | Description |
 | ------ | ------- | ----------- |
-| `threshold` | `5` | DLQ failures within `windowSize` that opens the circuit |
+| `threshold` | `5` | Failed handler attempts within `windowSize` that open the circuit |
 | `recoveryMs` | `30_000` | Milliseconds to wait in OPEN state before entering HALF_OPEN |
 | `windowSize` | `threshold × 2, min 10` | Sliding window size in messages |
 | `halfOpenSuccesses` | `1` | Consecutive successes in HALF_OPEN required to close the circuit |
@@ -1385,7 +1765,7 @@ await kafka.seekToTimestamp('payments-group', [
 ]);
 ```
 
-Uses `admin.fetchTopicOffsetsByTime` under the hood. If no offset exists at the requested timestamp (e.g. the partition is empty or the timestamp is in the future), the partition falls back to `-1` (end of topic — new messages only).
+Uses `admin.fetchTopicOffsetsByTimestamp` under the hood. If no offset exists at the requested timestamp (e.g. the partition is empty or the timestamp is in the future), the partition falls back to the current high watermark (end of topic — new messages only).
 
 **Important:** the consumer group must be stopped before seeking. Assignments for the same topic are batched into a single `admin.setOffsets` call.
 
@@ -1691,6 +2071,117 @@ await kafka.startTransactionalConsumer(
 
 `retryTopics: true` is rejected at startup — EOS redelivery on failure is already guaranteed by the transaction. `autoCommit` is always `false` (managed internally).
 
+## Transactional outbox
+
+The transactional-outbox pattern decouples "write my business state" from "publish an event" so the two can never diverge. Application code writes an event row into an outbox table **in the same DB transaction** as its business writes; a relay polls that table and publishes the rows to Kafka, marking them published only after Kafka has acked them. If the process dies after the DB commit but before the publish, the row is still there and gets published on the next poll — the event is never lost.
+
+`startOutboxRelay()` runs that relay against any `OutboxStore` you implement. The library never touches your database — you own the schema and the queries; it only needs to read unpublished rows oldest-first and durably mark rows published:
+
+```typescript
+import { startOutboxRelay, OutboxStore } from '@drarzter/kafka-client/core';
+
+// Pseudo-Postgres store — you own the table and the SQL.
+const store: OutboxStore = {
+  async fetchUnpublished(limit) {
+    const { rows } = await pool.query(
+      `SELECT id, topic, payload, key, correlation_id AS "correlationId",
+              event_id AS "eventId", headers
+         FROM outbox
+        WHERE published_at IS NULL
+        ORDER BY created_at ASC
+        LIMIT $1`,
+      [limit],
+    );
+    return rows;
+  },
+  async markPublished(ids) {
+    await pool.query(`UPDATE outbox SET published_at = now() WHERE id = ANY($1)`, [ids]);
+  },
+};
+
+await kafka.connectProducer();
+
+const relay = startOutboxRelay(kafka, store, {
+  pollIntervalMs: 500,   // default 1000
+  batchSize: 200,        // default 100 — rows fetched & published per tick
+  onPublished: (n) => metrics.increment('outbox.published', n),
+  onError: (err, batch) => logger.error(`outbox batch of ${batch.length} failed`, err),
+});
+
+// On shutdown — stop() halts the timer and awaits any in-flight iteration:
+await relay.stop();
+await kafka.disconnect();
+```
+
+Meanwhile, application code inserts outbox rows inside its business transaction:
+
+```typescript
+// Inside a DB transaction, alongside your business INSERT/UPDATE:
+await tx.query(
+  `INSERT INTO outbox (id, topic, payload, key, correlation_id, event_id)
+   VALUES ($1, $2, $3, $4, $5, $6)`,
+  [randomUUID(), 'orders.created', JSON.stringify(order), order.id, corrId, eventId],
+);
+```
+
+**Delivery guarantee: at-least-once.** Each poll publishes the whole batch inside **one Kafka transaction**, then marks the rows published. If the process crashes *after* the Kafka commit but *before* `markPublished`, those rows are re-published on the next tick — a **duplicate**. Persist a stable `eventId` on each row (surfaced as `x-event-id`) so consumers can deduplicate, either via this library's [Lamport-clock deduplication](#deduplication-lamport-clock) or an application-level idempotency check. Iterations never overlap; the loop never dies on error.
+
+`OutboxStore` interface:
+
+| Method | Description |
+| ------ | ----------- |
+| `fetchUnpublished(limit): Promise<OutboxMessage[]>` | Unpublished rows, oldest first, capped at `limit`. Empty array = nothing to do |
+| `markPublished(ids): Promise<void>` | Durably mark ids published; called only after Kafka acks. Idempotent |
+
+An `InMemoryOutboxStore` (with `.add()`, `pendingCount`, `publishedCount`) ships for tests and as executable documentation — it is **not** durable, so it does not provide the "same DB transaction as the business write" guarantee that is the whole point of the pattern. A full Postgres reference implementation lives in [`src/integration/postgres-outbox.integration.spec.ts`](./src/integration/postgres-outbox.integration.spec.ts).
+
+## Schema Registry client
+
+`SchemaRegistryClient` is a minimal, dependency-free client for the Confluent Schema Registry REST API (works with Confluent Platform/Cloud, Redpanda, Karapace, and the AWS Glue SR proxy). Its scope is deliberately narrow: **subject/version management and compatibility checks** — the pieces needed to keep your locally-defined schemas in lockstep with a central registry. Payload (de)serialisation stays JSON as everywhere else in this library; Avro/Protobuf **wire-format framing with magic bytes is intentionally out of scope**.
+
+```typescript
+import { SchemaRegistryClient } from '@drarzter/kafka-client/core';
+
+const registry = new SchemaRegistryClient({
+  baseUrl: 'http://localhost:8081',
+  auth: { username: apiKey, password: apiSecret }, // optional HTTP Basic (Confluent Cloud)
+  cacheTtlMs: 300_000, // latest-version cache TTL — default 5 min
+});
+
+// Register (idempotent — re-registering the same schema returns the existing id)
+const { id } = await registry.registerSchema('order.created-value', JSON.stringify(orderJsonSchema), 'JSON');
+
+// Fetch (getLatestSchema is cached; getSchemaVersion is not)
+const latest = await registry.getLatestSchema('order.created-value');
+const v2 = await registry.getSchemaVersion('order.created-value', 2);
+
+// Check compatibility against the subject's policy without registering
+const ok = await registry.checkCompatibility('order.created-value', JSON.stringify(candidate));
+```
+
+| Method | Cached | Description |
+| ------ | ------ | ----------- |
+| `getLatestSchema(subject)` | yes (`cacheTtlMs`) | Latest `{ id, version, schema }` for a subject |
+| `getSchemaVersion(subject, version)` | no | A specific registered version |
+| `registerSchema(subject, schema, schemaType?)` | invalidates cache | Register (idempotent); returns `{ id }`. `schemaType` defaults to `'JSON'` |
+| `checkCompatibility(subject, schema, schemaType?)` | no | `true` when the registry reports the schema compatible |
+
+`registrySchema()` bridges a registry subject to this library's `SchemaLike` seam so you can attach it to a `TopicDescriptor` like any other schema. On each `parse` it resolves the subject's latest version (cached), optionally verifies the message's `x-schema-version` is not newer than what is registered, and delegates structural validation to a local validator:
+
+```typescript
+import { topic, registrySchema } from '@drarzter/kafka-client/core';
+import { z } from 'zod';
+
+const OrderCreated = topic('order.created').schema(
+  registrySchema(registry, 'order.created-value', {
+    validator: z.object({ orderId: z.string() }), // local runtime shape check
+    enforceVersion: true, // default — fail loudly if the message version outruns the registry
+  }),
+);
+```
+
+The division of labour: the **registry governs schema evolution** (compatibility across versions); the **local validator governs runtime shape**. When `enforceVersion` is `true` (the default) a producer publishing a version newer than the latest registered version fails loudly rather than drifting silently.
+
 ## Admin API
 
 Inspect consumer groups, topic metadata, and delete records via the built-in admin client — no separate connection needed.
@@ -1734,6 +2225,34 @@ await kafka.deleteRecords('orders.created', [
 ```
 
 Pass `offset: '-1'` to delete all records in a partition (truncate completely).
+
+## DLQ CLI
+
+The package ships a `kafka-client-dlq` binary for inspecting and re-publishing dead letter queues from the terminal — no code needed. It operates on `<topic>.dlq` topics and delegates replay to `KafkaClient.replayDlq`:
+
+```bash
+# List every .dlq topic with its message count (optionally filtered by base-topic prefix)
+kafka-client-dlq ls     --brokers localhost:9092 [--prefix orders]
+
+# Print up to N messages from <topic>.dlq — offset, x-dlq-* headers, and value
+kafka-client-dlq peek   --brokers localhost:9092 --topic orders.created [--limit 5]
+
+# Re-publish <topic>.dlq to its original topic (or --target), full or incremental
+kafka-client-dlq replay --brokers localhost:9092 --topic orders.created [--target orders.manual] [--dry-run] [--from-beginning | --incremental]
+```
+
+| Flag | Command | Description |
+| ---- | ------- | ----------- |
+| `--brokers <list>` | all | Comma-separated broker addresses (**required**) |
+| `--prefix <name>` | `ls` | Only show DLQ topics whose base name starts with `<name>` |
+| `--topic <name>` | `peek`, `replay` | Base topic name — the CLI reads `<name>.dlq` |
+| `--limit <n>` | `peek` | Max messages to print (default `10`) |
+| `--target <t>` | `replay` | Override destination topic (default: `x-dlq-original-topic` header) |
+| `--dry-run` | `replay` | Count what would be replayed without publishing |
+| `--from-beginning` | `replay` | Full replay of all DLQ messages every call (default) |
+| `--incremental` | `replay` | Only messages added since the previous replay |
+
+`--from-beginning` and `--incremental` are mutually exclusive. Run `kafka-client-dlq --help` (or with no arguments) for the full usage text.
 
 ## Graceful shutdown
 
@@ -1899,6 +2418,20 @@ If the handler hasn't resolved within the window, a `warn` is logged:
 
 The handler is **not** cancelled — the warning is diagnostic only. Combine with `retry` to automatically give up after a fixed number of slow attempts.
 
+## Static group membership
+
+Set `groupInstanceId` in `ConsumerOptions` to give a consumer a **static** identity (`group.instance.id`). A member that restarts within the broker's `session.timeout.ms` rejoins the group with the same partition assignment and triggers **no rebalance** — ideal for Kubernetes rolling restarts and short redeploys where a transient rebalance would otherwise stall every consumer in the group:
+
+```typescript
+await kafka.startConsumer(['orders'], handler, {
+  groupInstanceId: `orders-svc-${process.env.HOSTNAME}`,
+});
+```
+
+The id must be **unique per member** within the consumer group — derive it from a stable per-pod value such as the StatefulSet ordinal or hostname. Two live members sharing the same `groupInstanceId` are fenced by the broker.
+
+`groupInstanceId` is applied only to the consumer you set it on. It is **not** propagated to retry-chain companion consumers — those run in their own groups (`<groupId>-retry.N`) and rebalance independently. It can also be supplied via the `KAFKA_CONSUMER_GROUP_INSTANCE_ID` environment variable (see [Environment configuration](#environment-configuration)).
+
 ## Schema validation
 
 Add runtime message validation using any library with a `.parse()` method — Zod, Valibot, ArkType, or a custom validator. No extra dependency required.
@@ -2019,6 +2552,70 @@ interface SchemaParseContext {
 
 Existing validators (Zod, Valibot, ArkType, custom) that only use the first argument continue to work unchanged — the second argument is silently ignored.
 
+### Versioned schemas
+
+`versionedSchema()` composes per-version validators into a single `SchemaLike` that dispatches on the message's `x-schema-version` header (via `SchemaParseContext.version`). Pass a map of version number → validator, plus an optional `migrate` hook that upgrades older shapes to the latest:
+
+```typescript
+import { topic, versionedSchema } from '@drarzter/kafka-client';
+import { z } from 'zod';
+
+const OrderSchema = versionedSchema<{ orderId: string; amountMinor: number }>(
+  {
+    1: z.object({ orderId: z.string(), amount: z.number() }),          // legacy: major units
+    2: z.object({ orderId: z.string(), amountMinor: z.number().int() }), // current: minor units
+  },
+  {
+    // migrate(data, fromVersion, latestVersion) → data in its latest shape
+    migrate: (data, from) =>
+      from === 1
+        ? { orderId: data.orderId, amountMinor: Math.round(data.amount * 100) }
+        : data,
+  },
+);
+
+const OrderCreated = topic('order.created').schema(OrderSchema);
+```
+
+Dispatch rules:
+
+- **Consume path** — the version comes from the `x-schema-version` header (defaults to `1` when absent).
+- **Send path** — the version comes from `SendOptions.schemaVersion` (defaults to `1`).
+- **No parse context** (a direct `schema.parse(data)` call) — the **latest** registered version is assumed.
+
+After a non-latest version is parsed, `migrate` (if provided) is called so your handler always receives the latest shape. Without a `migrate` hook, older versions are returned as parsed and callers must handle shape differences themselves.
+
+A message carrying a version with **no registered schema throws** — the error lists every registered version rather than validating against the wrong shape, so a misconfigured producer fails loudly:
+
+```text
+versionedSchema: no schema registered for version 3 (topic "order.created") — registered versions: 1, 2
+```
+
+## Constructor options validation
+
+The `KafkaClient` constructor validates its arguments up front. If anything is invalid it throws a **single aggregated error** listing every problem at once, so a misconfigured client fails at construction with a clear message instead of surfacing a confusing driver error on first use:
+
+```typescript
+new KafkaClient('', '', [], { numPartitions: 0 });
+// throws:
+// KafkaClient: invalid configuration:
+// - clientId must be a non-empty string
+// - groupId must be a non-empty string
+// - brokers must be a non-empty array of broker addresses
+// - numPartitions must be a positive integer (got 0)
+```
+
+Checks performed:
+
+- `clientId` and `groupId` must be non-empty strings.
+- `brokers` must be a non-empty array with no empty entries — **unless** a custom `transport` is supplied (e.g. `FakeTransport` in tests), in which case an empty `brokers` array is allowed since no broker is dialled.
+- `numPartitions`, when set, must be a positive integer.
+- `transactionalId`, when set, must be non-empty.
+- `clockRecovery.topics` must be an array; `clockRecovery.timeoutMs`, when set, must be `> 0`.
+- `lagThrottle.maxLag` must be `>= 0`; `lagThrottle.pollIntervalMs` must be `> 0`; `lagThrottle.maxWaitMs` must be `>= 0` (each validated only when set).
+
+This applies to both `new KafkaClient(...)` and `KafkaModule.register()` / `registerAsync()`, which construct the client under the hood.
+
 ## Health check
 
 Monitor Kafka connectivity with the built-in health indicator:
@@ -2128,6 +2725,26 @@ npm run test:integration
 The integration suite spins up a single-node KRaft Kafka container and tests sending, consuming, batching, transactions, retry + DLQ, interceptors, health checks, and `fromBeginning` — no mocks.
 
 Both suites run in CI on every push to `main` and on pull requests.
+
+**Chaos suite** — fault-injection tests (broker restarts, forced rebalances) that verify redelivery and offset-commit guarantees under failure:
+
+```bash
+npm run test:chaos
+```
+
+**Benchmark** — measure the wrapper's overhead over the raw driver:
+
+```bash
+npm run bench
+```
+
+The throughput benchmark reports roughly **~2% overhead** versus using `@confluentinc/kafka-javascript` directly — the typed envelope, Lamport clock, and instrumentation hooks cost very little on the hot path.
+
+**Clean up stray containers** — if a Testcontainers run is interrupted, remove leftover containers:
+
+```bash
+npm run containers:clean
+```
 
 ## File naming conventions
 

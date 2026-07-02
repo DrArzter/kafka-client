@@ -9,9 +9,9 @@ Type-safe Kafka client wrapper for NestJS built on `@confluentinc/kafka-javascri
 | Field | Value |
 |---|---|
 | npm name | `@drarzter/kafka-client` |
-| version | `0.9.4` |
-| underlying driver | `@confluentinc/kafka-javascript` ^1.8.0 |
-| build tool | `tsup` (esbuild + tsc for `.d.ts`) |
+| version | `0.10.0` |
+| underlying driver | `@confluentinc/kafka-javascript` ^1.8 (installed 1.10.x) |
+| build tool | `tsup` (esbuild, JS) + `tsc -p tsconfig.build.json` (declarations) |
 | test runner | Jest + ts-jest |
 | target | ES2023, CJS + ESM dual output |
 
@@ -45,11 +45,25 @@ src/
     message/
       envelope.ts                 # EventEnvelope, header constants, ALS context, buildEnvelopeHeaders, decodeHeaders, extractEnvelope
       topic.ts                    # TopicDescriptor, topic() factory, SchemaLike, TopicsFrom
-    transport.interface.ts        # KafkaTransport interface + IProducer, IConsumer, IAdmin, ITransaction, payload types
+    transport/
+      transport.interface.ts      # KafkaTransport interface + IProducer, IConsumer, IAdmin, ITransaction, payload types
+      confluent.transport.ts      # ConfluentTransport implements KafkaTransport — wraps @confluentinc/kafka-javascript (idempotent producer.connect)
+    security/
+      security.types.ts           # KafkaSecurityOptions, KafkaSaslOptions, OAuthBearerProvider
+      resolve-security.ts         # secure-by-default rules (ssl auto-on with sasl, non-local plaintext warning)
+      providers.ts                # awsMskIamProvider, gcpAccessTokenProvider (optional-peer delegation)
+      acl.ts                      # describeRequiredAcls, toKafkaAclCommands, toMskIamPolicy
+    outbox/
+      outbox.types.ts             # OutboxMessage, OutboxStore, OutboxRelayOptions
+      outbox.store.ts             # InMemoryOutboxStore reference implementation
+      outbox.relay.ts             # startOutboxRelay (poll → one tx per batch → markPublished)
+    config/
+      from-env.ts                 # kafkaClientConfigFromEnv, consumerOptionsFromEnv, mergeConsumerOptions
+      index.ts                    # barrel
     kafka.client/
-      index.ts                    # KafkaClient facade (~500 lines) — delegates to impl modules via KafkaClientContext<T>
+      index.ts                    # KafkaClient facade — delegates to impl modules via KafkaClientContext<T>
       context.ts                  # KafkaClientContext<T> — shared state object passed to all impl functions
-      confluent-transport.ts      # ConfluentTransport implements KafkaTransport — wraps @confluentinc/kafka-javascript
+      validate-options.ts         # fail-fast constructor options validation
       admin/
         ops.ts                    # AdminOps: createTopics, fetchOffsets, listGroups, deleteRecords, getConsumerLag, seekToOffset
       consumer/
@@ -74,6 +88,14 @@ src/
         circuit-breaker.manager.ts  # CircuitBreakerManager (per-partition sliding window)
         inflight.tracker.ts         # InFlightTracker (graceful shutdown)
         metrics.manager.ts          # MetricsManager (processedCount, retryCount, dlqCount, dedupCount)
+
+  cli/
+    index.ts                      # kafka-client-dlq bin entrypoint (ls | peek | replay)
+    dlq.ts                        # parseArgs + runDlqCommand (unit-testable, DI client factory)
+
+  chaos/                          # Failure-injection suite (docker pause, rebalance under load…) — npm run test:chaos
+
+bench/                            # throughput.bench.ts — raw driver vs wrapper (npm run bench)
 
   nest/
     kafka.module.ts               # KafkaModule.register() / registerAsync()
@@ -118,10 +140,12 @@ new KafkaClient<MyTopics>(clientId, groupId, brokers, options?)
 | `logger` | console | Custom `KafkaLogger` |
 | `transactionalId` | `${clientId}-tx` | TX producer ID — **must be unique per process** |
 | `clockRecovery.topics` | `[]` | Topics to scan for max `x-lamport-clock` on `connectProducer()` |
+| `clockRecovery.timeoutMs` | `30000` | Max wait for clock recovery before proceeding with a partial result (guards against compacted/trimmed last offsets) |
 | `lagThrottle` | — | Pause sends when consumer lag > `maxLag` |
 | `onMessageLost` | — | Called when a message has no DLQ and retries are exhausted |
 | `onTtlExpired` | — | Client-wide TTL expiry callback |
 | `onRebalance` | — | Called on consumer group rebalance |
+| `security` | — | TLS + SASL (`plain`/`scram`/`oauthbearer`). `sasl` without `ssl` → TLS auto-enabled; plaintext to non-local brokers warns unless `allowInsecure: true`. MSK IAM via `awsMskIamProvider`, GCP via `gcpAccessTokenProvider` |
 
 ### Lifecycle
 
@@ -154,7 +178,10 @@ await kafka.transaction(async (tx) => {
 ```
 
 ### `SendOptions`
-`key`, `headers`, `correlationId`, `schemaVersion`, `eventId`, `compression` (`'none'|'gzip'|'snappy'|'lz4'|'zstd'`).
+`key`, `headers`, `correlationId`, `schemaVersion`, `eventId`, `compression` (`'none'|'gzip'|'snappy'|'lz4'|'zstd'`), `deliverAfterMs` (delayed delivery — see below).
+
+### Delayed delivery
+`sendMessage/sendBatch(..., { deliverAfterMs })` produces to `<topic>.delayed` with `x-delayed-until`/`x-delayed-target` headers instead of the target topic. `startDelayedRelay(topics, { groupId? })` starts a relay consumer (group `<defaultGroupId>-delayed-relay`) that pauses each partition until the deadline, then forwards the message to the target topic in a Kafka transaction (produce + source-offset commit atomic — no relay duplicates). Delivery time is a lower bound; the relay must be running. Constants exported from envelope.ts; impl in `consumer/delayed.ts`.
 
 ### Automatic envelope headers on every message
 `x-event-id`, `x-correlation-id`, `x-timestamp`, `x-schema-version`, `x-lamport-clock`, `traceparent` (if OTel instrumentation active or ALS context has it).
@@ -247,11 +274,12 @@ Handler, offset commit, and downstream sends are atomic. On handler failure → 
 | `retryTopics` | `false` | Durable retry via `<topic>.retry.<n>` topics; forces `autoCommit: false` |
 | `retryTopicAssignmentTimeoutMs` | `10000` | Wait for retry consumer partition assignment |
 | `handlerTimeoutMs` | — | Log warning if handler exceeds this duration (non-cancelling) |
-| `deduplication` | — | Lamport clock dedup: `{ strategy: 'drop'|'dlq'|'topic', duplicatesTopic? }` |
+| `deduplication` | — | Lamport clock dedup: `{ strategy: 'drop'|'dlq'|'topic', duplicatesTopic?, store? }`. `store?: DedupStore` plugs in a persistent backend (e.g. Redis) — defaults to in-memory (`InMemoryDedupStore`). |
 | `messageTtlMs` | — | Drop messages older than N ms (by `x-timestamp` header) |
 | `circuitBreaker` | — | `{ threshold, recoveryMs, windowSize, halfOpenSuccesses }` |
 | `queueHighWaterMark` | — | Backpressure for `consume()` only |
 | `partitionAssigner` | `'cooperative-sticky'` | `'roundrobin'`/`'range'`/`'cooperative-sticky'` |
+| `groupInstanceId` | — | Static group membership (`group.instance.id`) — restart within session timeout without rebalance; unique per member |
 | `interceptors` | `[]` | `ConsumerInterceptor[]` — per-consumer before/after/onError |
 | `subscribeRetry` | — | Retry subscribe if topic doesn't exist yet |
 | `onTtlExpired` | — | Per-consumer TTL callback (overrides client-wide) |
@@ -303,6 +331,10 @@ Per `groupId:topic:partition` sliding window.
 States: **CLOSED** → **OPEN** (partition paused) → **HALF-OPEN** (probe resumes) → **CLOSED**.
 
 - Opens when `failures >= threshold` within the window.
+- A **failure** = one failed handler attempt (fired at the handler-error boundary via
+  `MetricsManager.notifyFailure`, independent of DLQ routing). With in-process `retry`,
+  every failed attempt counts. Failures and successes inside the retry-topic chain also
+  drive the **main** group's breaker (wired in `launchRetryChain`).
 - After `recoveryMs` ms in OPEN → moves to HALF-OPEN.
 - `halfOpenSuccesses` consecutive successes in HALF-OPEN → CLOSED. Any failure → back to OPEN.
 - Instrumentation hooks: `onCircuitOpen`, `onCircuitHalfOpen`, `onCircuitClose`.
@@ -384,11 +416,14 @@ const OrderCreated = topic('order.created').type<{ orderId: string; amount: numb
 // With runtime schema (Zod, Valibot, ArkType, or any { parse() }):
 const OrderCreated = topic('order.created').schema(z.object({ orderId: z.string() }))
 
+// Partition-key extractor — applied on every send unless SendOptions.key is given:
+const OrderCreated = topic('order.created').type<Order>().key((m) => m.orderId)
+
 // Infer topic map from descriptors:
 type MyTopics = TopicsFrom<typeof OrderCreated | typeof OrderCompleted>
 ```
 
-`TopicDescriptor` carries `__topic` (runtime string), `__type` (phantom), `__schema` (optional).
+`TopicDescriptor` carries `__topic` (runtime string), `__type` (phantom), `__schema` (optional), `__key` (optional key extractor; declared with method syntax to keep `M` bivariant).
 
 When passed to `sendMessage` / `startConsumer`, schema is auto-extracted and validated.
 
@@ -400,6 +435,8 @@ When passed to `sendMessage` / `startConsumer`, schema is auto-extracted and val
 - `ctx?: SchemaParseContext` carries `{ topic, headers, version }` for version-aware migration.
 - Schemas registered on `KafkaClient` via `registerSchema(topic, schema)` (called automatically by `TopicDescriptor`).
 - `strictSchemas: true` (default): if a schema exists for a topic, all sends must pass validation.
+- `versionedSchema({ 1: v1, 2: v2 }, { migrate? })` (message/versioned-schema.ts) composes per-version validators into one `SchemaLike` dispatching on `ctx.version` (`x-schema-version`); unknown version → loud throw; older versions optionally migrated to the latest shape. No parse context → latest version assumed.
+- Constructor arguments are validated fail-fast (`validate-options.ts`) — empty clientId/groupId/brokers, bad `numPartitions`, `lagThrottle`, `clockRecovery.timeoutMs` throw one aggregated error at construction.
 
 ---
 
@@ -425,16 +462,44 @@ Cross-cutting — apply to all consumers/producers on the client.
 
 ## OTel instrumentation
 
+`src/otel.ts` exports three helpers (peer: `@opentelemetry/api`). Traces and metrics compose — list both in `instrumentation`; add the lag gauge separately.
+
 ```ts
-import { otelInstrumentation } from '@drarzter/kafka-client/otel'
+import {
+  otelInstrumentation,        // traces
+  otelMetricsInstrumentation, // metrics (counters + histogram)
+  otelLagGauge,               // ObservableGauge for consumer lag
+} from '@drarzter/kafka-client/otel'
 
 const kafka = new KafkaClient(id, group, brokers, {
-  instrumentation: [otelInstrumentation()],
+  instrumentation: [otelInstrumentation(), otelMetricsInstrumentation()],
 })
+
+const unregisterLag = otelLagGauge(kafka, { groupId }) // call on shutdown to stop observing
 ```
+
+### Traces — `otelInstrumentation()`
 
 - **Send**: injects `traceparent` header via W3C propagator.
 - **Consume**: extracts `traceparent`, starts `SpanKind.CONSUMER` span, wraps handler in `context.with(spanCtx)`, ends span on cleanup, records error on handler throw.
+
+### Metrics — `otelMetricsInstrumentation(options?: { meter? })`
+
+Meter defaults to `metrics.getMeter("@drarzter/kafka-client")`. Instruments are created **once per instance** (not per message).
+
+| Instrument | Type | Attributes | Hook |
+|---|---|---|---|
+| `kafka.client.messages.sent` | Counter | `topic` | `afterSend` |
+| `kafka.client.messages.processed` | Counter | `topic` | `onMessage` |
+| `kafka.client.messages.retried` | Counter | `topic` | `onRetry` |
+| `kafka.client.messages.dlq` | Counter | `topic`, `reason` | `onDlq` |
+| `kafka.client.messages.duplicate` | Counter | `topic`, `strategy` | `onDuplicate` |
+| `kafka.client.consume.errors` | Counter | `topic` | `onConsumeError` |
+| `kafka.client.consume.duration` | Histogram (ms) | `topic` | `beforeConsume` → `cleanup()` |
+
+### Lag gauge — `otelLagGauge(kafka, options?: { meter?, groupId? })`
+
+Registers ObservableGauge `kafka.client.consumer.lag` (attrs: `topic`, `partition`, `groupId`) whose async callback polls `kafka.getConsumerLag(groupId)` each collection cycle. `kafka` is typed as the `IKafkaAdmin` sub-interface so it accepts any client. Callback errors are swallowed silently. Returns an unregister function (`removeCallback`).
 
 ---
 
@@ -532,6 +597,10 @@ Auto-detects Jest or Vitest. Pass a `mockFactory` for other frameworks.
 - Require Docker. Kafka is started via `@testcontainers/kafka`.
 - Config: `jest.integration.config.ts`.
 - Run: `npm run test:integration` (uses `--forceExit`).
+
+### Chaos tests (failure injection)
+- `src/chaos/*.chaos.spec.ts` — broker pause/unpause mid-stream, rebalance under load, poison-message → DLQ, lag-throttle engagement. Serial (`maxWorkers: 1`), each spec owns its container.
+- Run: `npm run test:chaos` (config: `jest.chaos.config.ts`). Also: `npm run bench` for the throughput benchmark (wrapper ≈2% overhead vs raw driver).
 - Global setup/teardown in `src/integration/global-setup.ts` / `global-teardown.ts`.
 - Helpers at `src/integration/helpers.ts`.
 
@@ -561,11 +630,16 @@ When the filename already expresses the role — `handler.ts` is a handler, `pip
 | `.decorator` | NestJS decorator definitions | `kafka.decorator.ts` |
 | `.health` | Health indicator | `kafka.health.ts` |
 | `.constants` | Constant values and DI tokens | `kafka.constants.ts` |
+| `.transport` | Transport implementation | `confluent.transport.ts` |
+| `.store` | Pluggable store implementation | `dedup.store.ts`, `outbox.store.ts` |
+| `.relay` | Background relay loop | `outbox.relay.ts` |
 | `.mock` | Jest/Vitest spy double | `client.mock.ts` |
 | `.fake` | Standalone fake implementation | `transport.fake.ts` |
 | `.container` | Test infrastructure wrapper | `test.container.ts` |
 | `.spec` | Unit test | `consumer.spec.ts` |
 | `.integration.spec` | Integration test | `consumer.integration.spec.ts` |
+| `.chaos.spec` | Failure-injection test | `broker-restart.chaos.spec.ts` |
+| `.bench` | Benchmark script | `throughput.bench.ts` |
 
 **Additional rules:**
 
@@ -639,12 +713,15 @@ Before bumping the version, committing, or pushing:
 
 ## Known constraints & gotchas
 
-### TypeScript 6.0 blocked by `@typescript-eslint`
+### TypeScript 6.0 migration (done)
 
-`@typescript-eslint` 8.x declares `peerDependencies: { typescript: ">=4.8.4 <6.0.0" }`. Upgrading to TypeScript 6.0 breaks `npm install` in CI with an ERESOLVE error. Hold at `typescript@^5.9.x` until `@typescript-eslint` releases a version with TS 6.0 peer dep support, then:
-
-1. `npm install typescript@latest @typescript-eslint/eslint-plugin@latest @typescript-eslint/parser@latest`
-2. Add `"ignoreDeprecations": "6.0"` to `tsconfig.json` to silence the `moduleResolution: node` deprecation warning.
+TS is on 6.x with `module`/`moduleResolution: nodenext` (real migration, not a suppression).
+Consequences:
+- Dynamic `import("./x")` of relative paths typechecks as ESM and demands extensions — use
+  static imports instead (all previous dynamic imports were converted).
+- `rootDir: "."` is set explicitly (TS 6 requires it once the inferred common source dir is ambiguous).
+- tsup still injects a deprecated `baseUrl` into its DTS build → `ignoreDeprecations: "6.0"` lives
+  ONLY in `tsup.config.ts` `dts.compilerOptions`, scoped to that build. Remove when tsup fixes it.
 
 ### librdkafka install on Arch/CachyOS
 ```bash
@@ -678,14 +755,42 @@ When replaying from DLQ, the `replayDlq` method strips these headers before re-p
 ### `consume()` does not support `retryTopics`
 Throws at call time. Use `startConsumer()` for durable retry.
 
+### `consume()` is effectively at-most-once under autoCommit
+The iterator enqueues each envelope from `eachMessage` and returns immediately, so with
+`autoCommit: true` (default) the offset is committed when the message is **enqueued**, not
+when the `for await` body finishes processing it. Messages sitting in the in-memory queue
+are lost if the process crashes. `queueHighWaterMark` bounds memory but does not change
+this. Use `startConsumer()` when at-least-once processing is required.
+
+### `startWindowConsumer` relies on autoCommit — failed flushes go to `onMessageLost`
+Window buffering runs on top of a regular consumer with autoCommit, so offsets for
+buffered messages may be committed before the window handler runs. If a size/time/stop
+flush handler throws, the whole window is routed to `onMessageLost` (per-consumer option
+or client-wide) — it is NOT retried and does not go to the DLQ.
+
+### `transaction()` calls are serialised
+A transactional producer supports one open transaction at a time. Overlapping
+`kafka.transaction(...)` calls queue behind an internal promise chain (`ctx._txChain`)
+instead of interleaving begin/commit on the shared tx producer.
+
+### `getConsumerLag` misses never-committed partitions
+`fetchOffsets` only returns partitions with at least one committed offset, so a fresh
+group that has not committed yet reports zero lag. The lag throttle inherits this: it
+will not engage for a consumer group that exists but has never committed.
+
 ### `startWindowConsumer` and `startTransactionalConsumer` do not support `retryTopics`
 Both throw at startup if `retryTopics: true` is set.
 
 ### `highWatermark` is `null` inside retry-topic consumer path
 When `startBatchConsumer` uses `retryTopics: true`, the retry consumers wrap the batch handler for single-message delivery and pass `highWatermark: null`. Don't do lag calculations from `meta.highWatermark` in the retry path.
 
-### Deduplication is in-memory only
-Lamport clock state resets on process restart or rebalance. Only provides within-session deduplication.
+### Retry-topic chain does not apply `messageTtlMs`, `handlerTimeoutMs`, or `deduplication`
+Those options are applied by the **main** consumer's `handleEachMessage` only. Once a
+message enters `<topic>.retry.N`, the companion consumers call the handler directly —
+a message can exceed its TTL inside the retry chain and still be delivered.
+
+### Deduplication is in-memory by default
+With the default store (`InMemoryDedupStore`, backing `ctx.dedupStates`), Lamport clock state resets on process restart or rebalance — providing only within-session deduplication. Pass `deduplication.store: DedupStore` (interface: `getLastClock(groupId, topicPartition)` / `setLastClock(groupId, topicPartition, clock)`, both sync or async) to plug in a persistent backend (e.g. Redis) so dedup survives restarts and rebalances. `DedupStore` and `InMemoryDedupStore` are exported from the public surface. Store errors are **fail-open**: a thrown/rejected read or write is logged via the client logger and the message is treated as NOT a duplicate (at-least-once bias). `resolveDeduplicationContext` (setup.ts) wraps `ctx.dedupStates` in an `InMemoryDedupStore` for the default path, so `disconnect()`/`stopConsumer()` clearing that map still resets in-memory state.
 
 ### `interface extends TTopicMessageMap` doesn't work as generic constraint
 Use `type` aliases or plain interfaces (not extending the type). Internally `TopicMapConstraint<T>` is a self-referencing mapped type, which accepts both.
@@ -717,3 +822,30 @@ await kafka.sendMessage('orders', payload);
 ```
 
 `handle.ready()` is backed by the `onRebalance("assign", ...)` callback and never hangs in unit tests because `FakeConsumer.subscribe()` fires the callback immediately. The `fromBeginning: true` option is an alternative when the consumer can read old messages.
+
+### Producer `connect()` is idempotent at the transport level
+
+librdkafka's compat layer throws "Connect has already been called elsewhere" on a second
+`producer.connect()`. `ConfluentProducer` caches the connect promise, so `connectProducer()`
+plus the lazy pipeline connect (consumers with `dlq`/`retryTopics`/`deduplication` connect
+the shared producer in `setupConsumer`) coexist safely.
+
+### `replayDlq` rejects names already ending in `.dlq`
+
+The `.dlq` suffix is appended internally — passing `orders.dlq` would read `orders.dlq.dlq`.
+A guard throws a clear error instead.
+
+### Security helpers
+
+`describeRequiredAcls()` enumerates every derived resource (retry/dlq/delayed/duplicates
+topics, companion + ephemeral groups with prefixed patterns, transactional ids) for a usage
+profile; `toKafkaAclCommands()` and `toMskIamPolicy()` render them. Cloud providers
+(`awsMskIamProvider`, `gcpAccessTokenProvider`) delegate to optional peers
+(`aws-msk-iam-sasl-signer-js`, `google-auth-library`) via dynamic import — a clear error
+tells the user what to install.
+
+### DLQ CLI
+
+`kafka-client-dlq ls|peek|replay --brokers …` (bin → `dist/cli/index.js`). `peek` uses the
+`consume()` iterator with a watermark pre-check; `replay` wraps `replayDlq`
+(`--incremental` = `fromBeginning: false`).

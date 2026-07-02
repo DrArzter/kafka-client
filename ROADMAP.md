@@ -6,7 +6,50 @@
 
 ### Larger features
 
-- **Benchmarks** — compare throughput / latency: raw `@confluentinc/kafka-javascript` → `@drarzter/kafka-client` → `@nestjs/microservices` Kafka transport; quantify abstraction overhead
+- **Full Schema Registry serde** — Avro/Protobuf wire-format (magic byte + schema id) on top of the existing `SchemaRegistryClient`; interop with non-JS producers/consumers. (The REST client + `registrySchema()` validation bridge shipped in 0.10.0.)
+- **Field-level payload encryption serde** — envelope encryption behind the `SchemaLike` seam (KMS-backed key per consumer role) for per-message authorisation.
+- **Secured-cluster integration tests** — SASL/SCRAM Kafka container profile exercising the `security` options end-to-end (testcontainers' `withSaslSslListener`).
+- **Retry-chain TTL/timeout propagation** — `messageTtlMs` / `handlerTimeoutMs` currently apply only in the main consumer, not inside `<topic>.retry.N` companions (documented gotcha; consider fixing rather than documenting).
+- **1.0.0 hardening** — freeze the public API after the 0.10 feature wave bakes in production: outbox, delayed delivery, security, env config are new surfaces that may still shift.
+
+---
+
+## Done
+
+### 0.10.0
+
+**Reliability audit (multi-agent) — fixes**
+- Circuit breaker rewired to the handler-error boundary (`notifyFailure`): counts every failed attempt, works without `dlq: true`, retry-chain failures/successes drive the main group's breaker
+- `transaction()` calls serialised (`ctx._txChain`) — concurrent transactions no longer interleave on the shared tx producer
+- Lamport clock recovery bounded by `clockRecovery.timeoutMs` (default 30 s) — compacted/trimmed last offsets no longer hang `connectProducer()`
+- Fixed wrong driver method name `fetchTopicOffsetsByTime` → `fetchTopicOffsetsByTimestamp` (runtime TypeError masked by the Jest mock)
+- `seekToTimestamp` missing-offset fallback now commits the high watermark instead of literal `-1`
+- Window-consumer flush failures route every buffered envelope to `onMessageLost` (size/time/stop paths)
+- `KafkaExplorer` double-registration guard for multi-client setups; `KafkaModule` forwards `transactionalId`/`clockRecovery`/`lagThrottle`/`onTtlExpired`/`transport`/`security`
+- `InFlightTracker` sync-throw counter leak; `AsyncQueue` push-after-close guard; OTel span keying by envelope identity
+- Consumer-only clients now lazily connect the producer for DLQ/retry/duplicates routing; transport `producer.connect()` is idempotent; `replayDlq` rejects names already ending in `.dlq`
+- `createMockKafkaClient` covers the full public API; `IKafkaLifecycle` gains `connectProducer`
+
+**Features**
+- Typed partition keys — `topic().type<T>().key(m => m.orderId)`
+- `versionedSchema({1, 2}, { migrate })` — version-dispatching `SchemaLike`
+- Fail-fast constructor options validation (aggregated error)
+- Pluggable `DedupStore` (in-memory default; Redis reference impl in integration tests)
+- Delayed delivery — `sendMessage(..., { deliverAfterMs })` + transactional `startDelayedRelay()`
+- OTel metrics — `otelMetricsInstrumentation()` (7 instruments) + `otelLagGauge()`
+- Transactional outbox — `OutboxStore` + `startOutboxRelay()` (at-least-once, one tx per batch; Postgres reference impl in integration tests)
+- DLQ CLI — `kafka-client-dlq ls|peek|replay`
+- Security — `KafkaClientOptions.security` (TLS/SASL, secure-by-default: ssl auto-on with sasl, non-local plaintext warning), `awsMskIamProvider`, `gcpAccessTokenProvider`, `describeRequiredAcls` + `toKafkaAclCommands`/`toMskIamPolicy` covering all derived topics/groups/tx-ids
+- Static group membership — `ConsumerOptions.groupInstanceId`
+- Schema Registry REST client + `registrySchema()` validation bridge (dependency-free)
+- Env configuration — `kafkaClientConfigFromEnv` / `consumerOptionsFromEnv` / `mergeConsumerOptions` (code > env > defaults), exhaustive `.env.example`, `docs/configuration.md`
+
+**Infrastructure**
+- TypeScript 6 (real `nodenext` migration, no `ignoreDeprecations`); declarations via `tsc -p tsconfig.build.json`; testcontainers 12; confluent driver 1.10
+- Restructure: `src/client/transport/`, `src/client/kafka.client/consumer/features/`; `toError` moved to `errors.ts`
+- CI hardening: npm ci + cache, Node 20/22 matrix, typecheck step, tag↔version guard, npm provenance, pack verification, `prepack`
+- Chaos suite (`npm run test:chaos`): broker pause mid-stream, rebalance under load, poison-message recovery, lag-throttle engagement; throughput benchmark (`npm run bench`, wrapper ≈2% overhead)
+- Redis/Postgres store integration tests; `containers:clean` script; `docs/` internal documentation set (9 files)
 
 ---
 
