@@ -87,9 +87,9 @@ export default async function globalSetup() {
     },
   });
 
-  // Pre-create topics
-  const admin = kafka.admin();
-  await admin.connect();
+  // Pre-create topics. The container's start() can resolve before the KRaft
+  // controller is fully ready to serve CreateTopics (observed as
+  // "Local: Timed out" with testcontainers >= 12) — retry with backoff.
   const allTopicConfigs = [
     ...ALL_TOPICS.map((topic) => ({ topic, numPartitions: 1 })),
     ...Object.entries(MULTI_PARTITION_TOPICS).map(([topic, numPartitions]) => ({
@@ -97,8 +97,20 @@ export default async function globalSetup() {
       numPartitions,
     })),
   ];
-  await admin.createTopics({ topics: allTopicConfigs });
-  await admin.disconnect();
+  const deadline = Date.now() + 90_000;
+  for (;;) {
+    const admin = kafka.admin();
+    try {
+      await admin.connect();
+      await admin.createTopics({ topics: allTopicConfigs });
+      await admin.disconnect();
+      break;
+    } catch (err) {
+      await admin.disconnect().catch(() => {});
+      if (Date.now() > deadline) throw err;
+      await new Promise((r) => setTimeout(r, 2_000));
+    }
+  }
 
   // Warmup: trigger transaction coordinator initialization
   const warmupKafka = new Kafka({
