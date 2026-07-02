@@ -1,11 +1,14 @@
 {
   "name": "@drarzter/kafka-client",
-  "version": "0.9.4",
+  "version": "0.10.0",
   "description": "Type-safe Kafka client wrapper for NestJS with typed topic-message maps",
   "license": "MIT",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "kafka-client-dlq": "./dist/cli/index.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -58,12 +61,19 @@
     "url": "https://github.com/drarzter/kafka-client"
   },
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && tsc -p tsconfig.build.json",
     "test": "jest",
     "test:integration": "jest --config jest.integration.config.ts --forceExit",
+    "test:chaos": "jest --config jest.chaos.config.ts --forceExit",
+    "bench": "ts-node bench/throughput.bench.ts",
     "lint": "eslint src --fix",
     "format": "prettier --write src",
-    "prepublishOnly": "npm run build"
+    "typecheck": "tsc --noEmit",
+    "containers:clean": "docker ps -aq --filter label=org.testcontainers=true | xargs docker rm -f",
+    "prepack": "npm run build"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "dependencies": {
     "@confluentinc/kafka-javascript": "^1.8.0"
@@ -96,21 +106,24 @@
     "@nestjs/common": "^11.1.13",
     "@nestjs/core": "^11.1.13",
     "@opentelemetry/api": "^1.9.0",
-    "@testcontainers/kafka": "^11.11.0",
+    "@testcontainers/kafka": "^12.0.4",
     "@types/jest": "^30.0.0",
-    "@types/node": "^25.2.2",
+    "@types/node": "^26.1.0",
+    "@types/pg": "^8.11.10",
     "@typescript-eslint/eslint-plugin": "^8.55.0",
     "@typescript-eslint/parser": "^8.55.0",
     "eslint": "^10.2.0",
     "eslint-config-prettier": "^10.1.8",
     "jest": "^30.2.0",
+    "pg": "^8.13.1",
     "prettier": "^3.8.1",
+    "redis": "^4.7.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
-    "testcontainers": "^11.11.0",
+    "testcontainers": "^12.0.4",
     "ts-jest": "^29.4.6",
     "ts-node": "^10.9.2",
     "tsup": "^8.5.1",
-    "typescript": "^5.9.3"
+    "typescript": "^6.0.3"
   }
 }

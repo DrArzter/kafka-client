@@ -1,18 +1,19 @@
 {
   "$schema": "https://json.schemastore.org/tsconfig",
   "compilerOptions": {
+    "rootDir": ".",
     "composite": false,
     "declaration": true,
     "declarationMap": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "isolatedModules": true,
-    "moduleResolution": "node",
+    "moduleResolution": "nodenext",
     "skipLibCheck": true,
     "strict": true,
     "lib": ["ES2023"],
     "types": ["node", "jest"],
-    "module": "commonjs",
+    "module": "nodenext",
     "target": "ES2023",
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true
