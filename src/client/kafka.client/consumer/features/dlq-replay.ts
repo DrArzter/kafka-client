@@ -1,8 +1,8 @@
-import type { IConsumer } from "../../transport.interface";
+import type { IConsumer } from "../../../transport/transport.interface";
 type Consumer = IConsumer;
-import type { KafkaLogger, DlqReplayOptions } from "../../types";
-import { subscribeWithRetry } from "./subscribe-retry";
-import { decodeHeaders } from "../../message/envelope";
+import type { KafkaLogger, DlqReplayOptions } from "../../../types";
+import { subscribeWithRetry } from "../subscribe-retry";
+import { decodeHeaders } from "../../../message/envelope";
 
 /**
  * Dependencies injected into `replayDlqTopic` by `KafkaClient`.
@@ -46,6 +46,12 @@ export async function replayDlqTopic(
   deps: DlqReplayDeps,
   options: DlqReplayOptions = {},
 ): Promise<{ replayed: number; skipped: number }> {
+  if (topic.endsWith(".dlq")) {
+    throw new Error(
+      `replayDlq: pass the ORIGINAL topic name — "${topic}" already ends in ".dlq" ` +
+        `(the ".dlq" suffix is appended internally, so this would read "${topic}.dlq")`,
+    );
+  }
   const dlqTopic = `${topic}.dlq`;
 
   const partitionOffsets = await deps.fetchTopicOffsets(dlqTopic);

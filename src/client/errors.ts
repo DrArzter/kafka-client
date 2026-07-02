@@ -1,4 +1,14 @@
 /**
+ * Coerce an unknown thrown value to an `Error` instance.
+ * Returns the value as-is if it is already an `Error`; otherwise wraps it with `String(error)`.
+ * @param error The value caught in a `catch` clause.
+ * @returns A guaranteed `Error` instance.
+ */
+export function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+/**
  * Error thrown when a consumer message handler fails.
  * @example
  * ```ts

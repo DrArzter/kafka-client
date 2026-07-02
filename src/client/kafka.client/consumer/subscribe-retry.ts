@@ -1,4 +1,4 @@
-import type { IConsumer } from "../../transport.interface";
+import type { IConsumer } from "../../transport/transport.interface";
 import type { KafkaLogger, SubscribeRetryOptions } from "../../types";
 import { toError, sleep } from "./pipeline";
 

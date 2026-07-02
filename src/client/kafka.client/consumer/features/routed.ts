@@ -1,12 +1,12 @@
-import type { KafkaClientContext } from "../context";
+import type { KafkaClientContext } from "../../context";
 import type {
   TopicMapConstraint,
   ConsumerOptions,
   ConsumerHandle,
   RoutingOptions,
-} from "../../types";
-import type { EventEnvelope } from "../../message/envelope";
-import { startConsumerImpl } from "./start";
+} from "../../../types";
+import type { EventEnvelope } from "../../../message/envelope";
+import { startConsumerImpl } from "../start";
 
 // ── startRoutedConsumer ───────────────────────────────────────────────────────
 

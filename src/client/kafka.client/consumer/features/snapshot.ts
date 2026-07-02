@@ -1,4 +1,4 @@
-import type { KafkaClientContext } from "../context";
+import type { KafkaClientContext } from "../../context";
 import type {
   TopicMapConstraint,
   ReadSnapshotOptions,
@@ -6,10 +6,10 @@ import type {
   CheckpointRestoreResult,
   RestoreCheckpointOptions,
   CheckpointEntry,
-} from "../../types";
-import type { EventEnvelope } from "../../message/envelope";
-import { decodeHeaders, extractEnvelope } from "../../message/envelope";
-import { toError } from "./pipeline";
+} from "../../../types";
+import type { EventEnvelope } from "../../../message/envelope";
+import { decodeHeaders, extractEnvelope } from "../../../message/envelope";
+import { toError } from "../pipeline";
 
 /** Minimal context surface required by this module. */
 type SnapshotCtx<T extends TopicMapConstraint<T>> = Pick<

@@ -19,7 +19,7 @@ import type {
   IGroupTopicOffsets,
   IGroupDescription,
   ITopicMetadata,
-} from "../transport.interface";
+} from "./transport.interface";
 
 // ── ConfluentTransaction ──────────────────────────────────────────────────────
 
@@ -57,13 +57,24 @@ class ConfluentTransaction implements ITransaction {
 // ── ConfluentProducer ─────────────────────────────────────────────────────────
 
 class ConfluentProducer implements IProducer {
+  private connectPromise?: Promise<void>;
+
   constructor(private readonly producer: KafkaJS.Producer) {}
 
   async connect(): Promise<void> {
-    await this.producer.connect();
+    // librdkafka's compat layer throws "Connect has already been called
+    // elsewhere" on a second connect() — unlike KafkaJS, it is not idempotent.
+    // Share one in-flight/settled promise so connectProducer() plus the lazy
+    // consumer-pipeline connect (DLQ/retry/duplicates routing) can coexist.
+    this.connectPromise ??= this.producer.connect().catch((err) => {
+      this.connectPromise = undefined;
+      throw err;
+    });
+    return this.connectPromise;
   }
 
   async disconnect(): Promise<void> {
+    this.connectPromise = undefined;
     await this.producer.disconnect();
   }
 
@@ -155,7 +166,7 @@ class ConfluentAdmin implements IAdmin {
     topic: string,
     timestamp: number,
   ): Promise<IPartitionOffset[]> {
-    return (this.admin as any).fetchTopicOffsetsByTime(topic, timestamp);
+    return (this.admin as any).fetchTopicOffsetsByTimestamp(topic, timestamp);
   }
 
   async fetchOffsets(options: {
@@ -207,10 +218,33 @@ class ConfluentAdmin implements IAdmin {
 export class ConfluentTransport implements KafkaTransport {
   private readonly kafka: KafkaJS.Kafka;
 
-  constructor(clientId: string, brokers: string[]) {
-    this.kafka = new KafkaClass({
-      kafkaJS: { clientId, brokers, logLevel: KafkaLogLevel.ERROR },
-    });
+  constructor(
+    clientId: string,
+    brokers: string[],
+    security?: import("../security/security.types").KafkaSecurityOptions,
+  ) {
+    const kafkaJS: any = { clientId, brokers, logLevel: KafkaLogLevel.ERROR };
+    if (security?.ssl !== undefined) kafkaJS.ssl = security.ssl;
+    if (security?.sasl) {
+      if (security.sasl.mechanism === "oauthbearer") {
+        const provider = security.sasl.oauthBearerProvider;
+        kafkaJS.sasl = {
+          mechanism: "oauthbearer",
+          oauthBearerProvider: async () => {
+            const token = await provider();
+            return {
+              value: token.value,
+              principal: token.principal ?? "kafka-client",
+              lifetime: token.lifetimeMs ?? Date.now() + 15 * 60_000,
+              ...(token.extensions && { extensions: token.extensions }),
+            };
+          },
+        };
+      } else {
+        kafkaJS.sasl = security.sasl;
+      }
+    }
+    this.kafka = new KafkaClass({ kafkaJS });
   }
 
   producer(options?: IProducerCreationOptions): IProducer {
@@ -245,6 +279,12 @@ export class ConfluentTransport implements KafkaTransport {
         partitionAssigners: [assigner],
       },
     };
+
+    // Static group membership — native rdkafka config key (the kafkaJS-compat
+    // constructor config extends the native GlobalConfig, so top-level keys pass through).
+    if (options.groupInstanceId) {
+      config["group.instance.id"] = options.groupInstanceId;
+    }
 
     if (options.onRebalance) {
       const cb = options.onRebalance;

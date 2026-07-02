@@ -1,13 +1,13 @@
-import type { KafkaClientContext } from "../context";
+import type { KafkaClientContext } from "../../context";
 import type {
   TopicMapConstraint,
   WindowConsumerOptions,
   WindowMeta,
   ConsumerHandle,
-} from "../../types";
-import type { EventEnvelope } from "../../message/envelope";
-import { startConsumerImpl } from "./start";
-import { toError } from "./pipeline";
+} from "../../../types";
+import type { EventEnvelope } from "../../../message/envelope";
+import { startConsumerImpl } from "../start";
+import { toError } from "../pipeline";
 
 // ── startWindowConsumer ───────────────────────────────────────────────────────
 
@@ -36,6 +36,10 @@ export async function startWindowConsumerImpl<
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let windowStart = 0;
 
+  const onLost =
+    (consumerOptions as { onMessageLost?: typeof ctx.onMessageLost })
+      .onMessageLost ?? ctx.onMessageLost;
+
   const flush = async (trigger: "size" | "time"): Promise<void> => {
     if (flushTimer !== null) {
       clearTimeout(flushTimer);
@@ -43,18 +47,35 @@ export async function startWindowConsumerImpl<
     }
     if (buffer.length === 0) return;
     const envelopes = buffer.splice(0);
-    await handler(envelopes, { trigger, windowStart, windowEnd: Date.now() });
+    try {
+      await handler(envelopes, { trigger, windowStart, windowEnd: Date.now() });
+    } catch (err) {
+      // Offsets for these messages may already be auto-committed — a thrown
+      // flush would otherwise lose the whole window silently. Route every
+      // buffered envelope to onMessageLost so the caller can react.
+      const error = toError(err);
+      ctx.logger.error(
+        `startWindowConsumer: ${trigger}-triggered flush failed — window of ${envelopes.length} message(s) lost:`,
+        error.stack,
+      );
+      for (const envelope of envelopes) {
+        await Promise.resolve(
+          onLost?.({
+            topic: envelope.topic,
+            error,
+            attempt: 0,
+            headers: envelope.headers,
+          }),
+        ).catch(() => {});
+      }
+    }
   };
 
   const scheduleFlush = (): void => {
     if (flushTimer !== null) return;
     flushTimer = setTimeout(() => {
       flushTimer = null;
-      flush("time").catch((err) => {
-        ctx.logger.warn(
-          `startWindowConsumer: time-triggered flush error — ${toError(err).message}`,
-        );
-      });
+      void flush("time");
     }, maxMs);
   };
 
@@ -72,33 +93,8 @@ export async function startWindowConsumerImpl<
 
   const originalStop = handle.stop.bind(handle);
   handle.stop = async (): Promise<void> => {
-    if (flushTimer !== null) {
-      clearTimeout(flushTimer);
-      flushTimer = null;
-    }
-    if (buffer.length > 0) {
-      const envelopes = buffer.splice(0);
-      await handler(envelopes, {
-        trigger: "time",
-        windowStart,
-        windowEnd: Date.now(),
-      }).catch(async (err) => {
-        const error = toError(err);
-        ctx.logger.warn(
-          `startWindowConsumer: shutdown flush error — ${error.message}`,
-        );
-        for (const envelope of envelopes) {
-          await Promise.resolve(
-            ctx.onMessageLost?.({
-              topic: envelope.topic,
-              error,
-              attempt: 0,
-              headers: envelope.headers,
-            }),
-          ).catch(() => {});
-        }
-      });
-    }
+    // flush() handles timer cleanup and routes failures to onMessageLost.
+    await flush("time");
     return originalStop();
   };
 

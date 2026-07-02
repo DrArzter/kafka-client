@@ -118,6 +118,13 @@ export type IConsumerCreationOptions = {
   fromBeginning?: boolean;
   autoCommit?: boolean;
   partitionAssigner?: "cooperative-sticky" | "roundrobin" | "range";
+  /**
+   * Static group membership id (`group.instance.id`). A member that restarts
+   * within the broker's `session.timeout.ms` rejoins with the same partitions
+   * and no rebalance — useful for k8s rolling restarts.
+   * Must be unique per member within a consumer group.
+   */
+  groupInstanceId?: string;
   /** Fired on every partition assign/revoke. */
   onRebalance?: (
     type: "assign" | "revoke",
