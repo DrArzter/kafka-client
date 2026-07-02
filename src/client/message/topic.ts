@@ -64,7 +64,47 @@ export interface TopicDescriptor<
   readonly __type: M;
   /** Runtime schema validator. Present only when created via `topic().schema()`. */
   readonly __schema?: SchemaLike<M>;
+  /**
+   * Partition-key extractor. Present only when created via `.key()`.
+   * Applied on every send through this descriptor unless an explicit
+   * `key` is passed in `SendOptions` / the batch item.
+   *
+   * Declared with method syntax (not a function property) so `M` stays
+   * bivariant — otherwise narrow descriptors would stop being assignable
+   * to `TopicDescriptor<string, Record<string, any>>` parameters.
+   */
+  __key?(message: M): string;
 }
+
+/**
+ * A `TopicDescriptor` that can still be extended with a `.key()` extractor.
+ * Returned by `topic().type()` and `topic().schema()` — usable directly as a
+ * descriptor, or chained once more to declare partition affinity.
+ */
+export type KeyableTopicDescriptor<
+  N extends string,
+  M extends Record<string, any>,
+> = TopicDescriptor<N, M> & {
+  /**
+   * Declare a partition-key extractor for this topic. The extractor runs on
+   * the ORIGINAL (pre-validation) payload of every message sent through this
+   * descriptor, so messages with the same logical key always land on the same
+   * partition without passing `key` at each call site.
+   *
+   * An explicit `SendOptions.key` / batch-item `key` always wins.
+   *
+   * @example
+   * ```ts
+   * const OrderCreated = topic('order.created')
+   *   .type<{ orderId: string; amount: number }>()
+   *   .key((m) => m.orderId);
+   *
+   * await kafka.sendMessage(OrderCreated, { orderId: '42', amount: 100 });
+   * // → produced with key '42'
+   * ```
+   */
+  key(extractor: (message: M) => string): TopicDescriptor<N, M>;
+};
 
 /**
  * Define a typed topic descriptor.
@@ -91,17 +131,32 @@ export interface TopicDescriptor<
 export function topic<N extends string>(name: N) {
   return {
     /** Provide an explicit message type without a runtime schema. */
-    type: <M extends Record<string, any>>(): TopicDescriptor<N, M> => ({
-      __topic: name,
-      __type: undefined as unknown as M,
-    }),
+    type: <M extends Record<string, any>>(): KeyableTopicDescriptor<N, M> =>
+      keyable({
+        __topic: name,
+        __type: undefined as unknown as M,
+      }),
 
     schema: <S extends SchemaLike<Record<string, any>>>(
       schema: S,
-    ): TopicDescriptor<N, InferSchema<S>> => ({
-      __topic: name,
-      __type: undefined as unknown as InferSchema<S>,
-      __schema: schema as unknown as SchemaLike<InferSchema<S>>,
+    ): KeyableTopicDescriptor<N, InferSchema<S>> =>
+      keyable({
+        __topic: name,
+        __type: undefined as unknown as InferSchema<S>,
+        __schema: schema as unknown as SchemaLike<InferSchema<S>>,
+      }),
+  };
+}
+
+/** Attach the chainable `.key()` builder to a plain descriptor. */
+function keyable<N extends string, M extends Record<string, any>>(
+  desc: TopicDescriptor<N, M>,
+): KeyableTopicDescriptor<N, M> {
+  return {
+    ...desc,
+    key: (extractor: (message: M) => string): TopicDescriptor<N, M> => ({
+      ...desc,
+      __key: extractor,
     }),
   };
 }

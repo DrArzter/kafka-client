@@ -173,7 +173,9 @@ export async function buildSendPayload(
         value: JSON.stringify(
           await validateMessage(topicOrDesc, m.value, deps, sendCtx),
         ),
-        key: m.key ?? null,
+        // Explicit key wins; otherwise fall back to the descriptor's .key()
+        // extractor (runs on the original, pre-validation payload).
+        key: m.key ?? topicOrDesc?.__key?.(m.value) ?? null,
         headers: envelopeHeaders,
       };
     }),
