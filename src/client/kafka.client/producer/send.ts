@@ -10,6 +10,10 @@ import type {
 } from "../../types";
 import { buildSendPayload, registerSchema } from "./ops";
 import { ensureTopic, _activeTransactionalIds } from "./lifecycle";
+import {
+  HEADER_DELAYED_TARGET,
+  HEADER_DELAYED_UNTIL,
+} from "../../message/envelope";
 
 // ── Payload builder ───────────────────────────────────────────────────────────
 
@@ -32,6 +36,27 @@ export async function preparePayload<T extends TopicMapConstraint<T>>(
   );
   await ensureTopic(ctx, payload.topic);
   return payload;
+}
+
+// ── Delayed delivery ──────────────────────────────────────────────────────────
+
+/**
+ * Redirect a built payload to the `<topic>.delayed` staging topic, stamping
+ * the `x-delayed-until` / `x-delayed-target` control headers on every message.
+ * A relay started via `startDelayedRelay()` forwards it after the deadline.
+ */
+async function redirectToDelayed<T extends TopicMapConstraint<T>>(
+  ctx: KafkaClientContext<T>,
+  payload: { topic: string; messages: Array<{ headers: MessageHeaders }> },
+  deliverAfterMs: number,
+): Promise<void> {
+  const until = String(Date.now() + deliverAfterMs);
+  for (const m of payload.messages) {
+    m.headers[HEADER_DELAYED_UNTIL] = until;
+    m.headers[HEADER_DELAYED_TARGET] = payload.topic;
+  }
+  payload.topic = `${payload.topic}.delayed`;
+  await ensureTopic(ctx, payload.topic);
 }
 
 // ── Send operations ───────────────────────────────────────────────────────────
@@ -58,6 +83,9 @@ export async function sendMessageImpl<T extends TopicMapConstraint<T>>(
     ],
     options.compression,
   );
+  if (options.deliverAfterMs && options.deliverAfterMs > 0) {
+    await redirectToDelayed(ctx, payload, options.deliverAfterMs);
+  }
   await ctx.producer.send(payload);
   ctx.metrics.notifyAfterSend(payload.topic, payload.messages.length);
 }
@@ -75,6 +103,9 @@ export async function sendBatchImpl<T extends TopicMapConstraint<T>>(
     messages,
     options?.compression,
   );
+  if (options?.deliverAfterMs && options.deliverAfterMs > 0) {
+    await redirectToDelayed(ctx, payload, options.deliverAfterMs);
+  }
   await ctx.producer.send(payload);
   ctx.metrics.notifyAfterSend(payload.topic, payload.messages.length);
 }
@@ -123,7 +154,26 @@ export async function transactionImpl<T extends TopicMapConstraint<T>>(
     });
   }
   ctx.txProducer = await ctx.txProducerInitPromise;
-  const tx = await ctx.txProducer.transaction();
+
+  // A transactional producer supports only ONE open transaction at a time —
+  // serialise overlapping transaction() calls so they cannot interleave
+  // begin/send/commit/abort on the shared producer.
+  const prev = ctx._txChain;
+  let release!: () => void;
+  ctx._txChain = new Promise<void>((r) => (release = r));
+  await prev;
+  try {
+    await runTransaction(ctx, fn);
+  } finally {
+    release();
+  }
+}
+
+async function runTransaction<T extends TopicMapConstraint<T>>(
+  ctx: KafkaClientContext<T>,
+  fn: (txCtx: TransactionContext<T>) => Promise<void>,
+): Promise<void> {
+  const tx = await ctx.txProducer!.transaction();
   try {
     const txCtx: TransactionContext<T> = {
       send: async (topicOrDesc: any, message: any, sendOpts: SendOptions = {}) => {

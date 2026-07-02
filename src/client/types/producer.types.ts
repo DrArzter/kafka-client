@@ -29,6 +29,18 @@ export interface SendOptions {
    * Default: `'none'`.
    */
   compression?: CompressionType;
+  /**
+   * Delay delivery by at least this many milliseconds.
+   *
+   * The message is produced to the `<topic>.delayed` staging topic with
+   * `x-delayed-until` / `x-delayed-target` headers instead of the target
+   * topic. A relay started via `startDelayedRelay()` holds it until the
+   * deadline, then forwards it to the target topic.
+   *
+   * Delivery time is a lower bound (at-least semantics) — actual delivery
+   * depends on the relay being up and partition-level head-of-line waits.
+   */
+  deliverAfterMs?: number;
 }
 
 /**
@@ -72,4 +84,9 @@ export interface BatchSendOptions {
    * Default: `'none'`.
    */
   compression?: CompressionType;
+  /**
+   * Delay delivery of the whole batch by at least this many milliseconds.
+   * See `SendOptions.deliverAfterMs` for semantics.
+   */
+  deliverAfterMs?: number;
 }

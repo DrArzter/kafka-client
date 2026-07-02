@@ -11,6 +11,10 @@ export const HEADER_SCHEMA_VERSION = "x-schema-version";
 export const HEADER_TRACEPARENT = "traceparent";
 /** Monotonically increasing logical clock stamped by the producer for deduplication. */
 export const HEADER_LAMPORT_CLOCK = "x-lamport-clock";
+/** Absolute epoch-ms deadline before which a delayed message must not be delivered. */
+export const HEADER_DELAYED_UNTIL = "x-delayed-until";
+/** Target topic a delayed message is forwarded to once its deadline passes. */
+export const HEADER_DELAYED_TARGET = "x-delayed-target";
 
 // ── EventEnvelope ────────────────────────────────────────────────────
 
