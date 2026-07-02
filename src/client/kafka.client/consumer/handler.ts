@@ -1,4 +1,4 @@
-import type { IProducer, IConsumer } from "../../transport.interface";
+import type { IProducer, IConsumer } from "../../transport/transport.interface";
 type Producer = IProducer;
 type Consumer = IConsumer;
 import {
@@ -21,6 +21,7 @@ import type { SchemaLike } from "../../message/topic";
 import type {
   BatchMeta,
   ConsumerInterceptor,
+  DedupStore,
   DeduplicationOptions,
   DlqReason,
   KafkaClientOptions,
@@ -51,13 +52,17 @@ export type MessageHandlerDeps = {
     strategy: "drop" | "dlq" | "topic",
   ) => void;
   onMessage?: (envelope: EventEnvelope<any>) => void;
+  /** Fired on every failed handler attempt — drives the circuit breaker. */
+  onFailure?: (envelope: EventEnvelope<any>) => void;
 };
 
 /** Active deduplication context passed from KafkaClient to the message handler. */
 export type DeduplicationContext = {
   options: DeduplicationOptions;
-  /** Mutable map: `"topic:partition"` → last processed Lamport clock value. */
-  state: Map<string, number>;
+  /** Backing store for the last processed Lamport clock (in-memory by default). */
+  store: DedupStore;
+  /** Consumer group ID this context belongs to — used as the store key. */
+  groupId: string;
 };
 
 /**
@@ -101,9 +106,12 @@ export type EachMessageOpts = {
 };
 
 /**
- * Check Lamport clock header against per-partition state.
+ * Check Lamport clock header against the deduplication store.
  * Returns `true` if the message is a duplicate and should be skipped.
- * Updates the state map on a fresh message.
+ * Persists the clock on a fresh message.
+ *
+ * Fail-open: if the store's `getLastClock` / `setLastClock` throws or rejects,
+ * the error is logged and the message is treated as not a duplicate.
  */
 async function applyDeduplication(
   envelope: EventEnvelope<any>,
@@ -119,7 +127,17 @@ async function applyDeduplication(
   if (Number.isNaN(incomingClock)) return false; // malformed header → pass through
 
   const stateKey = `${envelope.topic}:${envelope.partition}`;
-  const lastProcessedClock = dedup.state.get(stateKey) ?? -1;
+  let lastProcessedClock: number;
+  try {
+    lastProcessedClock =
+      (await dedup.store.getLastClock(dedup.groupId, stateKey)) ?? -1;
+  } catch (err) {
+    deps.logger.error(
+      `Dedup store getLastClock failed on ${envelope.topic}[${envelope.partition}] — ` +
+        `treating message as not a duplicate (fail-open): ${(err as Error).message}`,
+    );
+    return false; // fail-open → pass through
+  }
 
   if (incomingClock <= lastProcessedClock) {
     const meta: DuplicateMetadata = {
@@ -157,7 +175,14 @@ async function applyDeduplication(
     return true; // signal: skip this message
   }
 
-  dedup.state.set(stateKey, incomingClock);
+  try {
+    await dedup.store.setLastClock(dedup.groupId, stateKey, incomingClock);
+  } catch (err) {
+    deps.logger.error(
+      `Dedup store setLastClock failed on ${envelope.topic}[${envelope.partition}] — ` +
+        `processing message anyway (fail-open): ${(err as Error).message}`,
+    );
+  }
   return false;
 }
 

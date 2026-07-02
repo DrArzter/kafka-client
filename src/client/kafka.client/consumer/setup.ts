@@ -1,4 +1,4 @@
-import type { IConsumer, IProducer } from "../../transport.interface";
+import type { IConsumer, IProducer } from "../../transport/transport.interface";
 import type { SchemaLike } from "../../message/topic";
 import type { EventEnvelope } from "../../message/envelope";
 import type { KafkaClientContext } from "../context";
@@ -14,6 +14,7 @@ import { subscribeWithRetry } from "./subscribe-retry";
 import { startRetryTopicConsumers } from "./retry-topic";
 import { createRetryTxProducer, ensureTopic } from "../producer/lifecycle";
 import { resolveTopicName } from "../producer/ops";
+import { InMemoryDedupStore } from "../infra/dedup.store";
 
 // ── Topic validation ──────────────────────────────────────────────────────────
 
@@ -112,6 +113,7 @@ export async function setupConsumer<T extends TopicMapConstraint<T>>(
     ctx.consumerOpsDeps,
     options.partitionAssigner,
     resolveReady,
+    options.groupInstanceId,
   );
   const schemaMap = buildSchemaMap(
     stringTopics,
@@ -125,6 +127,14 @@ export async function setupConsumer<T extends TopicMapConstraint<T>>(
   await ensureConsumerTopics(ctx, topicNames, dlq, options.deduplication);
 
   await consumer.connect();
+
+  // DLQ / retry-topic / duplicates routing produce via the shared producer.
+  // Connect it lazily so a consumer-only client (never called connectProducer)
+  // can still deliver to those topics instead of dropping to onMessageLost.
+  if (dlq || options.retryTopics || options.deduplication) {
+    await ctx.producer.connect();
+  }
+
   await subscribeWithRetry(
     consumer,
     subscribeTopics,
@@ -144,16 +154,21 @@ export async function setupConsumer<T extends TopicMapConstraint<T>>(
 
 // ── Deduplication ─────────────────────────────────────────────────────────────
 
-/** Create or retrieve the deduplication context for a consumer group. */
+/**
+ * Create or retrieve the deduplication context for a consumer group.
+ *
+ * Uses the user-supplied `options.store` when present, otherwise an
+ * `InMemoryDedupStore` backed by `ctx.dedupStates` — so `stopConsumer` /
+ * `disconnect` clearing that map continues to reset in-memory dedup state.
+ */
 export function resolveDeduplicationContext<T extends TopicMapConstraint<T>>(
   ctx: KafkaClientContext<T>,
   groupId: string,
   options: import("../../types").DeduplicationOptions | undefined,
 ): DeduplicationContext | undefined {
   if (!options) return undefined;
-  if (!ctx.dedupStates.has(groupId))
-    ctx.dedupStates.set(groupId, new Map());
-  return { options, state: ctx.dedupStates.get(groupId)! };
+  const store = options.store ?? new InMemoryDedupStore(ctx.dedupStates);
+  return { options, store, groupId };
 }
 
 // ── Deps builders ─────────────────────────────────────────────────────────────
@@ -177,9 +192,10 @@ export function messageDepsFor<T extends TopicMapConstraint<T>>(
           return options.onRetry!(envelope, attempt, max);
         }
       : notifyRetry,
-    onDlq: (envelope, reason) => ctx.metrics.notifyDlq(envelope, reason, gid),
+    onDlq: (envelope, reason) => ctx.metrics.notifyDlq(envelope, reason),
     onDuplicate: ctx.metrics.notifyDuplicate.bind(ctx.metrics),
     onMessage: (envelope) => ctx.metrics.notifyMessage(envelope, gid),
+    onFailure: (envelope) => ctx.metrics.notifyFailure(envelope, gid),
   };
 }
 
@@ -250,6 +266,11 @@ export async function launchRetryChain<T extends TopicMapConstraint<T>>(
     schemaMap,
     {
       ...ctx.retryTopicDeps,
+      // Bind circuit breaker events to the MAIN consumer group so failures and
+      // successes inside the retry chain drive the same breaker as the main
+      // consumer (the retry chain has no breaker config of its own).
+      onFailure: (envelope) => ctx.metrics.notifyFailure(envelope, gid),
+      onMessage: (envelope) => ctx.metrics.notifyMessage(envelope, gid),
       onLevelStarted: (levelGroupId) => {
         ctx.companionGroupIds.get(gid)!.push(levelGroupId);
       },
