@@ -99,6 +99,7 @@ for env vars: **`KAFKA_`**.
 | `security.allowInsecure` | boolean | `false` | `KAFKA_ALLOW_INSECURE` | Acknowledge a plaintext-to-remote setup, silence the warning. |
 | `logger` | `KafkaLogger` | console | **code only** | Custom logger. |
 | `instrumentation` | `KafkaInstrumentation[]` | `[]` | **code only** | Cross-cutting hooks (e.g. `otelInstrumentation()`). |
+| `serde` | `MessageSerde` | `JsonSerde` | **code only** | Client-wide value (de)serializer. A per-topic `topic(...).serde(...)` override wins for that topic. Serdes are objects (not strings), so they cannot be expressed as env vars. See below. |
 | `onMessageLost` | fn | — | **code only** | Called when a message is dropped without a DLQ. |
 | `onTtlExpired` | fn | — | **code only** | Client-wide TTL-expiry callback. |
 | `onRebalance` | fn | — | **code only** | Called on consumer group rebalance. |
@@ -237,6 +238,40 @@ const kafka = new KafkaClient(clientId!, groupId!, brokers!, {
 
 ---
 
+## Serialization configuration
+
+How message **values** are (de)serialized is configured in code only — a serde is
+a `MessageSerde` object, not a string, so it has no environment-variable form.
+
+- **Client-wide default**: `KafkaClientOptions.serde`. Unset → `JsonSerde`
+  (`JSON.stringify` / `JSON.parse`), which is byte-for-byte the historical
+  behaviour, so leaving it unset changes nothing.
+- **Per-topic override**: `topic('orders').serde(mySerde)` on a
+  `TopicDescriptor`. When a subscribed/produced topic carries a `.serde()`, that
+  serde wins over the client-wide one for that topic.
+
+```
+per-topic topic(...).serde(...)   >   KafkaClientOptions.serde   >   JsonSerde
+```
+
+The registry-backed **Avro** and **Protobuf** serdes live in the separate
+`@drarzter/kafka-client/serde` entry point and depend on the optional peers
+`avsc` / `protobufjs` (loaded via dynamic import — install only the one you use):
+
+```ts
+import { avroSerde } from '@drarzter/kafka-client/serde';
+import { SchemaRegistryClient } from '@drarzter/kafka-client/core';
+
+const registry = new SchemaRegistryClient({ baseUrl: process.env.KAFKA_SCHEMA_REGISTRY_URL! });
+const kafka = new KafkaClient(id, group, brokers, {
+  serde: avroSerde({ registry, schema: orderAvroSchema }),
+});
+```
+
+Full contract and the Confluent wire format: [`serialization.md`](./serialization.md).
+
+---
+
 ## NestJS: `registerAsync` + `ConfigService` vs `fromEnv`
 
 Two idioms reach the same place; pick by how the rest of your app is wired.
@@ -299,6 +334,7 @@ same precedence applies.
 | One environment (dev/stage/prod) | env vars via `kafkaClientConfigFromEnv` / `consumerOptionsFromEnv` | broker list, TLS, per-env retry/DLQ defaults |
 | A cross-cutting concern (tracing/metrics) | `instrumentation` (client) or `interceptors` (consumer) — code only | `otelInstrumentation()` |
 | Cloud IAM auth | `security.sasl` with a provider function — code only | `awsMskIamProvider`, `gcpAccessTokenProvider` |
+| How values are serialized (JSON/Avro/Protobuf) | `serde` (client) or `topic(...).serde(...)` (per topic) — code only | `JsonSerde`, `avroSerde`, `protobufSerde` |
 
 Rule of thumb: **environment variables set the defaults for an environment;
 code sets the intent.** When both apply, code wins.

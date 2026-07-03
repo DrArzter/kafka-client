@@ -49,6 +49,23 @@ Orthogonal to the client is the **NestJS layer** (`src/nest/**`), which wraps
 which defines the wire format (envelope, headers, topic descriptors) shared by
 producer and consumer.
 
+### The serde seam
+
+Value **(de)serialization is pluggable**, sitting inside the message layer as a
+second seam beside the transport. A `MessageSerde` (`message/serde.ts`) converts a
+validated payload object to wire bytes on produce, and back to an object on
+consume; the default is `JsonSerde` (`JSON.stringify` / `JSON.parse`, byte-for-byte
+identical to the client's historical behaviour). The serde touches **only the
+message value** — envelope headers (`x-event-id`, `x-lamport-clock`, `traceparent`,
+…) always travel as headers, never through the serde. The active serde is resolved
+per topic: a per-topic `topic(...).serde(...)` override wins over the client-wide
+`KafkaClientOptions.serde`, which in turn falls back to `JsonSerde`. Registry-backed
+binary serdes (`avroSerde` / `protobufSerde`, `src/serde.ts`) speak Confluent wire
+format and are exposed via the `/serde` entry point; they depend on the optional
+peers `avsc` / `protobufjs`. See [`producer.md`](./producer.md#the-send-pipeline)
+and [`consumer.md`](./consumer.md#the-per-message-pipeline-in-order) for where the
+serde is invoked on each path.
+
 Three further leaf modules sit beside the client and are also re-exported through
 `/core`: **security** (`src/client/security/**` — TLS/SASL resolution, cloud-IAM
 token providers, ACL calculators), **outbox** (`src/client/outbox/**` — the
@@ -131,26 +148,30 @@ context the breaker needs. See `consumer.md` for the wiring.
 
 ## Entry points / exports
 
-Four public entry points, mapped in `package.json#exports` to `tsup`-built
+Five public entry points, mapped in `package.json#exports` to `tsup`-built
 bundles under `dist/`:
 
 | Import path                        | Source        | Contents                                              |
 |------------------------------------|---------------|-------------------------------------------------------|
 | `@drarzter/kafka-client`           | `src/index.ts`| Everything: `core` + the NestJS layer.                |
-| `@drarzter/kafka-client/core`      | `src/core.ts` | `KafkaClient`, all types, `topic()`, envelope helpers, errors, `versionedSchema` / `registrySchema`, the **outbox** relay, the **security** helpers, and the **config** `fromEnv` helpers. No NestJS dependency. |
+| `@drarzter/kafka-client/core`      | `src/core.ts` | `KafkaClient`, all types, `topic()`, envelope helpers, errors, `versionedSchema` / `registrySchema`, `MessageSerde` / `JsonSerde` / `SchemaRegistryClient`, the `ConfluentTransport` + the `KafkaTransport` / `IProducer` / `IConsumer` / `IAdmin` / `ITransaction` interface family, the **outbox** relay, the **security** helpers, and the **config** `fromEnv` helpers. No NestJS dependency. |
+| `@drarzter/kafka-client/serde`     | `src/serde.ts` | `avroSerde` / `protobufSerde` (Confluent wire format), plus re-exports of `JsonSerde`, `MessageSerde`, `SerdeContext`, and `SchemaRegistryClient`. Optional peer deps on `avsc` / `protobufjs`. |
 | `@drarzter/kafka-client/testing`   | `src/testing.ts` | `createMockKafkaClient`, `FakeTransport` (+ `FakeProducer/Consumer/Admin/Transaction`), `KafkaTestContainer`. |
 | `@drarzter/kafka-client/otel`      | `src/otel.ts` | `otelInstrumentation()` factory. Peer dep on `@opentelemetry/api`. |
 
 `src/index.ts` = `export * from "./core"` plus the five `src/nest/*` modules.
-`src/core.ts` = the client (`kafka.client`), `topic`, `versioned-schema`,
-`schema-registry`, `errors`, `envelope`, `outbox`, `security`, and `config`.
-Separately, `package.json#bin` exposes the `kafka-client-dlq` CLI
+`src/core.ts` = the client (`kafka.client`), the transport interface +
+`ConfluentTransport`, `topic`, `serde` (`MessageSerde` / `JsonSerde`),
+`versioned-schema`, `schema-registry`, `errors`, `envelope`, `outbox`, `security`,
+and `config`. Separately, `package.json#bin` exposes the `kafka-client-dlq` CLI
 (`dist/cli/index.js`); it isn't a library entry point.
 
 NestJS, OpenTelemetry, and Testcontainers are marked `external` in the tsup
-config — they are peer/optional deps, never bundled. Declarations are emitted by
-`tsc -p tsconfig.build.json` (tsup's `dts` is disabled); the project builds under
-TypeScript 6 with `module`/`moduleResolution: "nodenext"`.
+config — they are peer/optional deps, never bundled. `avsc` and `protobufjs`
+(needed only by the `/serde` Avro/Protobuf serdes) are likewise optional peers,
+dynamically imported so they never load unless you use those serdes. Declarations
+are emitted by `tsc -p tsconfig.build.json` (tsup's `dts` is disabled); the project
+builds under TypeScript 6 with `module`/`moduleResolution: "nodenext"`.
 
 ---
 

@@ -10,6 +10,7 @@ Type-safe Kafka client for Node.js. Framework-agnostic core with a first-class N
 
 - [What is this?](#what-is-this)
 - [Why?](#why)
+- [How it compares](#how-it-compares)
 - [Installation](#installation)
 - [Standalone usage](#standalone-usage-no-nestjs)
 - [Quick start (NestJS)](#quick-start-nestjs)
@@ -146,6 +147,38 @@ Safe by default. Configurable when you need it. Escape hatches for when you know
 - **DLQ CLI** — `kafka-client-dlq ls | peek | replay` for inspecting and re-publishing dead letter queues from the terminal
 
 See the [Roadmap](./ROADMAP.md) for upcoming features and version history.
+
+## How it compares
+
+Kafka in Node.js is usually one of: the low-level driver [`kafkajs`](https://github.com/tulios/kafkajs) (and things built on it, like the NestJS Kafka transport), or the native [`@confluentinc/kafka-javascript`](https://github.com/confluentinc/confluent-kafka-javascript) driver. Those give you a solid **transport** — produce, consume, commit — and leave the reliability patterns (retry topologies, DLQ, circuit breaking, dedup, delayed delivery, serde) for you to build and maintain yourself. This library is that reliability layer, batteries-included, on top of the Confluent/librdkafka driver.
+
+The table is about what ships **out of the box** — not what's theoretically buildable. `kafkajs` is a driver, so most rows below are "do it yourself" there; that's the point.
+
+| Capability | `@drarzter/kafka-client` | `kafkajs` | `@nestjs/microservices` (Kafka) |
+|---|:---:|:---:|:---:|
+| Compile-time typed topic → payload map | ✅ | ❌ | ❌ |
+| Produce / consume / batch / admin | ✅ | ✅ | ✅ |
+| Exactly-once transactions | ✅ | ✅ | ⚠️ limited |
+| Retry with backoff + jitter | ✅ built-in | 🔨 DIY | 🔨 DIY |
+| Durable retry-topic chains (`<topic>.retry.N`) | ✅ | 🔨 DIY | 🔨 DIY |
+| Dead-letter queue + metadata headers | ✅ | 🔨 DIY | 🔨 DIY |
+| Circuit breaker (per partition) | ✅ | 🔨 DIY | 🔨 DIY |
+| Deduplication (Lamport clock, pluggable store) | ✅ | 🔨 DIY | 🔨 DIY |
+| Delayed delivery + transactional relay | ✅ | 🔨 DIY | 🔨 DIY |
+| Transactional outbox relay | ✅ | 🔨 DIY | 🔨 DIY |
+| Avro / Protobuf serde (Confluent wire format) | ✅ `/serde` | 🔨 DIY | ❌ |
+| OpenTelemetry traces **and** metrics | ✅ | 🔨 DIY | 🔨 DIY |
+| Envelope (eventId / correlationId / trace) + ALS propagation | ✅ | ❌ | ❌ |
+| Security helpers (MSK IAM / GCP OAUTHBEARER, ACL generator) | ✅ | ⚠️ manual | ⚠️ manual |
+| First-class NestJS integration | ✅ | ❌ | ✅ |
+
+✅ built-in · ⚠️ partial / manual config · 🔨 possible but you build & maintain it · ❌ not available
+
+`@nestjs/microservices` Kafka transport is itself built on `kafkajs` and targets request-response / event **messaging** patterns rather than data-streaming reliability — so it inherits the same "build it yourself" gaps.
+
+**And it's nearly free.** The [throughput benchmark](#running-tests) (`npm run bench`) measures this wrapper against the raw `@confluentinc/kafka-javascript` driver on a real broker: **~2% overhead** with identical p50/p95 latency. The typed envelope, Lamport clock, and instrumentation hooks cost almost nothing on the hot path — you get every row above without trading away throughput.
+
+> The comparison reflects built-in capabilities as of this version and isn't a knock on the driver-level libraries — `kafkajs` is a fine transport; this just saves you from re-implementing the layer above it.
 
 ## Installation
 

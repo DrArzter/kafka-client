@@ -117,8 +117,8 @@ eachMessage(payload)                                         [start.ts]
 
    1. parseSingleMessage                                     [handler.ts]
         · empty value?           → warn, skip
-        · parseJsonMessage       → null on bad JSON → skip   [pipeline.ts]
         · decodeHeaders          → Record<string,string>     [envelope.ts]
+        · serde.deserialize(raw Buffer) → null/throw → skip  [message/serde.ts]
         · validateWithSchema     → null on failure (→ DLQ or onMessageLost) [pipeline.ts]
         · extractEnvelope        → EventEnvelope<T>           [envelope.ts]
 
@@ -139,13 +139,37 @@ eachMessage(payload)                                         [start.ts]
 
 ### Stage 1 — parse & validate (`parseSingleMessage`)
 
-Returns `null` (skip) for empty payloads, unparseable JSON, or schema-validation
-failures. On a validation failure, `validateWithSchema` (`pipeline.ts`) already
-routed the raw message to the DLQ (if enabled) or `onMessageLost`, and fired
-`onConsumeError` on instrumentation and interceptors with a minimal envelope
-(partition `-1`, offset `""`). `extractEnvelope` tolerates missing envelope
-headers — it fabricates defaults (fresh UUIDs, `now`) so messages from
-non-envelope producers still work.
+Returns `null` (skip) for empty payloads, a serde `deserialize` that throws or
+yields `null`, or schema-validation failures. Deserialization goes through the
+**resolved serde** — the per-topic override from `serdeMap` (built from each
+subscribed `TopicDescriptor.__serde`) if present, else the client-wide
+`deps.serde`, defaulting to `JsonSerde`. Crucially it hands the serde the raw
+`message.value` **`Buffer`** — never a `.toString()` — so binary serdes
+(Avro/Protobuf) receive the exact wire bytes. Schema validation then runs on the
+deserialized *object*, unchanged. On a validation failure, `validateWithSchema`
+(`pipeline.ts`) already routed the raw message to the DLQ (if enabled) or
+`onMessageLost`, and fired `onConsumeError` on instrumentation and interceptors
+with a minimal envelope (partition `-1`, offset `""`). `extractEnvelope`
+tolerates missing envelope headers — it fabricates defaults (fresh UUIDs, `now`)
+so messages from non-envelope producers still work.
+
+**Binary-safe forwarding.** Everywhere a message is *re-produced* — DLQ
+(`<topic>.dlq`), the retry chain (`<topic>.retry.<n>`), the duplicates topic, and
+the delayed relay — the pipeline forwards the **original wire `Buffer`**, not a
+re-encoded value. `handleEachMessage`/`handleEachBatch` capture `message.value`
+as `rawBytes` up front and thread it through `executeWithRetry` into
+`sendToDlq` / `sendToRetryTopic` / `sendToDuplicatesTopic`. So an Avro or
+Protobuf record lands in the DLQ byte-for-byte identical to what was consumed —
+no lossy `.toString()` round-trip corrupts it. (`validateWithSchema` likewise
+forwards the original bytes on a validation-failure DLQ.)
+
+The **retry-topic chain** stays consistent with this: `startLevelConsumer`
+(`retry-topic.ts`) deserializes each `<topic>.retry.<n>` message through the same
+resolved serde — keyed by the *original* topic (from `x-retry-original-topic`), so
+the per-topic `serdeMap` override still applies — and forwards the original raw
+`Buffer` to the next level or the DLQ. A binary record therefore survives the
+whole retry hop unchanged. See
+[`serialization.md`](./serialization.md) and `retry-and-dlq.md`.
 
 ### Stage 4 — `executeWithRetry` (`pipeline.ts`)
 

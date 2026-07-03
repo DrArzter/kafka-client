@@ -28,7 +28,8 @@ verifiable against a concrete file.
 | [`retry-and-dlq.md`](./retry-and-dlq.md) | In-process retry vs the durable retry-topic chain (companion consumers, EOS routing transactions, `x-retry-*` headers), DLQ headers/naming, `replayDlq` mechanics (and its `.dlq` guard), and what does **not** propagate into the retry chain. |
 | [`nestjs.md`](./nestjs.md) | The NestJS layer: `KafkaModule.register`/`registerAsync`, the forwarded option subset (incl. `security`), multi-client tokens, the `KafkaExplorer` discovery flow + double-registration guard, `@SubscribeTo`, the health indicator, and the esbuild/`design:paramtypes` constraint. |
 | [`testing.md`](./testing.md) | The three test doubles (Jest manual mock, `FakeTransport`, `createMockKafkaClient`), `FakeTransport`'s fidelity divergences, `KafkaTestContainer`/integration setup (incl. Redis-dedup / Postgres-outbox reference specs and the testcontainers-12 readiness retry), the chaos suite, `containers:clean`, and how `handle.ready()` keeps tests deterministic. |
-| [`configuration.md`](./configuration.md) | The complete configuration reference: the three layers (defaults → env → code) and their precedence, full tables mapping every `KafkaClientOptions` / `ConsumerOptions` field to its env var (or "code only"), the `fromEnv` helpers, security/cloud-IAM rules, NestJS `ConfigService` vs `fromEnv`, and a "where do I configure X" decision table. |
+| [`configuration.md`](./configuration.md) | The complete configuration reference: the three layers (defaults → env → code) and their precedence, full tables mapping every `KafkaClientOptions` / `ConsumerOptions` field to its env var (or "code only"), the `fromEnv` helpers, security/cloud-IAM rules, serde configuration, NestJS `ConfigService` vs `fromEnv`, and a "where do I configure X" decision table. |
+| [`serialization.md`](./serialization.md) | The value-serialization seam: the `MessageSerde` contract and `SerdeContext`, the default `JsonSerde`, per-topic (`topic(...).serde(...)`) vs client-wide resolution, the registry-backed `avroSerde` / `protobufSerde` and their Confluent wire format (`[0x00][schema id BE][payload]`, plus Protobuf's message-index), `SchemaRegistryClient.getSchemaById` on the read path, lossless raw-byte forwarding to DLQ/retry, and the v0.11 limits. |
 
 ---
 
@@ -40,6 +41,8 @@ verifiable against a concrete file.
 | Where a specific file's responsibility is | [module-map.md](./module-map.md) |
 | What headers a message gets on send | [producer.md](./producer.md#automatic-envelope-headers) |
 | How schema validation runs on send | [producer.md](./producer.md#schema-handling-opsts) |
+| How are values serialized (JSON default, per-topic override) | [serialization.md](./serialization.md#the-messageserde-contract-messageserdets) |
+| How to use Avro or Protobuf (Confluent wire format) | [serialization.md](./serialization.md#registry-backed-binary-serdes-srcserdets-serde-entry-point) |
 | How a message key is chosen (explicit vs `.key()`) | [producer.md](./producer.md#buildsendpayload--per-message-work-opsts) |
 | How `deliverAfterMs` delays a message | [producer.md](./producer.md#delayed-delivery) + [consumer.md](./consumer.md#delayed-delivery-relay-featuresdelayedts) |
 | How TLS/SASL/cloud-IAM auth is resolved | [configuration.md](./configuration.md#security-configuration) (rules) + [module-map.md](./module-map.md#srcclientsecurity--transport-security) (modules) |

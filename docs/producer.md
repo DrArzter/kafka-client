@@ -27,7 +27,7 @@ preparePayload(ctx, topicOrDesc, messages, compression)   [send.ts]
    ├─ registerSchema(...)      ── if a TopicDescriptor carries __schema, add it
    │                              to ctx.schemaRegistry (warn on conflict)     [ops.ts]
    ├─ buildSendPayload(...)    ── per-message: build headers, stamp clock,
-   │                              run beforeSend, validate, JSON.stringify     [ops.ts]
+   │                              run beforeSend, validate, serialise via serde [ops.ts]
    └─ ensureTopic(ctx, topic)  ── auto-create the topic if enabled             [lifecycle.ts]
 ```
 
@@ -48,14 +48,19 @@ For each message in the batch it:
    into the header object (mutated in place).
 4. **Validates** the value against the attached-or-registry schema
    (`validateMessage`), passing a `SchemaParseContext` (`{ topic, headers, version }`).
-5. **JSON-serialises** the validated value into the message `value`.
+5. **Serialises** the validated value into the message `value` via the resolved
+   serde (see [Serialization](#serialization-via-serde) below). The default
+   `JsonSerde` produces exactly the same bytes as the old hard-coded
+   `JSON.stringify`, so this is a zero-behaviour-change default.
 6. **Resolves the key**: `m.key ?? topicOrDesc.__key?.(m.value) ?? null`. An
    explicit `options.key` always wins; otherwise, if the topic was passed as a
    `TopicDescriptor` with a `.key(fn)` extractor, the extractor runs on the
    original (pre-validation) payload; failing both, the key is `null`.
 
 Note the ordering: headers (including the clock) are built *before* validation,
-so a `SchemaParseContext`-aware validator can read the version/headers.
+and validation runs on the **object** *before* serialisation — so a
+`SchemaParseContext`-aware validator can read the version/headers, and the serde
+always receives an already-validated value.
 
 ### Schema handling (`ops.ts`)
 
@@ -74,6 +79,34 @@ No-op unless `autoCreateTopics` is on and the topic isn't already in
 `ctx.ensuredTopics`. Concurrent calls for the same topic share one in-flight
 promise (`ctx.ensureTopicPromises`) so a topic is created once even under a
 burst of parallel sends.
+
+### Serialization via serde (`ops.ts`)
+
+Step 5 of `buildSendPayload` no longer hard-codes `JSON.stringify`. It resolves
+a `MessageSerde` (`message/serde.ts`) and calls `serde.serialize(validatedValue,
+{ topic, headers, isKey: false })`, using whatever it returns (a `Buffer` or a
+`string`) as the message `value`.
+
+Which serde runs is decided **per topic** by `resolveSerde(topicOrDesc,
+deps.serde)`:
+
+```
+per-topic TopicDescriptor.__serde   >   client-wide KafkaClientOptions.serde   >   JsonSerde
+```
+
+- A `topic('orders').serde(avroSerde({...}))` override always wins for that topic.
+- Otherwise the client-wide `serde` (from the constructor options) applies.
+- With neither set, the default is `JsonSerde` — byte-for-byte identical to the
+  historical behaviour, so upgrading changes nothing until you opt in.
+
+The serde only ever touches the message **value**. Every envelope header
+(`x-event-id`, `x-correlation-id`, `x-timestamp`, `x-schema-version`,
+`x-lamport-clock`, `traceparent`) is still built and sent as a Kafka header
+regardless of the serde — the wire contract for metadata is unchanged whether the
+value is JSON, Avro, or Protobuf. Validation also stays object-level: the
+`SchemaLike` runs on the object *before* the serde encodes it. See
+[`serialization.md`](./serialization.md) for the `MessageSerde` contract and the
+registry-backed Avro/Protobuf serdes.
 
 ---
 
