@@ -6,6 +6,8 @@
 
 Type-safe Kafka client for Node.js. Framework-agnostic core with a first-class NestJS adapter. Built on top of [`@confluentinc/kafka-javascript`](https://github.com/confluentinc/confluent-kafka-javascript) (librdkafka).
 
+> **🕹️ Try it live — [kafka-playground](https://github.com/DrArzter/kafka-playground)**: an interactive sandbox that spins up Kafka + this library in Docker and lets you create producers/consumers from a dashboard and watch retries, DLQ, circuit breaker, delayed delivery, dedup (Redis), transactional outbox (Postgres), and Avro/Protobuf serde work in real time. `git clone && docker compose up`.
+
 ## Table of contents
 
 - [What is this?](#what-is-this)
