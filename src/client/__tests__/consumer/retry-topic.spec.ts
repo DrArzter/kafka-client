@@ -18,6 +18,7 @@ import {
 } from "../../../__mocks__/@confluentinc/kafka-javascript";
 import { startRetryTopicConsumers } from "../../kafka.client/consumer/retry-topic";
 import type { RetryTopicDeps } from "../../kafka.client/consumer/retry-topic";
+import { JsonSerde } from "../../message/serde";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -54,6 +55,7 @@ function makeDeps(
       debug: jest.fn(),
     },
     producer: { send: mockSend } as any,
+    serde: new JsonSerde(),
     instrumentation: [],
     onMessageLost: jest.fn(),
     onRetry: jest.fn(),

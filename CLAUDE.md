@@ -9,7 +9,7 @@ Type-safe Kafka client wrapper for NestJS built on `@confluentinc/kafka-javascri
 | Field | Value |
 |---|---|
 | npm name | `@drarzter/kafka-client` |
-| version | `0.10.0` |
+| version | `0.11.0` |
 | underlying driver | `@confluentinc/kafka-javascript` ^1.8 (installed 1.10.x) |
 | build tool | `tsup` (esbuild, JS) + `tsc -p tsconfig.build.json` (declarations) |
 | test runner | Jest + ts-jest |
@@ -24,6 +24,7 @@ Type-safe Kafka client wrapper for NestJS built on `@confluentinc/kafka-javascri
 @drarzter/kafka-client/core     → src/core.ts    (KafkaClient only, no NestJS dep)
 @drarzter/kafka-client/testing  → src/testing.ts (createMockKafkaClient, KafkaTestContainer)
 @drarzter/kafka-client/otel     → src/otel.ts    (otelInstrumentation() factory)
+@drarzter/kafka-client/serde    → src/serde.ts   (avroSerde/protobufSerde — Confluent wire-format serdes)
 ```
 
 `src/index.ts` re-exports everything from `core.ts` plus the NestJS layer (`KafkaModule`, `KafkaExplorer`, `KafkaHealthIndicator`, decorators, constants).
@@ -851,3 +852,40 @@ tells the user what to install.
 `kafka-client-dlq ls|peek|replay --brokers …` (bin → `dist/cli/index.js`). `peek` uses the
 `consume()` iterator with a watermark pre-check; `replay` wraps `replayDlq`
 (`--incremental` = `fromBeginning: false`).
+
+### Pluggable serialization (`MessageSerde`)
+
+Message VALUE (de)serialization goes through a `MessageSerde` seam
+(`message/serde.ts`): `serialize(value, ctx) → Buffer | string` on produce,
+`deserialize(data: Buffer, ctx) → object` on consume. `ctx` is
+`{ topic, headers, isKey }`. The default is `JsonSerde` (`JSON.stringify` /
+`JSON.parse`), byte-identical to the historical behaviour — zero breaking change.
+
+- Client-wide via `KafkaClientOptions.serde`; per-topic override via
+  `topic(...).serde(mySerde)` (chainable with `.key()`), which wins for that topic.
+  Both exported from `core.ts`. The serde lives on `KafkaClientContext.serde`
+  (default `new JsonSerde()`).
+- Serde only touches the value. Envelope metadata (`x-event-id`, lamport clock,
+  `traceparent`, …) always travels in headers, never through the serde.
+- Producer side: `buildSendPayload` validates the OBJECT first, then serializes
+  the validated value. Consumer side: `parseSingleMessage` deserializes the raw
+  `Buffer` first, then validates the object (order unchanged from before).
+- Per-topic serde overrides are resolved by topic NAME on both sides:
+  `resolveSerde` (producer, from `__serde`) and a `serdeMap: Map<string,
+  MessageSerde>` (consumer, built by `buildSerdeMap`, threaded like `schemaMap`
+  through `setupConsumer` → `handleEachMessage`/`handleEachBatch` and the retry
+  chain). The retry chain deserializes via the same serde, keyed by the
+  original topic.
+- **Binary-safe forwarding**: DLQ / retry / duplicates / delayed-relay / DLQ-replay
+  forward the ORIGINAL wire `Buffer` unchanged — never a `.toString()` round-trip
+  — so Avro/Protobuf bytes survive losslessly. The internal carrier type is now
+  `Buffer | string` (`IProducerMessage.value`, `rawMessages`, the `buildDlq/Retry/
+  Duplicate*Payload` builders, and `sendTo*` helpers all accept both). For JSON the
+  forwarded bytes are byte-identical to the old string; a couple of unit tests that
+  hard-coded `value: JSON.stringify(...)` on a FORWARDED message now assert
+  `Buffer.from(...)` (the legitimately-changed carrier type).
+- **`readSnapshot` is still JSON-only** — it does NOT yet honour a custom serde
+  (client-wide or per-topic); it hard-parses with `JSON.parse`. Avro/Protobuf
+  compacted-topic snapshots are a later phase.
+- Avro/Protobuf serdes are NOT implemented in this phase — this is only the seam
+  plus the `JsonSerde` default.

@@ -71,7 +71,10 @@ describe("KafkaClient — Retry", () => {
         topic: "test.topic.dlq",
         messages: [
           expect.objectContaining({
-            value: JSON.stringify({ id: "1", value: 1 }),
+            // Forwarded messages now carry the ORIGINAL wire bytes (Buffer) for
+            // binary safety, not a re-stringified value. For JSON these bytes are
+            // byte-identical to JSON.stringify(...).
+            value: Buffer.from(JSON.stringify({ id: "1", value: 1 })),
             headers: expect.objectContaining({
               "x-dlq-original-topic": "test.topic",
               "x-dlq-error-message": "always fails",

@@ -29,10 +29,10 @@ export type RegistrySchemaType = "JSON" | "AVRO" | "PROTOBUF";
  * Minimal, dependency-free client for the Confluent Schema Registry REST API
  * (works with Confluent Platform/Cloud, Redpanda, Karapace, AWS Glue SR proxy).
  *
- * Scope: subject/version management and compatibility checks — the pieces
- * needed to keep locally-defined schemas in lockstep with a central registry.
- * Payload (de)serialisation stays JSON as everywhere in this library; wire-format
- * framing with magic bytes (Avro/Protobuf binary) is intentionally out of scope.
+ * Scope: subject/version management, compatibility checks, and id->schema
+ * lookups. Used to keep locally-defined schemas in lockstep with a central
+ * registry, and as the backing lookup for the Avro/Protobuf serdes in
+ * `@drarzter/kafka-client/serde` (which handle the wire-format framing).
  *
  * @example
  * ```ts
@@ -50,6 +50,15 @@ export class SchemaRegistryClient {
   private readonly latestCache = new Map<
     string,
     { value: RegisteredSchema; expiresAt: number }
+  >();
+  /**
+   * `id → schema` cache. Schema ids are immutable in a Confluent-compatible
+   * registry (a given id always maps to the same schema string), so entries
+   * are cached for the lifetime of the client with no TTL.
+   */
+  private readonly byIdCache = new Map<
+    number,
+    { id: number; schema: string; schemaType?: string }
   >();
 
   constructor(private readonly options: SchemaRegistryClientOptions) {
@@ -110,6 +119,28 @@ export class SchemaRegistryClient {
       value,
       expiresAt: Date.now() + this.cacheTtlMs,
     });
+    return value;
+  }
+
+  /**
+   * Fetch a schema by its globally unique registry id (`GET /schemas/ids/{id}`).
+   *
+   * Used by the Avro/Protobuf serdes on the deserialize path: the writer schema
+   * id is read from the Confluent wire-format prefix, then resolved here. Results
+   * are cached forever (schema ids are immutable), so a given id triggers exactly
+   * one registry round-trip regardless of how many messages reference it.
+   */
+  async getSchemaById(
+    id: number,
+  ): Promise<{ id: number; schema: string; schemaType?: string }> {
+    const cached = this.byIdCache.get(id);
+    if (cached) return cached;
+    const raw = await this.request<{ schema: string; schemaType?: string }>(
+      "GET",
+      `/schemas/ids/${id}`,
+    );
+    const value = { id, schema: raw.schema, schemaType: raw.schemaType };
+    this.byIdCache.set(id, value);
     return value;
   }
 

@@ -12,7 +12,7 @@ import { decodeHeaders } from "../../../message/envelope";
 export type DlqReplayDeps = {
   logger: KafkaLogger;
   fetchTopicOffsets: (topic: string) => Promise<Array<{ partition: number; low: string; high: string }>>;
-  send: (topic: string, messages: Array<{ value: string; headers: Record<string, string> }>) => Promise<void>;
+  send: (topic: string, messages: Array<{ value: Buffer | string; headers: Record<string, string> }>) => Promise<void>;
   /**
    * Create a consumer for the given group.
    * @param groupId Consumer group ID.
@@ -102,8 +102,12 @@ export async function replayDlqTopic(
             const originalHeaders = Object.fromEntries(
               Object.entries(headers).filter(([k]) => !deps.dlqHeaderKeys.has(k)),
             );
-            const value = message.value.toString();
-            const shouldProcess = !options.filter || options.filter(headers, value);
+            // Forward the ORIGINAL wire bytes unchanged (binary-safe — no
+            // re-serialization). The user `filter` still receives a decoded
+            // UTF-8 string for convenience/back-compat.
+            const bytes = message.value;
+            const shouldProcess =
+              !options.filter || options.filter(headers, bytes.toString("utf8"));
 
             if (!targetTopic || !shouldProcess) {
               skipped++;
@@ -111,7 +115,7 @@ export async function replayDlqTopic(
               deps.logger.log(`[DLQ replay dry-run] Would replay to "${targetTopic}"`);
               replayed++;
             } else {
-              await deps.send(targetTopic, [{ value, headers: originalHeaders }]);
+              await deps.send(targetTopic, [{ value: bytes, headers: originalHeaders }]);
               replayed++;
             }
 

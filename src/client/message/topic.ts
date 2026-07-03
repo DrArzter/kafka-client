@@ -1,4 +1,5 @@
 import type { MessageHeaders } from "../types";
+import type { MessageSerde } from "./serde";
 
 /**
  * Context passed as the second argument to `SchemaLike.parse()`.
@@ -65,6 +66,12 @@ export interface TopicDescriptor<
   /** Runtime schema validator. Present only when created via `topic().schema()`. */
   readonly __schema?: SchemaLike<M>;
   /**
+   * Per-topic serialization override. Present only when created via `.serde()`.
+   * When set, this serde is used for produce/consume on this topic instead of
+   * the client-wide `KafkaClientOptions.serde`.
+   */
+  readonly __serde?: MessageSerde;
+  /**
    * Partition-key extractor. Present only when created via `.key()`.
    * Applied on every send through this descriptor unless an explicit
    * `key` is passed in `SendOptions` / the batch item.
@@ -77,9 +84,10 @@ export interface TopicDescriptor<
 }
 
 /**
- * A `TopicDescriptor` that can still be extended with a `.key()` extractor.
- * Returned by `topic().type()` and `topic().schema()` — usable directly as a
- * descriptor, or chained once more to declare partition affinity.
+ * A `TopicDescriptor` that can still be extended with a `.key()` extractor or
+ * a `.serde()` override. Returned by `topic().type()` and `topic().schema()` —
+ * usable directly as a descriptor, or chained further to declare partition
+ * affinity and/or a custom serializer.
  */
 export type KeyableTopicDescriptor<
   N extends string,
@@ -103,7 +111,20 @@ export type KeyableTopicDescriptor<
    * // → produced with key '42'
    * ```
    */
-  key(extractor: (message: M) => string): TopicDescriptor<N, M>;
+  key(extractor: (message: M) => string): KeyableTopicDescriptor<N, M>;
+  /**
+   * Declare a per-topic serialization override. The given {@link MessageSerde}
+   * is used for produce/consume on this topic instead of the client-wide
+   * `KafkaClientOptions.serde`. Chainable with `.key()`.
+   *
+   * @example
+   * ```ts
+   * const OrderCreated = topic('order.created')
+   *   .schema(OrderSchema)
+   *   .serde(new AvroSerde(OrderAvroSchema));
+   * ```
+   */
+  serde(serde: MessageSerde): KeyableTopicDescriptor<N, M>;
 };
 
 /**
@@ -148,16 +169,16 @@ export function topic<N extends string>(name: N) {
   };
 }
 
-/** Attach the chainable `.key()` builder to a plain descriptor. */
+/** Attach the chainable `.key()` / `.serde()` builders to a plain descriptor. */
 function keyable<N extends string, M extends Record<string, any>>(
   desc: TopicDescriptor<N, M>,
 ): KeyableTopicDescriptor<N, M> {
   return {
     ...desc,
-    key: (extractor: (message: M) => string): TopicDescriptor<N, M> => ({
-      ...desc,
-      __key: extractor,
-    }),
+    key: (extractor: (message: M) => string): KeyableTopicDescriptor<N, M> =>
+      keyable({ ...desc, __key: extractor }),
+    serde: (serde: MessageSerde): KeyableTopicDescriptor<N, M> =>
+      keyable({ ...desc, __serde: serde }),
   };
 }
 

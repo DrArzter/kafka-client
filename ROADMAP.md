@@ -6,8 +6,8 @@
 
 ### Larger features
 
-- **Full Schema Registry serde** — Avro/Protobuf wire-format (magic byte + schema id) on top of the existing `SchemaRegistryClient`; interop with non-JS producers/consumers. (The REST client + `registrySchema()` validation bridge shipped in 0.10.0.)
-- **Field-level payload encryption serde** — envelope encryption behind the `SchemaLike` seam (KMS-backed key per consumer role) for per-message authorisation.
+- **Avro reader-schema resolution & Protobuf nested types** — 0.11.0 serde uses writer==reader schema and top-level Protobuf message only; add full reader-schema evolution and multi/nested Protobuf message-index support.
+- **Field-level payload encryption serde** — envelope encryption behind the serde/`SchemaLike` seam (KMS-backed key per consumer role) for per-message authorisation.
 - **Secured-cluster integration tests** — SASL/SCRAM Kafka container profile exercising the `security` options end-to-end (testcontainers' `withSaslSslListener`).
 - **Retry-chain TTL/timeout propagation** — `messageTtlMs` / `handlerTimeoutMs` currently apply only in the main consumer, not inside `<topic>.retry.N` companions (documented gotcha; consider fixing rather than documenting).
 - **1.0.0 hardening** — freeze the public API after the 0.10 feature wave bakes in production: outbox, delayed delivery, security, env config are new surfaces that may still shift.
@@ -15,6 +15,15 @@
 ---
 
 ## Done
+
+### 0.11.0
+
+- **Pluggable serialization (serde) layer** — `MessageSerde` seam (`serialize`/`deserialize` ↔ `Buffer`), default `JsonSerde` reproduces prior behaviour byte-for-byte. Set client-wide via `KafkaClientOptions.serde` or per-topic via `topic(...).serde(...)`. Forwarding paths (DLQ/retry/duplicates/delayed) made binary-safe (original bytes carried as `Buffer`, never `.toString()`'d).
+- **Avro & Protobuf serdes** (`@drarzter/kafka-client/serde`) — `avroSerde()` / `protobufSerde()` with exact **Confluent wire format** (`[0x00][schema id BE][payload]`; Protobuf adds the `0x00` top-level message-index). `avsc` / `protobufjs` are optional peers (dynamic import). Proven interop: bytes produced by the library decode with a raw driver + `avsc`/`protobufjs` against the registry-fetched schema.
+- **SchemaRegistryClient.getSchemaById** with a permanent id→schema cache (deserialize path).
+- **`ConfluentTransport` + transport interfaces exported from `/core`** — downstream apps get low-level admin (per-partition watermarks) without deep-importing the raw driver.
+- Integration tests on **Redpanda** (Kafka + built-in Schema Registry): Avro/Protobuf round-trip + wire-format interop proof.
+- Known limits: Avro reader schema == writer schema (no evolution yet); Protobuf top-level message only; `readSnapshot` remains JSON-only.
 
 ### 0.10.0
 

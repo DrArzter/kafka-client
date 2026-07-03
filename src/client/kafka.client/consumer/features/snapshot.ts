@@ -142,6 +142,9 @@ function applySnapshotMessage<
     ? message.value.toString()
     : String(message.value);
   try {
+    // NOTE: readSnapshot is JSON-only for now — it does NOT yet honour a custom
+    // `MessageSerde` (client-wide or per-topic). Compacted-topic snapshots of
+    // non-JSON (Avro/Protobuf) payloads are not supported until a later phase.
     const jsonValue = JSON.parse(rawValue);
     const headers = decodeHeaders(message.headers);
     const parsed: T[K] = options.schema ? options.schema.parse(jsonValue) : jsonValue;

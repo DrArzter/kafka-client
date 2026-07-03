@@ -9,7 +9,7 @@ import type {
   RetryOptions,
 } from "../../types";
 import type { MessageHandlerDeps, DeduplicationContext } from "./handler";
-import { getOrCreateConsumer, buildSchemaMap } from "./ops";
+import { getOrCreateConsumer, buildSchemaMap, buildSerdeMap } from "./ops";
 import { subscribeWithRetry } from "./subscribe-retry";
 import { startRetryTopicConsumers } from "./retry-topic";
 import { createRetryTxProducer, ensureTopic } from "../producer/lifecycle";
@@ -121,6 +121,7 @@ export async function setupConsumer<T extends TopicMapConstraint<T>>(
     optionSchemas,
     ctx.logger,
   );
+  const serdeMap = buildSerdeMap(stringTopics);
   const topicNames = stringTopics.map((t: any) => resolveTopicName(t));
   const subscribeTopics: (string | RegExp)[] = [...topicNames, ...regexTopics];
 
@@ -149,7 +150,7 @@ export async function setupConsumer<T extends TopicMapConstraint<T>>(
     `${mode === "eachBatch" ? "Batch consumer" : "Consumer"} subscribed to topics: ${displayTopics}`,
   );
 
-  return { consumer, schemaMap, topicNames, gid, dlq, interceptors, retry, hasRegex, readyPromise };
+  return { consumer, schemaMap, serdeMap, topicNames, gid, dlq, interceptors, retry, hasRegex, readyPromise };
 }
 
 // ── Deduplication ─────────────────────────────────────────────────────────────
@@ -183,6 +184,7 @@ export function messageDepsFor<T extends TopicMapConstraint<T>>(
   return {
     logger: ctx.logger,
     producer: ctx.producer,
+    serde: ctx.serde,
     instrumentation: ctx.instrumentation,
     onMessageLost: options?.onMessageLost ?? ctx.onMessageLost,
     onTtlExpired: ctx.onTtlExpired,
@@ -206,6 +208,7 @@ export function buildRetryTopicDeps<T extends TopicMapConstraint<T>>(
   return {
     logger: ctx.logger,
     producer: ctx.producer,
+    serde: ctx.serde,
     instrumentation: ctx.instrumentation,
     onMessageLost: ctx.onMessageLost,
     onRetry: ctx.metrics.notifyRetry.bind(ctx.metrics),
@@ -246,10 +249,12 @@ export async function launchRetryChain<T extends TopicMapConstraint<T>>(
     dlq: boolean;
     interceptors: ConsumerInterceptor<T>[];
     schemaMap: Map<string, SchemaLike>;
+    serdeMap?: Map<string, import("../../message/serde").MessageSerde>;
     assignmentTimeoutMs?: number;
   },
 ): Promise<void> {
-  const { retry, dlq, interceptors, schemaMap, assignmentTimeoutMs } = opts;
+  const { retry, dlq, interceptors, schemaMap, serdeMap, assignmentTimeoutMs } =
+    opts;
   if (!ctx.autoCreateTopicsEnabled) {
     await ctx.adminOps.validateRetryTopicsExist(topicNames, retry.maxRetries);
   }
@@ -276,5 +281,6 @@ export async function launchRetryChain<T extends TopicMapConstraint<T>>(
       },
     },
     assignmentTimeoutMs,
+    serdeMap,
   );
 }

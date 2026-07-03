@@ -1,6 +1,7 @@
 import type { KafkaTransport } from "../transport/transport.interface";
 import { ConfluentTransport } from "../transport/confluent.transport";
 import type { TopicDescriptor, SchemaLike } from "../message/topic";
+import { JsonSerde } from "../message/serde";
 import type { EventEnvelope } from "../message/envelope";
 import type {
   ClientId,
@@ -137,6 +138,7 @@ export class KafkaClient<
     const consumers = new Map();
     const consumerCreationOptions = new Map<string, { fromBeginning: boolean; autoCommit: boolean }>();
     const schemaRegistry = new Map<string, SchemaLike>();
+    const serde = options?.serde ?? new JsonSerde();
 
     const adminOps = new AdminOps({
       admin: transport.admin(),
@@ -169,6 +171,7 @@ export class KafkaClient<
       autoCreateTopicsEnabled: options?.autoCreateTopics ?? false,
       strictSchemasEnabled: options?.strictSchemas ?? true,
       numPartitions: options?.numPartitions ?? 1,
+      serde,
       txId: options?.transactionalId ?? `${clientId}-tx`,
       clockRecoveryTopics: options?.clockRecovery?.topics ?? [],
       clockRecoveryTimeoutMs: options?.clockRecovery?.timeoutMs ?? 30_000,
@@ -203,6 +206,7 @@ export class KafkaClient<
         strictSchemasEnabled: options?.strictSchemas ?? true,
         instrumentation: options?.instrumentation ?? [],
         logger,
+        serde,
         nextLamportClock: () => 0, // patched below
       },
       consumerOpsDeps: {
@@ -221,6 +225,7 @@ export class KafkaClient<
       strictSchemasEnabled: options?.strictSchemas ?? true,
       instrumentation: options?.instrumentation ?? [],
       logger,
+      serde,
       nextLamportClock: () => ++ctx._lamportClock,
     };
     ctx.retryTopicDeps = buildRetryTopicDeps(ctx);

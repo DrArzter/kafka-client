@@ -35,7 +35,7 @@ export async function startConsumerImpl<T extends TopicMapConstraint<T>>(
   const setupOptions = options.retryTopics
     ? { ...options, autoCommit: false as const }
     : options;
-  const { consumer, schemaMap, topicNames, gid, dlq, interceptors, retry, readyPromise } =
+  const { consumer, schemaMap, serdeMap, topicNames, gid, dlq, interceptors, retry, readyPromise } =
     await setupConsumer(ctx, topics, "eachMessage", setupOptions);
 
   if (options.circuitBreaker)
@@ -50,6 +50,7 @@ export async function startConsumerImpl<T extends TopicMapConstraint<T>>(
           payload,
           {
             schemaMap,
+            serdeMap,
             handleMessage,
             interceptors,
             dlq,
@@ -79,6 +80,7 @@ export async function startConsumerImpl<T extends TopicMapConstraint<T>>(
       dlq,
       interceptors,
       schemaMap,
+      serdeMap,
       assignmentTimeoutMs: options.retryTopicAssignmentTimeoutMs,
     });
   }
@@ -106,7 +108,7 @@ export async function startBatchConsumerImpl<T extends TopicMapConstraint<T>>(
   const setupOptions = options.retryTopics
     ? { ...options, autoCommit: false as const }
     : options;
-  const { consumer, schemaMap, topicNames, gid, dlq, interceptors, retry, readyPromise } =
+  const { consumer, schemaMap, serdeMap, topicNames, gid, dlq, interceptors, retry, readyPromise } =
     await setupConsumer(ctx, topics, "eachBatch", setupOptions);
 
   if (options.circuitBreaker)
@@ -121,6 +123,7 @@ export async function startBatchConsumerImpl<T extends TopicMapConstraint<T>>(
           payload,
           {
             schemaMap,
+            serdeMap,
             handleBatch,
             interceptors,
             dlq,
@@ -158,6 +161,7 @@ export async function startBatchConsumerImpl<T extends TopicMapConstraint<T>>(
       dlq,
       interceptors,
       schemaMap,
+      serdeMap,
       assignmentTimeoutMs: options.retryTopicAssignmentTimeoutMs,
     });
   }
@@ -185,7 +189,7 @@ export async function startTransactionalConsumerImpl<
   }
 
   const setupOptions = { ...options, autoCommit: false as const };
-  const { consumer, schemaMap, gid, readyPromise } = await setupConsumer(
+  const { consumer, schemaMap, serdeMap, gid, readyPromise } = await setupConsumer(
     ctx,
     topics,
     "eachMessage",
@@ -206,6 +210,7 @@ export async function startTransactionalConsumerImpl<
           options.interceptors ?? [],
           false,
           deps,
+          serdeMap,
         );
 
         const nextOffset = String(Number.parseInt(message.offset, 10) + 1);

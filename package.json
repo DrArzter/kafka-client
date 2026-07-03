@@ -1,6 +1,6 @@
 {
   "name": "@drarzter/kafka-client",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Type-safe Kafka client wrapper for NestJS with typed topic-message maps",
   "license": "MIT",
   "main": "./dist/index.js",
@@ -29,6 +29,11 @@
       "types": "./dist/otel.d.ts",
       "import": "./dist/otel.mjs",
       "require": "./dist/otel.js"
+    },
+    "./serde": {
+      "types": "./dist/serde.d.ts",
+      "import": "./dist/serde.mjs",
+      "require": "./dist/serde.js"
     }
   },
   "typesVersions": {
@@ -41,6 +46,9 @@
       ],
       "otel": [
         "./dist/otel.d.ts"
+      ],
+      "serde": [
+        "./dist/serde.d.ts"
       ]
     }
   },
@@ -82,6 +90,8 @@
     "@nestjs/common": ">=10.0.0",
     "@nestjs/core": ">=10.0.0",
     "@opentelemetry/api": ">=1.0.0",
+    "avsc": ">=5.0.0",
+    "protobufjs": ">=7.0.0",
     "reflect-metadata": ">=0.1.13",
     "rxjs": ">=7.0.0"
   },
@@ -93,6 +103,12 @@
       "optional": true
     },
     "@opentelemetry/api": {
+      "optional": true
+    },
+    "avsc": {
+      "optional": true
+    },
+    "protobufjs": {
       "optional": true
     },
     "reflect-metadata": {
@@ -107,16 +123,19 @@
     "@nestjs/core": "^11.1.13",
     "@opentelemetry/api": "^1.9.0",
     "@testcontainers/kafka": "^12.0.4",
+    "@testcontainers/redpanda": "^12.0.4",
     "@types/jest": "^30.0.0",
     "@types/node": "^26.1.0",
     "@types/pg": "^8.11.10",
     "@typescript-eslint/eslint-plugin": "^8.55.0",
     "@typescript-eslint/parser": "^8.55.0",
+    "avsc": "^5.7.7",
     "eslint": "^10.2.0",
     "eslint-config-prettier": "^10.1.8",
     "jest": "^30.2.0",
     "pg": "^8.13.1",
     "prettier": "^3.8.1",
+    "protobufjs": "^7.4.0",
     "redis": "^4.7.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",

@@ -315,7 +315,9 @@ describe("KafkaClient — Batch Consumer", () => {
         topic: "test.topic.dlq",
         messages: expect.arrayContaining([
           expect.objectContaining({
-            value: JSON.stringify({ id: "2", value: 20 }),
+            // Forwarded DLQ messages now carry the ORIGINAL wire bytes (Buffer)
+            // for binary safety — byte-identical to the JSON string for JSON.
+            value: Buffer.from(JSON.stringify({ id: "2", value: 20 })),
           }),
         ]),
       }),

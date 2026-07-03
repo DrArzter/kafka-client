@@ -1,5 +1,6 @@
 import type { KafkaTransport, IProducer, IConsumer } from "../transport/transport.interface";
 import type { SchemaLike } from "../message/topic";
+import type { MessageSerde } from "../message/serde";
 import type {
   ClientId,
   KafkaClientOptions,
@@ -32,6 +33,8 @@ export type KafkaClientContext<T> = {
   readonly autoCreateTopicsEnabled: boolean;
   readonly strictSchemasEnabled: boolean;
   readonly numPartitions: number;
+  /** Client-wide serde; per-topic `TopicDescriptor.__serde` overrides it. Default `JsonSerde`. */
+  readonly serde: MessageSerde;
   readonly txId: string;
   readonly clockRecoveryTopics: string[];
   /** Max time to wait for clock recovery before proceeding with a partial result. */

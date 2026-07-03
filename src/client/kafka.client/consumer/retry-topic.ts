@@ -8,7 +8,6 @@ import {
 } from "../../message/envelope";
 import type { EventEnvelope } from "../../message/envelope";
 import {
-  parseJsonMessage,
   validateWithSchema,
   runHandlerWithPipeline,
   notifyInterceptorsOnError,
@@ -23,6 +22,7 @@ import {
 import { KafkaRetryExhaustedError } from "../../errors";
 import { subscribeWithRetry } from "./subscribe-retry";
 import type { SchemaLike } from "../../message/topic";
+import type { MessageSerde } from "../../message/serde";
 import type {
   ConsumerInterceptor,
   DlqReason,
@@ -39,6 +39,8 @@ import type {
 export type RetryTopicDeps = {
   logger: KafkaLogger;
   producer: Producer;
+  /** Client-wide serde used to deserialize retry-topic values; per-topic override wins. */
+  serde: MessageSerde;
   instrumentation: KafkaInstrumentation[];
   onMessageLost: KafkaClientOptions["onMessageLost"];
   onRetry?: (
@@ -132,6 +134,7 @@ async function startLevelConsumer(
   schemaMap: Map<string, SchemaLike>,
   deps: RetryTopicDeps,
   assignmentTimeoutMs?: number,
+  serdeMap?: Map<string, MessageSerde>,
 ): Promise<void> {
   const {
     logger,
@@ -192,12 +195,9 @@ async function startLevelConsumer(
         consumer.resume([{ topic: levelTopic, partitions: [partition] }]);
       }
 
-      const raw = message.value.toString();
-      const parsed = parseJsonMessage(raw, levelTopic, logger);
-      if (parsed === null) {
-        await consumer.commitOffsets([nextOffset]);
-        return;
-      }
+      // Original wire bytes — forwarded losslessly to the next level / DLQ
+      // (binary-safe: never `.toString()`'d, so Avro/Protobuf survives the hop).
+      const rawBytes = message.value;
 
       const currentMaxRetries = parseInt(
         (headers[RETRY_HEADER_MAX_RETRIES] as string | undefined) ??
@@ -208,9 +208,32 @@ async function startLevelConsumer(
         (headers[RETRY_HEADER_ORIGINAL_TOPIC] as string | undefined) ??
         levelTopic.replace(/\.retry\.\d+$/, "");
 
+      // Deserialize via the same serde as the main consumer (per-topic override
+      // keyed by the original topic, otherwise the client-wide default).
+      const serde = serdeMap?.get(originalTopic) ?? deps.serde;
+      let parsed: unknown;
+      try {
+        parsed = await serde.deserialize(rawBytes, {
+          topic: originalTopic,
+          headers,
+          isKey: false,
+        });
+      } catch (err) {
+        logger.error(
+          `Failed to deserialize retry message from topic ${levelTopic}:`,
+          toError(err).stack,
+        );
+        await consumer.commitOffsets([nextOffset]);
+        return;
+      }
+      if (parsed === null) {
+        await consumer.commitOffsets([nextOffset]);
+        return;
+      }
+
       const validated = await validateWithSchema(
         parsed,
-        raw,
+        rawBytes,
         originalTopic,
         schemaMap,
         interceptors,
@@ -278,7 +301,7 @@ async function startLevelConsumer(
         const delay = Math.floor(Math.random() * cap);
         const { topic: rtTopic, messages: rtMsgs } = buildRetryTopicPayload(
           originalTopic,
-          [raw],
+          [rawBytes],
           nextLevel,
           currentMaxRetries,
           delay,
@@ -322,7 +345,7 @@ async function startLevelConsumer(
       } else if (dlq) {
         const { topic: dTopic, messages: dMsgs } = buildDlqPayload(
           originalTopic,
-          raw,
+          rawBytes,
           {
             error,
             // +1 to account for the main consumer's initial attempt before routing.
@@ -422,6 +445,7 @@ export async function startRetryTopicConsumers(
   schemaMap: Map<string, SchemaLike>,
   deps: RetryTopicDeps,
   assignmentTimeoutMs?: number,
+  serdeMap?: Map<string, MessageSerde>,
 ): Promise<string[]> {
   // Pre-allocate to preserve level order in the returned array.
   const levelGroupIds = new Array<string>(retry.maxRetries);
@@ -447,6 +471,7 @@ export async function startRetryTopicConsumers(
         schemaMap,
         deps,
         assignmentTimeoutMs,
+        serdeMap,
       );
 
       levelGroupIds[i] = levelGroupId;

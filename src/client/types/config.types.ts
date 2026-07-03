@@ -31,6 +31,23 @@ export interface KafkaClientOptions {
   /** Client-wide instrumentation hooks (e.g. OTel). Applied to both send and consume paths. */
   instrumentation?: KafkaInstrumentation[];
   /**
+   * Pluggable serialization for message payloads. Defaults to `JsonSerde`
+   * (`JSON.stringify` / `JSON.parse`), which is byte-identical to the client's
+   * historical behaviour.
+   *
+   * A per-topic override declared via `topic(...).serde(mySerde)` wins over
+   * this client-wide serde for that topic. Serde only touches the message
+   * value — envelope headers are unaffected.
+   *
+   * @example
+   * ```ts
+   * const kafka = new KafkaClient(id, group, brokers, {
+   *   serde: new JsonSerde(), // or a custom Avro/Protobuf serde
+   * });
+   * ```
+   */
+  serde?: import("../message/serde").MessageSerde;
+  /**
    * Override the transactional producer ID used by `transaction()`.
    * Defaults to `${clientId}-tx`.
    *

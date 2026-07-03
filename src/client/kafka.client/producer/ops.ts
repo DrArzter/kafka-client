@@ -4,6 +4,7 @@ import {
 } from "../../message/envelope";
 import { KafkaValidationError } from "../../errors";
 import type { SchemaLike, SchemaParseContext } from "../../message/topic";
+import type { MessageSerde } from "../../message/serde";
 import type {
   BatchMessageItem,
   CompressionType,
@@ -11,6 +12,17 @@ import type {
   KafkaLogger,
   MessageHeaders,
 } from "../../types";
+
+/**
+ * Resolve the serde to use for a topic: the per-topic override
+ * (`TopicDescriptor.__serde`) if present, otherwise the client-wide default.
+ */
+export function resolveSerde(
+  topicOrDesc: any,
+  clientSerde: MessageSerde,
+): MessageSerde {
+  return topicOrDesc?.__serde ?? clientSerde;
+}
 
 /**
  * Extract the plain topic name string from either a `TopicDescriptor` object or a raw string.
@@ -109,6 +121,8 @@ export type BuildSendPayloadDeps = {
   strictSchemasEnabled: boolean;
   instrumentation: KafkaInstrumentation[];
   logger: KafkaLogger;
+  /** Client-wide serde; a per-topic `TopicDescriptor.__serde` overrides it. */
+  serde: MessageSerde;
   /** Called once per message to get the next Lamport clock value. Omit to disable clock stamping. */
   nextLamportClock?: () => number;
 };
@@ -121,11 +135,12 @@ export type BuildSendPayloadDeps = {
  * 2. Stamps the Lamport clock header when `deps.nextLamportClock` is provided.
  * 3. Calls `beforeSend` instrumentation hooks so tracing can inject `traceparent` etc.
  * 4. Validates the payload against the attached or registry schema.
- * 5. JSON-serialises the validated value.
+ * 5. Serialises the validated value via the resolved serde (per-topic override
+ *    or the client-wide default; `JsonSerde` by default).
  *
  * @param topicOrDesc Topic descriptor or plain topic name string.
  * @param messages Array of outgoing messages with optional key, headers, and metadata.
- * @param deps Schema registry, strict-mode flag, instrumentation hooks, and Lamport clock factory.
+ * @param deps Schema registry, strict-mode flag, instrumentation hooks, serde, and Lamport clock factory.
  * @param compression Optional compression codec to include in the returned payload object.
  * @returns Kafka producer `send()` payload — `{ topic, messages, compression? }`.
  */
@@ -138,12 +153,13 @@ export async function buildSendPayload(
   topic: string;
   compression?: CompressionType;
   messages: Array<{
-    value: string;
+    value: string | Buffer;
     key: string | null;
     headers: MessageHeaders;
   }>;
 }> {
   const topic = resolveTopicName(topicOrDesc);
+  const serde = resolveSerde(topicOrDesc, deps.serde);
   const builtMessages = await Promise.all(
     messages.map(async (m) => {
       const envelopeHeaders = buildEnvelopeHeaders({
@@ -169,10 +185,14 @@ export async function buildSendPayload(
         version: m.schemaVersion ?? 1,
       };
 
+      // Validate the OBJECT first, then serialize the validated value via the serde.
+      const validated = await validateMessage(topicOrDesc, m.value, deps, sendCtx);
       return {
-        value: JSON.stringify(
-          await validateMessage(topicOrDesc, m.value, deps, sendCtx),
-        ),
+        value: await serde.serialize(validated, {
+          topic,
+          headers: envelopeHeaders,
+          isKey: false,
+        }),
         // Explicit key wins; otherwise fall back to the descriptor's .key()
         // extractor (runs on the original, pre-validation payload).
         key: m.key ?? topicOrDesc?.__key?.(m.value) ?? null,

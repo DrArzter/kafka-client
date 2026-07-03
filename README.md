@@ -62,6 +62,7 @@ Type-safe Kafka client for Node.js. Framework-agnostic core with a first-class N
 - [Lag-based producer throttling](#lag-based-producer-throttling)
 - [Transactional consumer](#transactional-consumer)
 - [Transactional outbox](#transactional-outbox)
+- [Serialization: JSON, Avro, Protobuf](#serialization-json-avro-protobuf)
 - [Schema Registry client](#schema-registry-client)
 - [Admin API](#admin-api)
 - [DLQ CLI](#dlq-cli)
@@ -139,7 +140,8 @@ Safe by default. Configurable when you need it. Escape hatches for when you know
 - **ACL requirements helper** — `describeRequiredAcls()` enumerates every derived topic, companion group, ephemeral group, and transactional id a service needs; render them as `kafka-acls.sh` commands or an MSK IAM policy
 - **Environment configuration** — `kafkaClientConfigFromEnv()`, `consumerOptionsFromEnv()`, and `mergeConsumerOptions()` build config from env vars with `code > env > defaults` precedence
 - **Transactional outbox** — `startOutboxRelay()` publishes rows from a DB outbox table to Kafka inside a transaction; at-least-once with stable `eventId` for downstream dedup
-- **Schema Registry client** — `SchemaRegistryClient` + `registrySchema()` keep locally-defined schemas in lockstep with a Confluent-compatible registry (validation/evolution, not Avro wire-format serde)
+- **Pluggable serialization** — JSON by default; drop in `avroSerde()` / `protobufSerde()` (`@drarzter/kafka-client/serde`) for **Confluent wire-format** Avro/Protobuf and interop with Java/Go via a Schema Registry, client-wide or per-topic
+- **Schema Registry client** — `SchemaRegistryClient` + `registrySchema()` keep locally-defined schemas in lockstep with a Confluent-compatible registry
 - **Static group membership** — `groupInstanceId` (`group.instance.id`) skips rebalance on k8s rolling restarts within `session.timeout.ms`
 - **DLQ CLI** — `kafka-client-dlq ls | peek | replay` for inspecting and re-publishing dead letter queues from the terminal
 
@@ -2149,9 +2151,61 @@ await tx.query(
 
 An `InMemoryOutboxStore` (with `.add()`, `pendingCount`, `publishedCount`) ships for tests and as executable documentation — it is **not** durable, so it does not provide the "same DB transaction as the business write" guarantee that is the whole point of the pattern. A full Postgres reference implementation lives in [`src/integration/postgres-outbox.integration.spec.ts`](./src/integration/postgres-outbox.integration.spec.ts).
 
+## Serialization: JSON, Avro, Protobuf
+
+By default every message value is serialized as JSON — no configuration needed.
+Serialization is a pluggable seam (`MessageSerde`): swap in Avro or Protobuf
+with **Confluent wire format** (`[magic 0x00][4-byte schema id][payload]`) to
+interoperate with Java/Go producers and consumers through a Schema Registry.
+
+```typescript
+import { KafkaClient, topic } from '@drarzter/kafka-client/core';
+import { avroSerde } from '@drarzter/kafka-client/serde';
+import { SchemaRegistryClient } from '@drarzter/kafka-client/core';
+
+const registry = new SchemaRegistryClient({ baseUrl: 'http://localhost:8081' });
+
+const orderSchema = {
+  type: 'record', name: 'Order',
+  fields: [{ name: 'orderId', type: 'string' }, { name: 'amount', type: 'int' }],
+};
+
+// Client-wide: every value goes through Avro.
+const kafka = new KafkaClient('orders-svc', 'orders-grp', ['localhost:9092'], {
+  serde: avroSerde({ registry, schema: orderSchema, autoRegister: true }),
+});
+
+// …or per-topic (JSON elsewhere, Avro just here):
+const OrderCreated = topic('order.created')
+  .serde(avroSerde({ registry, schema: orderSchema, autoRegister: true }))
+  .type<{ orderId: string; amount: number }>();
+```
+
+`protobufSerde({ registry, schema: protoSource, messageType: 'Order', autoRegister: true })`
+works the same way. `avsc` / `protobufjs` are **optional peer dependencies** —
+install only the one you use (`npm i avsc` or `npm i protobufjs`); a clear error
+tells you if it's missing.
+
+**Serde options.** `registry` (required); `schema` (Avro JSON / `.proto` source —
+required to serialize); `subject?` (defaults to Confluent TopicNameStrategy
+`<topic>-value` / `<topic>-key`); `autoRegister?` (register the schema on first
+send to obtain its id — handy in dev; default `false` reads the latest registered
+schema instead). Parsed schemas and id→schema lookups are cached.
+
+**Custom serde.** Implement `MessageSerde` (`serialize(value, ctx) → Buffer | string`,
+`deserialize(data, ctx) → value`) for MessagePack, CBOR, encryption, etc. `JsonSerde`
+is the default and is exported for composition.
+
+**Notes & limits (v0.11):** the envelope headers (`x-event-id`, Lamport clock,
+`traceparent`, …) always travel as Kafka headers regardless of value serde. DLQ,
+retry-topic, duplicates, and delayed-relay forwarding preserve the original wire
+bytes losslessly, so binary formats survive every hop. Avro currently uses the
+writer schema as the reader schema (no reader-schema evolution yet); Protobuf
+supports the top-level message type only; `readSnapshot` remains JSON-only.
+
 ## Schema Registry client
 
-`SchemaRegistryClient` is a minimal, dependency-free client for the Confluent Schema Registry REST API (works with Confluent Platform/Cloud, Redpanda, Karapace, and the AWS Glue SR proxy). Its scope is deliberately narrow: **subject/version management and compatibility checks** — the pieces needed to keep your locally-defined schemas in lockstep with a central registry. Payload (de)serialisation stays JSON as everywhere else in this library; Avro/Protobuf **wire-format framing with magic bytes is intentionally out of scope**.
+`SchemaRegistryClient` is a minimal, dependency-free client for the Confluent Schema Registry REST API (works with Confluent Platform/Cloud, Redpanda, Karapace, and the AWS Glue SR proxy). Its scope is **subject/version management, compatibility checks, and id→schema lookups** — used both to keep your locally-defined schemas in lockstep with a central registry and as the backing lookup for the Avro/Protobuf serdes (see [Serialization: JSON, Avro, Protobuf](#serialization-json-avro-protobuf)).
 
 ```typescript
 import { SchemaRegistryClient } from '@drarzter/kafka-client/core';

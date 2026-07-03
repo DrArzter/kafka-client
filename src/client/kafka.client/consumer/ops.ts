@@ -1,5 +1,6 @@
 import type { IConsumer, KafkaTransport } from "../../transport/transport.interface";
 import type { SchemaLike } from "../../message/topic";
+import type { MessageSerde } from "../../message/serde";
 import type { KafkaClientOptions, KafkaLogger } from "../../types";
 import { resolveTopicName } from "../producer/ops";
 
@@ -179,4 +180,27 @@ export function buildSchemaMap(
     }
   }
   return schemaMap;
+}
+
+/**
+ * Build a topic → serde map from per-topic `TopicDescriptor.__serde` overrides.
+ *
+ * Only descriptors carrying an explicit `.serde()` contribute an entry; plain
+ * string topics (and descriptors without an override) fall back to the
+ * client-wide serde at deserialize time. Returns `undefined` when no topic has
+ * an override, so the common JSON-default path allocates nothing.
+ *
+ * @param topics Array of topic names or `TopicDescriptor` objects.
+ * @returns A topic → serde map, or `undefined` when there are no overrides.
+ */
+export function buildSerdeMap(
+  topics: any[],
+): Map<string, MessageSerde> | undefined {
+  let serdeMap: Map<string, MessageSerde> | undefined;
+  for (const t of topics) {
+    if (t?.__serde) {
+      (serdeMap ??= new Map()).set(resolveTopicName(t), t.__serde);
+    }
+  }
+  return serdeMap;
 }

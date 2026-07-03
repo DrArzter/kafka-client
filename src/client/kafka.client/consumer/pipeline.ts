@@ -60,7 +60,7 @@ export function parseJsonMessage(
  */
 export async function validateWithSchema<T extends TopicMapConstraint<T>>(
   message: any,
-  raw: string,
+  raw: Buffer | string,
   topic: string,
   schemaMap: Map<string, SchemaLike>,
   interceptors: ConsumerInterceptor<T>[],
@@ -137,11 +137,11 @@ export interface DlqMetadata {
 /** Build the DLQ send payload without sending it. Used by sendToDlq and EOS routing. */
 export function buildDlqPayload(
   topic: string,
-  rawMessage: string,
+  rawMessage: Buffer | string,
   meta?: DlqMetadata,
 ): {
   topic: string;
-  messages: Array<{ value: string; headers: MessageHeaders }>;
+  messages: Array<{ value: Buffer | string; headers: MessageHeaders }>;
 } {
   const dlqTopic = `${topic}.dlq`;
   const headers: MessageHeaders = {
@@ -159,13 +159,13 @@ export function buildDlqPayload(
  * Produce a message to `<topic>.dlq`, stamping standard DLQ headers.
  * Falls back to `onMessageLost` when the DLQ produce itself fails.
  * @param topic Original topic the message was consumed from.
- * @param rawMessage Raw JSON string of the original message.
+ * @param rawMessage Original message wire bytes (`Buffer`, or `string` for JSON) — forwarded losslessly.
  * @param deps Logger, producer, and optional `onMessageLost` callback.
  * @param meta Error, attempt count, and original headers to attach as DLQ metadata headers.
  */
 export async function sendToDlq(
   topic: string,
-  rawMessage: string,
+  rawMessage: Buffer | string,
   deps: {
     logger: KafkaLogger;
     producer: Producer;
@@ -203,7 +203,7 @@ export const RETRY_HEADER_ORIGINAL_TOPIC = "x-retry-original-topic";
 /** Build the retry topic send payload without sending it. Used by sendToRetryTopic and EOS routing. */
 export function buildRetryTopicPayload(
   originalTopic: string,
-  rawMessages: string[],
+  rawMessages: Array<Buffer | string>,
   attempt: number,
   maxRetries: number,
   delayMs: number,
@@ -211,7 +211,7 @@ export function buildRetryTopicPayload(
   originalHeaders: MessageHeaders | MessageHeaders[],
 ): {
   topic: string;
-  messages: Array<{ value: string; headers: MessageHeaders }>;
+  messages: Array<{ value: Buffer | string; headers: MessageHeaders }>;
 } {
   const retryTopic = `${originalTopic}.retry.${attempt}`;
   const STRIP = new Set([
@@ -252,7 +252,7 @@ export function buildRetryTopicPayload(
  */
 export async function sendToRetryTopic(
   originalTopic: string,
-  rawMessages: string[],
+  rawMessages: Array<Buffer | string>,
   attempt: number,
   maxRetries: number,
   delayMs: number,
@@ -308,12 +308,12 @@ export interface DuplicateMetadata {
 /** Build the payload for a duplicate message forwarded to a custom topic. */
 export function buildDuplicateTopicPayload(
   sourceTopic: string,
-  rawMessage: string,
+  rawMessage: Buffer | string,
   destinationTopic: string,
   meta?: DuplicateMetadata,
 ): {
   topic: string;
-  messages: Array<{ value: string; headers: MessageHeaders }>;
+  messages: Array<{ value: Buffer | string; headers: MessageHeaders }>;
 } {
   const headers: MessageHeaders = {
     ...(meta?.originalHeaders ?? {}),
@@ -335,7 +335,7 @@ export function buildDuplicateTopicPayload(
  */
 export async function sendToDuplicatesTopic(
   sourceTopic: string,
-  rawMessage: string,
+  rawMessage: Buffer | string,
   destinationTopic: string,
   deps: { logger: KafkaLogger; producer: Producer },
   meta?: DuplicateMetadata,
@@ -466,7 +466,8 @@ export async function notifyInterceptorsOnError<
  */
 export interface ExecuteWithRetryContext<T extends TopicMapConstraint<T>> {
   envelope: EventEnvelope<any> | EventEnvelope<any>[];
-  rawMessages: string[];
+  /** Original message wire bytes (`Buffer`, or `string` for JSON) — forwarded losslessly to DLQ/retry. */
+  rawMessages: Array<Buffer | string>;
   interceptors: ConsumerInterceptor<T>[];
   dlq: boolean;
   retry?: RetryOptions;
@@ -506,7 +507,7 @@ export async function executeWithRetry<T extends TopicMapConstraint<T>>(
      * sends to the retry topic AND commits the source offset atomically.
      */
     eosRouteToRetry?: (
-      rawMessages: string[],
+      rawMessages: Array<Buffer | string>,
       envelopes: EventEnvelope<any>[],
       delay: number,
     ) => Promise<void>;

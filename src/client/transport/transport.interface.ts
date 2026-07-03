@@ -24,7 +24,12 @@ export type ITopicPartitions = { topic: string; partitions: number[] };
 
 /** A single message in a produce request. */
 export type IProducerMessage = {
-  value: string | null;
+  /**
+   * Wire payload. `string` for text serdes (e.g. JSON), `Buffer` for binary
+   * serdes (Avro/Protobuf) and for losslessly re-forwarded messages
+   * (DLQ / retry / duplicates / delayed relay). librdkafka accepts both.
+   */
+  value: string | Buffer | null;
   key?: string | null;
   headers?: Record<string, string | Buffer | string[]>;
 };

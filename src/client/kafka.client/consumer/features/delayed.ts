@@ -115,7 +115,9 @@ export async function startDelayedRelayImpl<T extends TopicMapConstraint<T>>(
           topic: target,
           messages: [
             {
-              value: message.value.toString(),
+              // Forward the ORIGINAL wire bytes unchanged — no re-serialization,
+              // so binary payloads (Avro/Protobuf) are relayed losslessly.
+              value: message.value,
               key: message.key ? message.key.toString() : null,
               headers: forwardHeaders,
             },

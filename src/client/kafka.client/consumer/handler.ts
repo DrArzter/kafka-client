@@ -8,16 +8,18 @@ import {
 } from "../../message/envelope";
 import type { EventEnvelope } from "../../message/envelope";
 import {
-  parseJsonMessage,
   validateWithSchema,
   executeWithRetry,
   sendToDlq,
   sendToDuplicatesTopic,
   buildRetryTopicPayload,
+  toError,
 } from "./pipeline";
 import type { DuplicateMetadata } from "./pipeline";
 import { HEADER_LAMPORT_CLOCK } from "../../message/envelope";
 import type { SchemaLike } from "../../message/topic";
+import type { MessageSerde } from "../../message/serde";
+import { resolveSerde } from "../producer/ops";
 import type {
   BatchMeta,
   ConsumerInterceptor,
@@ -38,6 +40,8 @@ import type {
 export type MessageHandlerDeps = {
   logger: KafkaLogger;
   producer: Producer;
+  /** Client-wide serde used to deserialize consumed values; per-topic override wins. */
+  serde: MessageSerde;
   instrumentation: KafkaInstrumentation[];
   onMessageLost: KafkaClientOptions["onMessageLost"];
   onTtlExpired?: KafkaClientOptions["onTtlExpired"];
@@ -72,6 +76,8 @@ export type DeduplicationContext = {
  */
 export type EachMessageOpts = {
   schemaMap: Map<string, SchemaLike>;
+  /** Per-topic serde overrides (from `TopicDescriptor.__serde`); falls back to `deps.serde`. */
+  serdeMap?: Map<string, MessageSerde>;
   handleMessage: (envelope: EventEnvelope<any>) => Promise<void>;
   interceptors: ConsumerInterceptor<any>[];
   dlq: boolean;
@@ -115,7 +121,7 @@ export type EachMessageOpts = {
  */
 async function applyDeduplication(
   envelope: EventEnvelope<any>,
-  raw: string,
+  raw: Buffer | string,
   dedup: DeduplicationContext,
   dlq: boolean,
   deps: MessageHandlerDeps,
@@ -186,7 +192,14 @@ async function applyDeduplication(
   return false;
 }
 
-/** Parse, validate and extract an envelope from a single raw Kafka message. Returns null to skip. */
+/**
+ * Parse, validate and extract an envelope from a single raw Kafka message. Returns null to skip.
+ *
+ * Deserializes the value via the resolved serde (per-topic override from
+ * `serdeMap` if present, otherwise `deps.serde`), passing the raw `Buffer` — NOT
+ * a `.toString()` — so binary serdes (Avro/Protobuf) receive the exact wire
+ * bytes. Schema validation then runs on the deserialized object, unchanged.
+ */
 export async function parseSingleMessage(
   message: {
     value: Buffer | null;
@@ -199,20 +212,33 @@ export async function parseSingleMessage(
   interceptors: ConsumerInterceptor<any>[],
   dlq: boolean,
   deps: MessageHandlerDeps,
+  serdeMap?: Map<string, MessageSerde>,
 ): Promise<EventEnvelope<any> | null> {
   if (!message.value) {
     deps.logger.warn(`Received empty message from topic ${topic}`);
     return null;
   }
 
-  const raw = message.value.toString();
-  const parsed = parseJsonMessage(raw, topic, deps.logger);
+  const bytes = message.value;
+  const headers = decodeHeaders(message.headers);
+
+  const serde = serdeMap?.get(topic) ?? deps.serde;
+  let parsed: unknown;
+  try {
+    parsed = await serde.deserialize(bytes, { topic, headers, isKey: false });
+  } catch (error) {
+    deps.logger.error(
+      `Failed to deserialize message from topic ${topic}:`,
+      toError(error).stack,
+    );
+    return null;
+  }
   if (parsed === null) return null;
 
-  const headers = decodeHeaders(message.headers);
   const validated = await validateWithSchema(
     parsed,
-    raw,
+    // Forward the ORIGINAL bytes to DLQ on validation failure (binary-safe).
+    bytes,
     topic,
     schemaMap,
     interceptors,
@@ -248,6 +274,7 @@ export async function handleEachMessage(
   const { topic, partition, message } = payload;
   const {
     schemaMap,
+    serdeMap,
     handleMessage,
     interceptors,
     dlq,
@@ -256,6 +283,10 @@ export async function handleEachMessage(
     timeoutMs,
     wrapWithTimeout,
   } = opts;
+
+  // Original wire bytes — forwarded losslessly to DLQ/retry/duplicates so binary
+  // serdes (Avro/Protobuf) are never corrupted by a `.toString()` round-trip.
+  const rawBytes: Buffer | null = message.value;
 
   // Build EOS callbacks when the main consumer runs with autoCommit: false
   // (activated by retryTopics: true in startConsumer).
@@ -275,7 +306,7 @@ export async function handleEachMessage(
   const eosRouteToRetry =
     eos && retry
       ? async (
-          rawMsgs: string[],
+          rawMsgs: Array<Buffer | string>,
           envelopes: EventEnvelope<any>[],
           delay: number,
         ) => {
@@ -317,6 +348,7 @@ export async function handleEachMessage(
     interceptors,
     dlq,
     deps,
+    serdeMap,
   );
   if (envelope === null) {
     await commitOffset?.();
@@ -326,7 +358,7 @@ export async function handleEachMessage(
   if (opts.deduplication) {
     const isDuplicate = await applyDeduplication(
       envelope,
-      message.value!.toString(),
+      rawBytes!,
       opts.deduplication,
       dlq,
       deps,
@@ -344,7 +376,7 @@ export async function handleEachMessage(
         `[KafkaClient] TTL expired on ${topic}: age ${ageMs}ms > ${opts.messageTtlMs}ms`,
       );
       if (dlq) {
-        await sendToDlq(topic, message.value!.toString(), deps, {
+        await sendToDlq(topic, rawBytes!, deps, {
           error: new Error(`Message TTL expired: age ${ageMs}ms`),
           attempt: 0,
           originalHeaders: envelope.headers,
@@ -378,7 +410,7 @@ export async function handleEachMessage(
     },
     {
       envelope,
-      rawMessages: [message.value!.toString()],
+      rawMessages: [rawBytes!],
       interceptors,
       dlq,
       retry,
@@ -394,6 +426,8 @@ export async function handleEachMessage(
  */
 export type EachBatchOpts = {
   schemaMap: Map<string, SchemaLike>;
+  /** Per-topic serde overrides (from `TopicDescriptor.__serde`); falls back to `deps.serde`. */
+  serdeMap?: Map<string, MessageSerde>;
   handleBatch: (
     envelopes: EventEnvelope<any>[],
     meta: BatchMeta,
@@ -460,6 +494,7 @@ export async function handleEachBatch(
   const { batch, heartbeat, resolveOffset, commitOffsetsIfNecessary } = payload;
   const {
     schemaMap,
+    serdeMap,
     handleBatch,
     interceptors,
     dlq,
@@ -496,7 +531,7 @@ export async function handleEachBatch(
   const eosRouteToRetry =
     eos && retry && batchNextOffsetStr
       ? async (
-          rawMsgs: string[],
+          rawMsgs: Array<Buffer | string>,
           envelopes: EventEnvelope<any>[],
           delay: number,
         ) => {
@@ -533,9 +568,11 @@ export async function handleEachBatch(
       : undefined;
 
   const envelopes: EventEnvelope<any>[] = [];
-  const rawMessages: string[] = [];
+  const rawMessages: Array<Buffer | string> = [];
 
   for (const message of batch.messages) {
+    // Original wire bytes for this message — forwarded losslessly (binary-safe).
+    const rawBytes: Buffer | null = message.value;
     const envelope = await parseSingleMessage(
       message,
       batch.topic,
@@ -544,14 +581,14 @@ export async function handleEachBatch(
       interceptors,
       dlq,
       deps,
+      serdeMap,
     );
     if (envelope === null) continue;
 
     if (opts.deduplication) {
-      const raw = message.value!.toString();
       const isDuplicate = await applyDeduplication(
         envelope,
-        raw,
+        rawBytes!,
         opts.deduplication,
         dlq,
         deps,
@@ -566,7 +603,7 @@ export async function handleEachBatch(
           `[KafkaClient] TTL expired on ${batch.topic}: age ${ageMs}ms > ${opts.messageTtlMs}ms`,
         );
         if (dlq) {
-          await sendToDlq(batch.topic, message.value!.toString(), deps, {
+          await sendToDlq(batch.topic, rawBytes!, deps, {
             error: new Error(`Message TTL expired: age ${ageMs}ms`),
             attempt: 0,
             originalHeaders: envelope.headers,
@@ -586,7 +623,7 @@ export async function handleEachBatch(
     }
 
     envelopes.push(envelope);
-    rawMessages.push(message.value!.toString());
+    rawMessages.push(rawBytes!);
   }
 
   if (envelopes.length === 0) {
