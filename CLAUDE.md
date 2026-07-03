@@ -28,6 +28,8 @@ Type-safe Kafka client wrapper for NestJS built on `@confluentinc/kafka-javascri
 
 `src/index.ts` re-exports everything from `core.ts` plus the NestJS layer (`KafkaModule`, `KafkaExplorer`, `KafkaHealthIndicator`, decorators, constants).
 
+`core.ts` also exports the transport seam: the `KafkaTransport` interface family (`IProducer`, `IConsumer`, `IAdmin`, `ITransaction`, payload types) and the reference implementation `ConfluentTransport` — downstream apps can construct a transport directly for low-level admin access (e.g. per-partition watermarks) instead of deep-importing the raw driver.
+
 ---
 
 ## Source tree

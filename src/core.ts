@@ -1,4 +1,6 @@
 export * from "./client/kafka.client";
+export * from "./client/transport/transport.interface";
+export { ConfluentTransport } from "./client/transport/confluent.transport";
 export * from "./client/message/topic";
 export * from "./client/message/versioned-schema";
 export * from "./client/message/schema-registry";

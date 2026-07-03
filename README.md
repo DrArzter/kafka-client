@@ -1322,6 +1322,20 @@ Passed to `KafkaModule.register()` or returned from `registerAsync()` factory:
 | `lagThrottle.maxWaitMs` | `30000` | Max time (ms) a send waits while throttled before proceeding anyway (best-effort, not hard back-pressure) |
 | `transport` | `ConfluentTransport` | Custom `KafkaTransport` implementation — target an alternative broker library or inject a deterministic fake in tests |
 
+> **Advanced — direct transport access.** `ConfluentTransport` and the full
+> `KafkaTransport` interface family (`IProducer`, `IConsumer`, `IAdmin`, …) are
+> exported from `@drarzter/kafka-client/core`. When you need low-level admin
+> operations the facade does not expose (e.g. per-partition watermarks), build a
+> transport instead of deep-importing the raw driver:
+>
+> ```typescript
+> import { ConfluentTransport } from '@drarzter/kafka-client/core';
+>
+> const admin = new ConfluentTransport('ops-cli', brokers).admin();
+> await admin.connect();
+> const watermarks = await admin.fetchTopicOffsets('orders'); // [{ partition, low, high }]
+> ```
+
 **Module-scoped** (default) — import `KafkaModule` in each module that needs it:
 
 ```typescript
